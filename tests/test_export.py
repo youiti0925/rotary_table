@@ -52,6 +52,26 @@ class TestExport(unittest.TestCase):
         self.assertTrue(rows["ウォーム バックラッシ 判定"].startswith("NG"))
         self.assertTrue(rows["総合（真の最大最小） 判定"].startswith("OK"))
 
+    def test_misc_rows_show_manual_correction(self):
+        seq = make_finished_sequence()
+        summary, _ = summarize(seq.data, backlash_correction=-2.5)
+        rows = dict(result_rows(summary))
+        self.assertEqual(rows["バックラッシ手動補正"], '-2.50"')
+        # 補正なしなら行は出ない
+        summary0, _ = summarize(seq.data)
+        self.assertNotIn("バックラッシ手動補正", dict(result_rows(summary0)))
+
+    def test_judgement_uses_corrected_backlash(self):
+        seq = make_finished_sequence()  # 補正なしバックラッシ1.5"
+        spec_map = dict(wheel_backlash=[dict(temp_min=15.0, temp_max=25.0, min=0.0, max=10.0)])
+        summary, _ = summarize(seq.data)
+        self.assertTrue(judgement_texts(summary, 20.0, spec_map)["wheel_backlash"].startswith("OK"))
+        # +10"の補正で11.5"になり規格10"を超える → NG
+        corrected, _ = summarize(seq.data, backlash_correction=10.0)
+        self.assertTrue(
+            judgement_texts(corrected, 20.0, spec_map)["wheel_backlash"].startswith("NG")
+        )
+
     def test_judgement_texts(self):
         seq = make_finished_sequence()  # バックラッシ = CCW誤差2.5"-CW誤差1.0" = 1.5"
         summary, _ = summarize(seq.data)
@@ -123,6 +143,8 @@ class TestLoadCsv(unittest.TestCase):
             "ウォーム刻み[°]": 1.0,
             "ウォーム範囲[°]": 2.0,
             "ウォーム開始[°]": 0.0,
+            "コメント": "試運転後の再測定。南側ベアリング交換済み",
+            "バックラッシ補正[秒]": 1.5,
         }
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "12345.csv")
@@ -132,6 +154,8 @@ class TestLoadCsv(unittest.TestCase):
         self.assertEqual(loaded_meta["型式"], "RWE-200")
         self.assertEqual(loaded_meta["機番"], "12345")
         self.assertEqual(float(loaded_meta["ホイール刻み[°]"]), 90.0)
+        self.assertEqual(loaded_meta["コメント"], "試運転後の再測定。南側ベアリング交換済み")
+        self.assertEqual(float(loaded_meta["バックラッシ補正[秒]"]), 1.5)
         for key in seq.data:
             self.assertEqual(loaded_data[key][0], seq.data[key][0])
             for orig, back in zip(seq.data[key][1], loaded_data[key][1]):

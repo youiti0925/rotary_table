@@ -95,6 +95,8 @@ def misc_rows(summary, judgements=None):
     """
     judgements = judgements or {}
     rows = []
+    if "backlash_correction" in summary:
+        rows.append(("バックラッシ手動補正", f'{summary["backlash_correction"]:+.2f}"'))
     for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
         key = f"{grp}_backlash"
         if key in summary:

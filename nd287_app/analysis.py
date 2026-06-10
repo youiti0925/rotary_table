@@ -111,10 +111,14 @@ def judge_minmax(value_min, value_max, temp_c, spec):
     return ok, band
 
 
-def summarize(data):
+def summarize(data, backlash_correction=0.0):
     """測定データ一式から結果サマリを作る。
 
     data: {"wheel_cw": (targets, measured), "wheel_ccw": ..., "worm_cw": ..., "worm_ccw": ...}
+    backlash_correction: バックラッシ手動補正[秒]。実際のメカ的な隙間が測定結果と
+        差がある場合に、調べた差分（測定結果に対して何秒多いか少ないか）を
+        ホイール・ウォーム両方のバックラッシMIN/MAXに加算する。合否判定も
+        補正後の値で行われる。生データ・偏差・真の最大最小には影響しない。
     返り値: (summary dict, 系列ごとの (targets, deviations) dict)
     """
     out = {}
@@ -131,7 +135,11 @@ def summarize(data):
         if cw and ccw:
             bl = backlash(cw[0], cw[1], ccw[0], ccw[1])
             if bl is not None:
-                out[f"{grp}_backlash"] = dict(min=bl[0], max=bl[1])
+                out[f"{grp}_backlash"] = dict(
+                    min=bl[0] + backlash_correction, max=bl[1] + backlash_correction
+                )
+    if backlash_correction:
+        out["backlash_correction"] = float(backlash_correction)
 
     out["true"] = {}
     for dirn in ("cw", "ccw"):

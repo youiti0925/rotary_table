@@ -51,6 +51,8 @@ META_KEYS = {
     "date": "日付",
     "operator": "名前",
     "temperature": "測定温度[°C]",
+    "comment": "コメント",
+    "blcorr": "バックラッシ補正[秒]",
 }
 
 SERIES_METRIC_HEADERS = ["系列", "精度PP", "単一誤差", "隣接誤差", "傾き"]
@@ -213,6 +215,28 @@ class MainWindow(QtWidgets.QMainWindow):
         row2.addWidget(b_load)
         row2.addWidget(b_settings)
 
+        # --- 3段目: コメントとバックラッシ手動補正 ---
+        row3 = QtWidgets.QHBoxLayout()
+        self.e_comment = QtWidgets.QLineEdit()
+        self.e_comment.setPlaceholderText("コメント（任意。セーブ時に保存される）")
+        self.e_blcorr = QtWidgets.QDoubleSpinBox()
+        self.e_blcorr.setRange(-999.0, 999.0)
+        self.e_blcorr.setDecimals(2)
+        self.e_blcorr.setSuffix(' "')
+        self.e_blcorr.setToolTip(
+            "実際のメカ的な隙間が測定結果と差がある場合の補正値。\n"
+            "測定結果に対して何秒多いか（+）少ないか（−）を入力して補正適用"
+        )
+        self.b_corr = QtWidgets.QPushButton("補正適用")
+        self.b_corr.setEnabled(False)
+        self.b_corr.clicked.connect(self.apply_correction)
+        self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
+        row3.addWidget(QtWidgets.QLabel("コメント"))
+        row3.addWidget(self.e_comment, 1)
+        row3.addWidget(QtWidgets.QLabel("バックラッシ補正"))
+        row3.addWidget(self.e_blcorr)
+        row3.addWidget(self.b_corr)
+
         # --- ガイドと受信値 ---
         self.guide = QtWidgets.QLabel("―")
         self.guide.setStyleSheet("font-size:22px; font-family:monospace; padding:4px;")
@@ -249,6 +273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         v = QtWidgets.QVBoxLayout(container)
         v.addLayout(row1)
         v.addLayout(row2)
+        v.addLayout(row3)
         v.addWidget(self.guide)
         v.addWidget(self.live)
         v.addWidget(self.plot, 1)
@@ -345,6 +370,9 @@ class MainWindow(QtWidgets.QMainWindow):
             curve.setData([], [])
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
+        self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(0.0)
+        self.b_corr.setEnabled(False)
         self.b_take.setEnabled(True)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
@@ -406,10 +434,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table_series.setRowCount(0)
             self.table_misc.setRowCount(0)
             self.b_save.setEnabled(False)
+            self.b_corr.setEnabled(False)
             self.b_take.setEnabled(True)
             self.b_undo.setEnabled(self.seq.idx > 0)
             self.redraw()
             self.show_guide()
+
+    def apply_correction(self):
+        """バックラッシ手動補正を確定し、結果と合否判定を再計算する"""
+        self.applied_blcorr = self.e_blcorr.value()
+        self.finish()
+        if self.applied_blcorr:
+            self.statusBar().showMessage(
+                f"バックラッシ補正 {self.applied_blcorr:+.2f}\" を適用しました"
+            )
+        else:
+            self.statusBar().showMessage("バックラッシ補正を解除しました（補正0）")
 
     # ----- 表示 -----
 
@@ -430,7 +470,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def finish(self):
         self.b_take.setEnabled(False)
         self.b_save.setEnabled(True)
-        summary, _ = summarize(self.data)
+        self.b_corr.setEnabled(True)
+        summary, _ = summarize(self.data, self.applied_blcorr)
 
         # 左表: 系列ごとの 精度PP・単一誤差・隣接誤差・傾き
         series = [k for k in SERIES_LABELS if k in summary]
@@ -469,6 +510,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not machine_no:
             QtWidgets.QMessageBox.warning(self, "セーブ", "機番を入力してください")
             return
+        if self.e_blcorr.value() != self.applied_blcorr:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "セーブ",
+                f"バックラッシ補正 {self.e_blcorr.value():+.2f}\" が未適用です。"
+                "適用してからセーブしますか？",
+            )
+            if answer == QtWidgets.QMessageBox.Yes:
+                self.apply_correction()
         root = resolve_save_root(self.settings)
         path = build_save_path(root, self.e_model.text(), machine_no)
         if path.exists():
@@ -487,8 +537,10 @@ class MainWindow(QtWidgets.QMainWindow):
             META_KEYS["worm_pitch"]: self.e_worm.value(),
             META_KEYS["worm_range"]: self.e_range.value(),
             META_KEYS["worm_start"]: self.e_start.value(),
+            META_KEYS["comment"]: self.e_comment.text().strip(),
+            META_KEYS["blcorr"]: self.applied_blcorr,
         }
-        summary, _ = summarize(self.data)
+        summary, _ = summarize(self.data, self.applied_blcorr)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             save_csv(path, self.data, summary, meta, self.current_judgements(summary))
@@ -517,6 +569,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_machine.setText(meta.get("機番", ""))
         self.e_operator.setText(meta.get(META_KEYS["operator"], ""))
         self.e_temp.setText(meta.get(META_KEYS["temperature"], ""))
+        self.e_comment.setText(meta.get(META_KEYS["comment"], ""))
+        try:
+            self.applied_blcorr = float(meta.get(META_KEYS["blcorr"], 0.0))
+        except ValueError:
+            self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(self.applied_blcorr)
         date = QtCore.QDate.fromString(meta.get(META_KEYS["date"], ""), "yyyy-MM-dd")
         if date.isValid():
             self.e_date.setDate(date)

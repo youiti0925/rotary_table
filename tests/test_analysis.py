@@ -144,6 +144,33 @@ class TestSequence(unittest.TestCase):
 
 
 class TestSummarize(unittest.TestCase):
+    @staticmethod
+    def run_sequence():
+        # CW誤差1"・CCW誤差2"の一定オフセット → バックラッシ1.0"
+        seq = Sequence(wheel_pitch=90.0, worm_pitch=1.0, worm_range=2.0)
+        while not seq.done():
+            key, target, direction = seq.current()
+            err = 1.0 / 3600 if direction > 0 else 2.0 / 3600
+            seq.record(target + err)
+        return seq
+
+    def test_backlash_manual_correction(self):
+        seq = self.run_sequence()
+        summary, _ = summarize(seq.data, backlash_correction=3.0)
+        # 補正なしバックラッシ1.0" + 補正3.0" = 4.0"（ホイール・ウォーム両方）
+        self.assertAlmostEqual(summary["wheel_backlash"]["min"], 4.0, places=6)
+        self.assertAlmostEqual(summary["wheel_backlash"]["max"], 4.0, places=6)
+        self.assertAlmostEqual(summary["worm_backlash"]["max"], 4.0, places=6)
+        self.assertAlmostEqual(summary["backlash_correction"], 3.0)
+        # マイナス補正（実際の隙間が測定結果より少ない）
+        summary_m, _ = summarize(seq.data, backlash_correction=-0.5)
+        self.assertAlmostEqual(summary_m["wheel_backlash"]["min"], 0.5, places=6)
+        # 真の最大最小は補正の影響を受けない
+        self.assertAlmostEqual(summary["true"]["cw"]["true_max"], 2.0, places=6)
+        # 補正0なら補正キーは出ない
+        summary0, _ = summarize(seq.data)
+        self.assertNotIn("backlash_correction", summary0)
+
     def test_full_run(self):
         # 完走シーケンスを模擬データで埋めてサマリ構造を確認
         seq = Sequence(wheel_pitch=90.0, worm_pitch=1.0, worm_range=2.0)

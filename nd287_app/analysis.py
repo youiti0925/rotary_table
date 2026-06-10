@@ -3,13 +3,15 @@
 
 偏差 = (測定値 - 指令値) を秒["]に換算して評価する。
   - 精度PP   : 偏差の最大値 - 最小値
-  - 単一誤差 : 1ポイントの偏差の絶対値の最大
-  - 隣接誤差 : 隣り合う割出ポイント間の偏差差の最大値
+  - 単一誤差 : その点から次の点へ移ったときに発生した誤差（偏差の1ステップ差）の最大
+  - 隣接誤差 : 連続する2つの単一誤差が逆向きに重なってできる突起の最大。
+               例: ある点への移動誤差が +4"、次の点への移動誤差が -6" なら
+               合わせて 10" の突起 → 隣接誤差 10"
   - 傾き     : 開始角度と終了角度の偏差の差（本来戻ってくるところに
                戻ってこないときの数字。測定順の最後 - 最初）
   - バックラッシ : 同一指令角度での CCW偏差 - CW偏差。その MIN / MAX
-  - バックラッシ合否 : 測定温度に応じた規格（ホイールが合金製のため
-               熱膨張でバックラッシが変わる）と突き合わせて判定
+  - 温度別合否 : 測定温度に応じた規格と突き合わせて判定。ホイールが合金製のため
+               熱膨張でホイール・ウォーム・総合のいずれも温度で変わる
   - 真の最大最小 : ホイール偏差とウォーム偏差が最悪方向に重なった合成値（仮実装）
 """
 
@@ -29,16 +31,25 @@ def pp(dev):
     return float(dev.max() - dev.min()) if len(dev) else 0.0
 
 
-def single(dev):
-    """単一誤差[秒] = 偏差の絶対値の最大"""
+def step_errors(dev):
+    """各ステップの単一誤差[秒] = その点から次の点へ移ったときに発生した誤差"""
     dev = np.asarray(dev, dtype=float)
-    return float(np.abs(dev).max()) if len(dev) else 0.0
+    return np.diff(dev)
+
+
+def single(dev):
+    """単一誤差[秒] = 1ステップで発生した誤差の絶対値の最大"""
+    s = step_errors(dev)
+    return float(np.abs(s).max()) if len(s) else 0.0
 
 
 def adjacent(dev):
-    """最大隣接誤差[秒] = 隣接ポイント間の偏差差の最大値"""
-    dev = np.asarray(dev, dtype=float)
-    return float(np.abs(np.diff(dev)).max()) if len(dev) >= 2 else 0.0
+    """隣接誤差[秒] = 連続する2つの単一誤差が逆向きに重なってできる突起の最大
+
+    例: +4" の次のステップが -6" → |+4 - (-6)| = 10" の突起。
+    """
+    s = step_errors(dev)
+    return float(np.abs(np.diff(s)).max()) if len(s) >= 2 else 0.0
 
 
 def slope(dev):
@@ -75,8 +86,8 @@ def true_min_max(wheel_dev, worm_dev):
     return float(w.min() + v.min()), float(w.max() + v.max())
 
 
-def backlash_band_for_temp(spec, temp_c):
-    """温度に該当するバックラッシ規格帯を返す。無ければ None。
+def band_for_temp(spec, temp_c):
+    """温度に該当する規格帯を返す。無ければ None。
 
     spec: [{"temp_min":…, "temp_max":…, "min":…, "max":…}, …]
     """
@@ -86,16 +97,17 @@ def backlash_band_for_temp(spec, temp_c):
     return None
 
 
-def judge_backlash(bl_min, bl_max, temp_c, spec):
-    """測定温度に応じた規格でバックラッシを合否判定する。
+def judge_minmax(value_min, value_max, temp_c, spec):
+    """測定温度に応じた規格で MIN/MAX の組を合否判定する。
 
+    バックラッシ（ホイール・ウォーム）にも総合（真の最大最小）にも使う。
     返り値: (合否 True/False, 使用した規格帯)。温度に該当する規格が
     無ければ (None, None)。
     """
-    band = backlash_band_for_temp(spec, temp_c)
+    band = band_for_temp(spec, temp_c)
     if band is None:
         return None, None
-    ok = (band["min"] <= bl_min) and (bl_max <= band["max"])
+    ok = (band["min"] <= value_min) and (value_max <= band["max"])
     return ok, band
 
 

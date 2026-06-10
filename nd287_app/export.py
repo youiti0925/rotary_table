@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .analysis import deviation_sec, judge_backlash
+from .analysis import deviation_sec, judge_minmax
 from .sequence import SERIES_KEYS, SERIES_LABELS
 
 RESULT_LABELS = {
@@ -42,17 +42,37 @@ def build_save_path(root, model: str, machine_no: str) -> Path:
     return Path(root) / model_folder(model) / f"{sanitize_filename(machine_no)}.csv"
 
 
-def backlash_judgement_text(summary, temp_c, spec):
-    """測定温度に応じたホイールバックラッシの合否判定文。判定できなければ None。"""
-    if "wheel_backlash" not in summary or temp_c is None:
-        return None
-    ok, band = judge_backlash(
-        summary["wheel_backlash"]["min"], summary["wheel_backlash"]["max"], temp_c, spec
-    )
-    if ok is None:
-        return f"判定不可（{temp_c:g}°Cの規格が未設定）"
-    verdict = "OK" if ok else "NG"
-    return f'{verdict}（規格 {band["min"]:g}〜{band["max"]:g}" @ {temp_c:g}°C）'
+def judgement_texts(summary, temp_c, spec_map):
+    """測定温度に応じた合否判定文を項目ごとに作る。
+
+    spec_map: settings.json の judgement_spec
+              （wheel_backlash / worm_backlash / true の3項目、空なら判定しない）
+    返り値: {"wheel_backlash": "OK（…）", "worm_backlash": …, "true": …}
+    """
+    out = {}
+    if temp_c is None or not spec_map:
+        return out
+
+    def fmt(ok, band):
+        if ok is None:
+            return f"判定不可（{temp_c:g}°Cの規格が未設定）"
+        verdict = "OK" if ok else "NG"
+        return f'{verdict}（規格 {band["min"]:g}〜{band["max"]:g}" @ {temp_c:g}°C）'
+
+    for key in ("wheel_backlash", "worm_backlash"):
+        if key in summary and spec_map.get(key):
+            ok, band = judge_minmax(
+                summary[key]["min"], summary[key]["max"], temp_c, spec_map[key]
+            )
+            out[key] = fmt(ok, band)
+    true = summary.get("true") or {}
+    if true and spec_map.get("true"):
+        # CW/CCW合わせた最悪値（真の最小の最小・真の最大の最大）で総合判定
+        tmin = min(v["true_min"] for v in true.values())
+        tmax = max(v["true_max"] for v in true.values())
+        ok, band = judge_minmax(tmin, tmax, temp_c, spec_map["true"])
+        out["true"] = fmt(ok, band)
+    return out
 
 
 def series_rows(summary):
@@ -68,33 +88,39 @@ def series_rows(summary):
     return rows
 
 
-def misc_rows(summary, judgement_text=None):
-    """バックラッシ・合否判定・真の最大最小 → (項目, 値) 行リスト"""
+def misc_rows(summary, judgements=None):
+    """バックラッシ・合否判定・真の最大最小 → (項目, 値) 行リスト
+
+    judgements: judgement_texts() の返り値
+    """
+    judgements = judgements or {}
     rows = []
     for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
         key = f"{grp}_backlash"
         if key in summary:
             rows.append((f"{label} バックラッシ MIN", f'{summary[key]["min"]:.2f}"'))
             rows.append((f"{label} バックラッシ MAX", f'{summary[key]["max"]:.2f}"'))
-    if judgement_text is not None:
-        rows.append(("ホイール バックラッシ 判定", judgement_text))
+            if key in judgements:
+                rows.append((f"{label} バックラッシ 判定", judgements[key]))
     for dirn, label in (("cw", "CW"), ("ccw", "CCW")):
         if dirn in summary.get("true", {}):
             rows.append((f"真の最大 ({label})", f'{summary["true"][dirn]["true_max"]:.2f}"'))
             rows.append((f"真の最小 ({label})", f'{summary["true"][dirn]["true_min"]:.2f}"'))
+    if "true" in judgements:
+        rows.append(("総合（真の最大最小） 判定", judgements["true"]))
     return rows
 
 
-def result_rows(summary, judgement_text=None):
+def result_rows(summary, judgements=None):
     """結果サマリ全体 → 表示・保存用の (項目, 値) 行リスト"""
-    return series_rows(summary) + misc_rows(summary, judgement_text)
+    return series_rows(summary) + misc_rows(summary, judgements)
 
 
-def save_csv(path, data, summary, meta=None, judgement_text=None):
+def save_csv(path, data, summary, meta=None, judgements=None):
     """測定生データと結果サマリを1つのCSVに保存する。
 
     meta: 型式・機番・日付・名前・測定温度・測定条件などの dict（ロード時に復元される）
-    judgement_text: バックラッシ合否の判定文（結果サマリに含めて保存）
+    judgements: judgement_texts() の返り値（結果サマリに含めて保存）
     """
     with open(path, "w", newline="", encoding="cp932", errors="replace") as f:
         w = csv.writer(f)
@@ -113,7 +139,7 @@ def save_csv(path, data, summary, meta=None, judgement_text=None):
                 w.writerow([SERIES_LABELS[key], f"{t:.4f}", f"{m:.6f}", f"{d:.2f}"])
         w.writerow([])
         w.writerow(["項目", "値"])
-        for item, value in result_rows(summary, judgement_text):
+        for item, value in result_rows(summary, judgements):
             w.writerow([item, value])
 
 

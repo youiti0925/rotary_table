@@ -14,14 +14,27 @@ DEFAULTS = dict(
     baudrate=9600,
     parity="E",        # N / E / O
     save_root="測定データ",  # セーブ先ルート（相対ならアプリフォルダ基準）
-    # バックラッシの温度別規格 [秒]。ホイールが合金製のため熱膨張で
-    # バックラッシが変わり、温度帯ごとに合否規格が異なる。
+    # 温度別の合否規格 [秒]。ホイールが合金製のため熱膨張で、ホイール・
+    # ウォーム・総合（真の最大最小）のいずれも温度で変わり、温度帯ごとに
+    # 規格が異なる。規格が空の項目は判定しない。
     # ※下記は仮の値。実際の規格に合わせて settings.json で書き換えること。
-    backlash_spec=[
-        dict(temp_min=0.0, temp_max=15.0, min=0.0, max=30.0),
-        dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0),
-        dict(temp_min=25.0, temp_max=40.0, min=0.0, max=20.0),
-    ],
+    judgement_spec=dict(
+        wheel_backlash=[
+            dict(temp_min=0.0, temp_max=15.0, min=0.0, max=30.0),
+            dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0),
+            dict(temp_min=25.0, temp_max=40.0, min=0.0, max=20.0),
+        ],
+        worm_backlash=[
+            dict(temp_min=0.0, temp_max=15.0, min=0.0, max=20.0),
+            dict(temp_min=15.0, temp_max=25.0, min=0.0, max=15.0),
+            dict(temp_min=25.0, temp_max=40.0, min=0.0, max=12.0),
+        ],
+        true=[
+            dict(temp_min=0.0, temp_max=15.0, min=-30.0, max=30.0),
+            dict(temp_min=15.0, temp_max=25.0, min=-25.0, max=25.0),
+            dict(temp_min=25.0, temp_max=40.0, min=-20.0, max=20.0),
+        ],
+    ),
 )
 
 

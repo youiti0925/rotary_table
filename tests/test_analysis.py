@@ -4,9 +4,9 @@ import unittest
 from nd287_app.analysis import (
     adjacent,
     backlash,
-    backlash_band_for_temp,
+    band_for_temp,
     deviation_sec,
-    judge_backlash,
+    judge_minmax,
     pp,
     single,
     slope,
@@ -30,14 +30,19 @@ class TestDeviation(unittest.TestCase):
         self.assertAlmostEqual(pp([1.0, 0.0, -2.0]), 3.0)
         self.assertEqual(pp([]), 0.0)
 
-    def test_adjacent(self):
-        # 隣接差: |0-1|=1, |-2-0|=2 → 最大2
-        self.assertAlmostEqual(adjacent([1.0, 0.0, -2.0]), 2.0)
-        self.assertEqual(adjacent([5.0]), 0.0)
-
     def test_single(self):
+        # 単一誤差 = 1ステップで発生した誤差の最大: ステップは -1, -2 → 最大2
         self.assertAlmostEqual(single([1.0, 0.0, -2.0]), 2.0)
+        self.assertEqual(single([5.0]), 0.0)
         self.assertEqual(single([]), 0.0)
+
+    def test_adjacent(self):
+        # 隣接誤差 = 連続する単一誤差が逆向きに重なった突起。
+        # +4" のステップの次が -6" のステップ → 10" の突起
+        self.assertAlmostEqual(adjacent([0.0, 4.0, -2.0]), 10.0)
+        # ステップ -1, -2（同方向）→ 突起は |-1-(-2)| = 1
+        self.assertAlmostEqual(adjacent([1.0, 0.0, -2.0]), 1.0)
+        self.assertEqual(adjacent([5.0, 6.0]), 0.0)
 
     def test_slope(self):
         # 傾き = 終了の偏差 - 開始の偏差（測定順）
@@ -74,29 +79,37 @@ SPEC = [
 ]
 
 
-class TestBacklashJudgement(unittest.TestCase):
+class TestTemperatureJudgement(unittest.TestCase):
     def test_band_selection_by_temperature(self):
-        self.assertEqual(backlash_band_for_temp(SPEC, 10.0)["max"], 30.0)
-        self.assertEqual(backlash_band_for_temp(SPEC, 20.0)["max"], 25.0)
-        self.assertEqual(backlash_band_for_temp(SPEC, 30.0)["max"], 20.0)
-        self.assertIsNone(backlash_band_for_temp(SPEC, 50.0))
-        self.assertIsNone(backlash_band_for_temp([], 20.0))
+        self.assertEqual(band_for_temp(SPEC, 10.0)["max"], 30.0)
+        self.assertEqual(band_for_temp(SPEC, 20.0)["max"], 25.0)
+        self.assertEqual(band_for_temp(SPEC, 30.0)["max"], 20.0)
+        self.assertIsNone(band_for_temp(SPEC, 50.0))
+        self.assertIsNone(band_for_temp([], 20.0))
 
     def test_temperature_changes_verdict(self):
         # バックラッシ22"は、10°C（規格30"まで）ならOK、30°C（規格20"まで）ならNG
-        ok_cold, _ = judge_backlash(5.0, 22.0, 10.0, SPEC)
-        ok_hot, _ = judge_backlash(5.0, 22.0, 30.0, SPEC)
+        ok_cold, _ = judge_minmax(5.0, 22.0, 10.0, SPEC)
+        ok_hot, _ = judge_minmax(5.0, 22.0, 30.0, SPEC)
         self.assertTrue(ok_cold)
         self.assertFalse(ok_hot)
 
     def test_below_lower_limit_is_ng(self):
-        ok, _ = judge_backlash(-1.0, 10.0, 20.0, SPEC)
+        ok, _ = judge_minmax(-1.0, 10.0, 20.0, SPEC)
         self.assertFalse(ok)
 
     def test_no_band_returns_none(self):
-        ok, band = judge_backlash(0.0, 10.0, 99.0, SPEC)
+        ok, band = judge_minmax(0.0, 10.0, 99.0, SPEC)
         self.assertIsNone(ok)
         self.assertIsNone(band)
+
+    def test_minus_range_for_true_minmax(self):
+        # 総合（真の最大最小）のような ± の規格にも使える
+        spec = [dict(temp_min=15.0, temp_max=25.0, min=-25.0, max=25.0)]
+        ok, _ = judge_minmax(-10.0, 20.0, 20.0, spec)
+        self.assertTrue(ok)
+        ok, _ = judge_minmax(-30.0, 20.0, 20.0, spec)
+        self.assertFalse(ok)
 
 
 class TestSequence(unittest.TestCase):
@@ -142,8 +155,9 @@ class TestSummarize(unittest.TestCase):
         for key in ("wheel_cw", "wheel_ccw", "worm_cw", "worm_ccw"):
             self.assertIn(key, summary)
             self.assertAlmostEqual(summary[key]["pp"], 0.0, places=6)
-            # 一定オフセット誤差なので単一誤差=オフセット、傾き=0
-            self.assertGreater(summary[key]["single"], 0.0)
+            # 一定オフセット誤差なのでステップ差は出ない: 単一・隣接・傾きとも0
+            self.assertAlmostEqual(summary[key]["single"], 0.0, places=6)
+            self.assertAlmostEqual(summary[key]["adjacent"], 0.0, places=6)
             self.assertAlmostEqual(summary[key]["slope"], 0.0, places=6)
         # バックラッシ = CCW偏差(2") - CW偏差(1") = 1.0"
         self.assertAlmostEqual(summary["wheel_backlash"]["min"], 1.0, places=6)

@@ -6,8 +6,8 @@ from pathlib import Path
 
 from nd287_app.analysis import summarize
 from nd287_app.export import (
-    backlash_judgement_text,
     build_save_path,
+    judgement_texts,
     load_csv,
     model_folder,
     result_rows,
@@ -39,22 +39,43 @@ class TestExport(unittest.TestCase):
         self.assertIn("真の最小 (CCW)", items)
         self.assertNotIn("ホイール バックラッシ 判定", items)  # 判定文なしのとき
 
-    def test_result_rows_with_judgement(self):
+    def test_result_rows_with_judgements(self):
         seq = make_finished_sequence()
         summary, _ = summarize(seq.data)
-        rows = dict(result_rows(summary, "OK（規格 0〜25\" @ 23.5°C）"))
-        self.assertIn("ホイール バックラッシ 判定", rows)
+        judgements = {
+            "wheel_backlash": 'OK（規格 0〜25" @ 23.5°C）',
+            "worm_backlash": 'NG（規格 0〜1" @ 23.5°C）',
+            "true": 'OK（規格 -25〜25" @ 23.5°C）',
+        }
+        rows = dict(result_rows(summary, judgements))
         self.assertTrue(rows["ホイール バックラッシ 判定"].startswith("OK"))
+        self.assertTrue(rows["ウォーム バックラッシ 判定"].startswith("NG"))
+        self.assertTrue(rows["総合（真の最大最小） 判定"].startswith("OK"))
 
-    def test_backlash_judgement_text(self):
+    def test_judgement_texts(self):
         seq = make_finished_sequence()  # バックラッシ = CCW誤差2.5"-CW誤差1.0" = 1.5"
         summary, _ = summarize(seq.data)
-        spec = [dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0)]
-        self.assertTrue(backlash_judgement_text(summary, 20.0, spec).startswith("OK"))
-        ng_spec = [dict(temp_min=15.0, temp_max=25.0, min=0.0, max=1.0)]
-        self.assertTrue(backlash_judgement_text(summary, 20.0, ng_spec).startswith("NG"))
-        self.assertTrue(backlash_judgement_text(summary, 50.0, spec).startswith("判定不可"))
-        self.assertIsNone(backlash_judgement_text(summary, None, spec))
+        band_ok = [dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0)]
+        band_true = [dict(temp_min=15.0, temp_max=25.0, min=-25.0, max=25.0)]
+        spec_map = dict(wheel_backlash=band_ok, worm_backlash=band_ok, true=band_true)
+
+        texts = judgement_texts(summary, 20.0, spec_map)
+        self.assertTrue(texts["wheel_backlash"].startswith("OK"))
+        self.assertTrue(texts["worm_backlash"].startswith("OK"))
+        self.assertTrue(texts["true"].startswith("OK"))
+
+        ng_spec = dict(spec_map, worm_backlash=[dict(temp_min=15.0, temp_max=25.0, min=0.0, max=1.0)])
+        texts = judgement_texts(summary, 20.0, ng_spec)
+        self.assertTrue(texts["worm_backlash"].startswith("NG"))
+        self.assertTrue(texts["wheel_backlash"].startswith("OK"))
+
+        # 温度が規格帯の外 → 判定不可。温度未入力 → 判定なし。規格が空の項目 → 判定なし
+        self.assertTrue(
+            judgement_texts(summary, 50.0, spec_map)["wheel_backlash"].startswith("判定不可")
+        )
+        self.assertEqual(judgement_texts(summary, None, spec_map), {})
+        no_worm = dict(spec_map, worm_backlash=[])
+        self.assertNotIn("worm_backlash", judgement_texts(summary, 20.0, no_worm))
 
     def test_save_csv_roundtrip(self):
         seq = make_finished_sequence()

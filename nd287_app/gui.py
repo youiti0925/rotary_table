@@ -20,8 +20,8 @@ import pyqtgraph as pg
 
 from .analysis import deviation_sec, summarize
 from .export import (
-    backlash_judgement_text,
     build_save_path,
+    judgement_texts,
     load_csv,
     misc_rows,
     save_csv,
@@ -87,7 +87,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("保存先フォルダ", root_row)
 
         note = QtWidgets.QLabel(
-            "バックラッシの温度別規格は settings.json の backlash_spec で編集"
+            "温度別の合否規格（ホイール/ウォーム/総合）は settings.json の judgement_spec で編集"
         )
         note.setStyleSheet("color:#666;")
         form.addRow(note)
@@ -421,9 +421,10 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 curve.setData([], [])
 
-    def current_judgement_text(self, summary):
-        return backlash_judgement_text(
-            summary, self.parse_temp(), self.settings.get("backlash_spec")
+    def current_judgements(self, summary):
+        """ホイール/ウォーム/総合の温度別合否判定文（測定温度・規格による）"""
+        return judgement_texts(
+            summary, self.parse_temp(), self.settings.get("judgement_spec")
         )
 
     def finish(self):
@@ -447,7 +448,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
 
         # 右表: バックラッシMIN/MAX・温度規格による合否・真の最大最小
-        rows = misc_rows(summary, self.current_judgement_text(summary))
+        rows = misc_rows(summary, self.current_judgements(summary))
         self.table_misc.setRowCount(len(rows))
         for i, (item, value) in enumerate(rows):
             self.table_misc.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
@@ -490,7 +491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         summary, _ = summarize(self.data)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            save_csv(path, self.data, summary, meta, self.current_judgement_text(summary))
+            save_csv(path, self.data, summary, meta, self.current_judgements(summary))
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")

@@ -243,16 +243,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("font-size:15px; color:#666; padding:2px;")
 
-        # --- グラフ ---
-        self.plot = pg.PlotWidget()
-        self.plot.addLegend(offset=(10, 10))
-        self.plot.setLabel("bottom", "指令角度", units="°")
-        self.plot.setLabel("left", "偏差", units='"')
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        # --- グラフ（左: ホイール / 右: ウォーム、7:3） ---
+        self.plot_wheel = pg.PlotWidget(title="ホイール")
+        self.plot_worm = pg.PlotWidget(title="ウォーム")
+        for plot in (self.plot_wheel, self.plot_worm):
+            plot.addLegend(offset=(10, 10))
+            plot.setLabel("bottom", "指令角度", units="°")
+            plot.setLabel("left", "偏差", units='"')
+            plot.showGrid(x=True, y=True, alpha=0.3)
         self.curves = {
-            key: self.plot.plot(name=SERIES_LABELS[key], **style)
+            key: (self.plot_wheel if key.startswith("wheel") else self.plot_worm).plot(
+                name=SERIES_LABELS[key], **style
+            )
             for key, style in CURVE_STYLES.items()
         }
+        plots = QtWidgets.QHBoxLayout()
+        plots.addWidget(self.plot_wheel, 7)
+        plots.addWidget(self.plot_worm, 3)
 
         # --- 結果表（左: 系列ごとの指標 / 右: バックラッシ・判定・真の最大最小） ---
         self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
@@ -276,7 +283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(row3)
         v.addWidget(self.guide)
         v.addWidget(self.live)
-        v.addWidget(self.plot, 1)
+        v.addLayout(plots, 1)
         v.addLayout(tables)
         self.setCentralWidget(container)
 

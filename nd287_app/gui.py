@@ -500,6 +500,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif value.startswith("OK"):
                     cell.setForeground(QtGui.QBrush(QtGui.QColor("green")))
             self.table_misc.setItem(i, 1, cell)
+        self.table_series.resizeColumnsToContents()
+        self.table_misc.resizeColumnToContents(0)
 
     # ----- セーブ・ロード -----
 

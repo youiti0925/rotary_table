@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 """測定画面（PySide6 + pyqtgraph）
 
+測定モード（画面左上で切替）:
+    回転分割   … ホイール0°→360°（閉じ点込み）CW/CCW ＋ ウォームCW/CCW
+    傾斜分割   … 開始角度〜終了角度（例 -30°〜+110°）を刻みで CW/CCW ＋ ウォーム
+    回転再現性 … 各ブロック（例 0,90,180,270）で CW×N回 → CCW×N回。
+                 各ブロックの最大−最小を出し、全ブロックの最大が再現性の結果
+    傾斜再現性 … 同上（ブロックは開始〜終了角度の範囲を刻みで設定）
+
 操作の流れ:
-    1. 型式・機番・日付・名前・測定温度を入力し、等分数を確認して「取込開始」
+    1. 型式・機番・日付・名前・測定温度を入力し、条件を確認して「取込開始」
        （全部そろっていないと取込は始まらない）
     2. データ受け取り状態になる。テーブルを割り出して静止し、ND287のPRINTキー
        （またはX41トリガ）で値を送ると、順番どおりに箱へ入る。「手動取込」でも可
-    3. 箱が全部埋まると、系列ごとの精度PP・単一誤差・隣接誤差・傾きと、
-       バックラッシMIN/MAX・温度規格による合否・真の最大最小が自動表示される
+    3. 箱が全部埋まると結果が自動表示される
     4. 「セーブ」で <保存先>/<型式の系列>/<機番>.csv に保存（例 RWE-200 → RWE/12345.csv)
-    5. 「ロード」で過去の測定を読み戻してグラフ・結果を再表示
+    5. 「ロード」で過去の測定（どのモードでも）を読み戻して再表示
 """
 
 from pathlib import Path
@@ -18,17 +24,27 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from .analysis import deviation_sec, summarize
+from .analysis import deviation_sec, repeatability_summary, summarize
 from .export import (
+    MODE_KEY,
     build_save_path,
     judgement_texts,
-    load_csv,
+    load_measurement,
     misc_rows,
+    repeat_result_rows,
     save_csv,
+    save_repeat_csv,
 )
 from .nd287 import ND287Device, deg_to_dms
-from .sequence import Sequence, SERIES_LABELS
+from .sequence import (
+    IndexingSequence,
+    RepeatabilitySequence,
+    SERIES_LABELS,
+    block_points,
+)
 from .settings import resolve_save_root, save_settings
+
+MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性")
 
 CURVE_STYLES = {
     "wheel_cw": dict(pen=pg.mkPen("#1f77b4", width=2), symbol="o", symbolSize=5),
@@ -45,9 +61,13 @@ BAUDRATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"
 
 META_KEYS = {
     "wheel_pitch": "ホイール刻み[°]",
+    "block_pitch": "ブロック刻み[°]",
     "worm_pitch": "ウォーム刻み[°]",
     "worm_range": "ウォーム範囲[°]",
     "worm_start": "ウォーム開始[°]",
+    "wheel_start": "開始角度[°]",
+    "wheel_end": "終了角度[°]",
+    "repeats": "回数",
     "date": "日付",
     "operator": "名前",
     "temperature": "測定温度[°C]",
@@ -56,6 +76,7 @@ META_KEYS = {
 }
 
 SERIES_METRIC_HEADERS = ["系列", "精度PP", "単一誤差", "隣接誤差", "傾き"]
+REPEAT_HEADERS = ["ブロック", "角度", "CW範囲", "CCW範囲"]
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -125,33 +146,70 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
-        self.resize(1100, 740)
+        self.resize(1200, 800)
         self.dev = device
         self.settings = settings
-        self.seq = None    # 取込中のシーケンス（ロード表示時は None）
-        self.data = None   # グラフ・結果・セーブの対象データ
+        self.seq = None        # 取込中のシーケンス（ロード表示時は None）
+        self.data = None       # 分割測定の表示対象データ
+        self.rep_points = None  # 再現性測定のブロック角度
+        self.rep_data = None    # 再現性測定の表示対象データ
+        self.view_kind = "indexing"  # 現在表示中のデータ種別
 
-        # --- 1段目: 測定条件と取込操作 ---
+        # --- 1段目: モード・測定条件と取込操作 ---
         row1 = QtWidgets.QHBoxLayout()
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(MODES)
+        self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
+        row1.addWidget(QtWidgets.QLabel("モード"))
+        row1.addWidget(self.mode_combo)
+
+        def add_field(label_text, widget):
+            label = QtWidgets.QLabel(label_text)
+            row1.addWidget(label)
+            row1.addWidget(widget)
+            return label
+
+        self.e_wstart = QtWidgets.QDoubleSpinBox()
+        self.e_wstart.setRange(-360.0, 360.0)
+        self.e_wstart.setValue(-30.0)
+        self.e_wstart.setSuffix(" °")
+        self.l_wstart = add_field("開始角度", self.e_wstart)
+        self.e_wend = QtWidgets.QDoubleSpinBox()
+        self.e_wend.setRange(-360.0, 720.0)
+        self.e_wend.setValue(110.0)
+        self.e_wend.setSuffix(" °")
+        self.l_wend = add_field("終了角度", self.e_wend)
+
         self.e_wheel = QtWidgets.QDoubleSpinBox()
         self.e_wheel.setRange(0.001, 180.0)
         self.e_wheel.setValue(wheel_pitch)
         self.e_wheel.setSuffix(" °/pt")
+        self.l_wheel = add_field("ホイール刻み", self.e_wheel)
+
+        self.e_repeats = QtWidgets.QSpinBox()
+        self.e_repeats.setRange(2, 99)
+        self.e_repeats.setValue(7)
+        self.e_repeats.setSuffix(" 回")
+        self.l_repeats = add_field("回数", self.e_repeats)
+
         self.e_worm = QtWidgets.QDoubleSpinBox()
         self.e_worm.setDecimals(4)
         self.e_worm.setRange(0.0001, 90.0)
         self.e_worm.setValue(worm_pitch)
         self.e_worm.setSuffix(" °/pt")
+        self.l_worm = add_field("ウォーム刻み", self.e_worm)
         self.e_range = QtWidgets.QDoubleSpinBox()
         self.e_range.setDecimals(4)
         self.e_range.setRange(0.001, 360.0)
         self.e_range.setValue(worm_range)
         self.e_range.setSuffix(" °")
+        self.l_range = add_field("ウォーム範囲", self.e_range)
         self.e_start = QtWidgets.QDoubleSpinBox()
         self.e_start.setDecimals(4)
         self.e_start.setRange(0.0, 360.0)
         self.e_start.setValue(worm_start)
         self.e_start.setSuffix(" °")
+        self.l_start = add_field("ウォーム開始", self.e_start)
 
         b_start = QtWidgets.QPushButton("取込開始")
         b_start.setStyleSheet("font-size:16px; padding:4px 18px;")
@@ -162,15 +220,6 @@ class MainWindow(QtWidgets.QMainWindow):
         b_start.clicked.connect(self.start)
         self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
-
-        for widget, label in [
-            (self.e_wheel, "ホイール刻み"),
-            (self.e_worm, "ウォーム刻み"),
-            (self.e_range, "ウォーム範囲"),
-            (self.e_start, "ウォーム開始"),
-        ]:
-            row1.addWidget(QtWidgets.QLabel(label))
-            row1.addWidget(widget)
         row1.addStretch(1)
         row1.addWidget(b_start)
         row1.addWidget(self.b_take)
@@ -231,9 +280,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_corr.setEnabled(False)
         self.b_corr.clicked.connect(self.apply_correction)
         self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
+        self.l_blcorr = QtWidgets.QLabel("バックラッシ補正")
         row3.addWidget(QtWidgets.QLabel("コメント"))
         row3.addWidget(self.e_comment, 1)
-        row3.addWidget(QtWidgets.QLabel("バックラッシ補正"))
+        row3.addWidget(self.l_blcorr)
         row3.addWidget(self.e_blcorr)
         row3.addWidget(self.b_corr)
 
@@ -243,7 +293,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("font-size:15px; color:#666; padding:2px;")
 
-        # --- グラフ（左: ホイール / 右: ウォーム、7:3） ---
+        # --- グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ） ---
         self.plot_wheel = pg.PlotWidget(title="ホイール")
         self.plot_worm = pg.PlotWidget(title="ウォーム")
         for plot in (self.plot_wheel, self.plot_worm):
@@ -251,17 +301,12 @@ class MainWindow(QtWidgets.QMainWindow):
             plot.setLabel("bottom", "指令角度", units="°")
             plot.setLabel("left", "偏差", units='"')
             plot.showGrid(x=True, y=True, alpha=0.3)
-        self.curves = {
-            key: (self.plot_wheel if key.startswith("wheel") else self.plot_worm).plot(
-                name=SERIES_LABELS[key], **style
-            )
-            for key, style in CURVE_STYLES.items()
-        }
+        self.curves = {}
         plots = QtWidgets.QHBoxLayout()
         plots.addWidget(self.plot_wheel, 7)
         plots.addWidget(self.plot_worm, 3)
 
-        # --- 結果表（左: 系列ごとの指標 / 右: バックラッシ・判定・真の最大最小） ---
+        # --- 結果表（左: 系列/ブロックごとの指標 / 右: バックラッシ・判定など） ---
         self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
         self.table_series.horizontalHeader().setStretchLastSection(True)
@@ -297,6 +342,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rx_timer = QtCore.QTimer(self)
         self.rx_timer.timeout.connect(self.poll_serial)
         self.rx_timer.start(200)
+
+        self.on_mode_changed(self.mode_combo.currentText())
+
+    # ----- モード -----
+
+    def current_mode(self):
+        return self.mode_combo.currentText()
+
+    def is_tilt(self):
+        return self.current_mode().startswith("傾斜")
+
+    def is_repeat(self):
+        return "再現性" in self.current_mode()
+
+    def on_mode_changed(self, mode):
+        is_tilt, is_repeat = self.is_tilt(), self.is_repeat()
+        for w in (self.l_wstart, self.e_wstart, self.l_wend, self.e_wend):
+            w.setVisible(is_tilt)
+        for w in (
+            self.l_worm, self.e_worm, self.l_range, self.e_range, self.l_start, self.e_start,
+        ):
+            w.setVisible(not is_repeat)
+        for w in (self.l_repeats, self.e_repeats):
+            w.setVisible(is_repeat)
+        for w in (self.l_blcorr, self.e_blcorr, self.b_corr):
+            w.setVisible(not is_repeat)
+        self.l_wheel.setText("ブロック刻み" if is_repeat else ("刻み" if is_tilt else "ホイール刻み"))
+        self.plot_worm.setVisible(not is_repeat)
+        self.plot_wheel.setTitle("再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
+        # モードを変えたら取込中の状態は破棄
+        self.seq = None
+        self.view_kind = "repeat" if is_repeat else "indexing"
+        self.rebuild_curves()
+        self.table_series.setRowCount(0)
+        self.table_misc.setRowCount(0)
+        self.b_take.setEnabled(False)
+        self.b_undo.setEnabled(False)
+        self.b_save.setEnabled(False)
+        self.b_corr.setEnabled(False)
+        self.guide.setText("―")
+        self.live.setText("")
+
+    def rebuild_curves(self):
+        for plot in (self.plot_wheel, self.plot_worm):
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+        if self.is_repeat():
+            self.curves = {
+                "rep_cw": self.plot_wheel.plot(
+                    [], [], pen=None, symbol="o", symbolSize=7,
+                    symbolBrush="#1f77b4", name="CW",
+                ),
+                "rep_ccw": self.plot_wheel.plot(
+                    [], [], pen=None, symbol="t", symbolSize=7,
+                    symbolBrush="#d62728", name="CCW",
+                ),
+            }
+        else:
+            self.curves = {
+                key: (self.plot_wheel if key.startswith("wheel") else self.plot_worm).plot(
+                    name=SERIES_LABELS[key], **style
+                )
+                for key, style in CURVE_STYLES.items()
+            }
 
     # ----- 接続 -----
 
@@ -356,6 +466,27 @@ class MainWindow(QtWidgets.QMainWindow):
             missing.append("測定温度")
         return missing
 
+    def build_sequence(self):
+        if self.is_repeat():
+            if self.is_tilt():
+                points = block_points(
+                    self.e_wstart.value(), self.e_wend.value(), self.e_wheel.value()
+                )
+            else:
+                # 回転は一周なので閉じ点（360°=0°）はブロックに含めない
+                points = block_points(0.0, 360.0, self.e_wheel.value(), include_end=False)
+            return RepeatabilitySequence(points, self.e_repeats.value())
+        wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
+        wheel_end = self.e_wend.value() if self.is_tilt() else 360.0
+        return IndexingSequence(
+            self.e_wheel.value(),
+            self.e_worm.value(),
+            self.e_range.value(),
+            self.e_start.value(),
+            wheel_start,
+            wheel_end,
+        )
+
     def start(self):
         missing = self.missing_required_fields()
         if missing:
@@ -365,16 +496,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "次の項目を入力してから取込を開始してください:\n  " + "、".join(missing),
             )
             return
-        self.seq = Sequence(
-            self.e_wheel.value(),
-            self.e_worm.value(),
-            self.e_range.value(),
-            self.e_start.value(),
-        )
-        self.data = self.seq.data
+        if self.is_tilt() and self.e_wend.value() <= self.e_wstart.value():
+            QtWidgets.QMessageBox.warning(
+                self, "取込開始", "終了角度は開始角度より大きくしてください"
+            )
+            return
+        self.seq = self.build_sequence()
+        if self.is_repeat():
+            self.rep_points = self.seq.points
+            self.rep_data = self.seq.data
+        else:
+            self.data = self.seq.data
         self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
-        for curve in self.curves.values():
-            curve.setData([], [])
+        self.rebuild_curves()
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
         self.applied_blcorr = 0.0
@@ -386,14 +520,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_guide()
 
     def show_guide(self):
-        cur = self.seq.current()
-        if cur is None:
-            return
-        key, target, _ = cur
-        self.guide.setText(
-            f"[{SERIES_LABELS[key]}]  {deg_to_dms(target)} へ割り出して静止"
-            f" → ND287のPRINT（または手動取込）   ({self.seq.idx + 1}/{len(self.seq)})"
-        )
+        text = self.seq.guide_text()
+        if text is not None:
+            self.guide.setText(text)
 
     def poll_serial(self):
         """ND287側から送信された値を受け取り、順番どおりに箱へ入れる"""
@@ -461,6 +590,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- 表示 -----
 
     def redraw(self):
+        if self.view_kind == "repeat":
+            xs = {"cw": [], "ccw": []}
+            ys = {"cw": [], "ccw": []}
+            for (dirn, i), vals in (self.rep_data or {}).items():
+                angle = self.rep_points[i]
+                for v in vals:
+                    xs[dirn].append(angle)
+                    ys[dirn].append((v - angle) * 3600.0)
+            self.curves["rep_cw"].setData(xs["cw"], ys["cw"])
+            self.curves["rep_ccw"].setData(xs["ccw"], ys["ccw"])
+            return
         for key, curve in self.curves.items():
             targets, measured = self.data[key]
             if targets:
@@ -477,10 +617,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def finish(self):
         self.b_take.setEnabled(False)
         self.b_save.setEnabled(True)
+        if self.view_kind == "repeat":
+            self.finish_repeat()
+        else:
+            self.finish_indexing()
+
+    def finish_indexing(self):
         self.b_corr.setEnabled(True)
         summary, _ = summarize(self.data, self.applied_blcorr)
 
         # 左表: 系列ごとの 精度PP・単一誤差・隣接誤差・傾き
+        self.table_series.setColumnCount(len(SERIES_METRIC_HEADERS))
+        self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
         series = [k for k in SERIES_LABELS if k in summary]
         self.table_series.setRowCount(len(series))
         for i, key in enumerate(series):
@@ -497,6 +645,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 右表: バックラッシMIN/MAX・温度規格による合否・真の最大最小
         rows = misc_rows(summary, self.current_judgements(summary))
+        self.fill_misc_table(rows)
+
+    def finish_repeat(self):
+        rsum = repeatability_summary(self.rep_points, self.rep_data)
+        self.table_series.setColumnCount(len(REPEAT_HEADERS))
+        self.table_series.setHorizontalHeaderLabels(REPEAT_HEADERS)
+        self.table_series.setRowCount(len(rsum["blocks"]))
+        for i, b in enumerate(rsum["blocks"]):
+            cells = [
+                f"ブロック{i + 1}",
+                f'{b["angle"]:g}°',
+                f'{b["cw"]:.2f}"' if b["cw"] is not None else "―",
+                f'{b["ccw"]:.2f}"' if b["ccw"] is not None else "―",
+            ]
+            for j, text in enumerate(cells):
+                self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+        rows = []
+        for key, label in (
+            ("cw", "再現性 CW（全ブロック最大）"),
+            ("ccw", "再現性 CCW（全ブロック最大）"),
+            ("overall", "再現性 総合"),
+        ):
+            if rsum.get(key) is not None:
+                rows.append((label, f'{rsum[key]:.2f}"'))
+        self.fill_misc_table(rows)
+
+    def fill_misc_table(self, rows):
         self.table_misc.setRowCount(len(rows))
         for i, (item, value) in enumerate(rows):
             self.table_misc.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
@@ -512,14 +687,43 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- セーブ・ロード -----
 
+    def has_view_data(self):
+        if self.view_kind == "repeat":
+            return bool(self.rep_data)
+        return bool(self.data) and any(t for t, _ in self.data.values())
+
+    def build_meta(self):
+        meta = {
+            MODE_KEY: self.current_mode(),
+            "型式": self.e_model.text().strip(),
+            "機番": self.e_machine.text().strip(),
+            META_KEYS["date"]: self.e_date.date().toString("yyyy-MM-dd"),
+            META_KEYS["operator"]: self.e_operator.text().strip(),
+            META_KEYS["temperature"]: self.e_temp.text().strip(),
+        }
+        if self.is_tilt():
+            meta[META_KEYS["wheel_start"]] = self.e_wstart.value()
+            meta[META_KEYS["wheel_end"]] = self.e_wend.value()
+        if self.is_repeat():
+            meta[META_KEYS["block_pitch"]] = self.e_wheel.value()
+            meta[META_KEYS["repeats"]] = self.e_repeats.value()
+        else:
+            meta[META_KEYS["wheel_pitch"]] = self.e_wheel.value()
+            meta[META_KEYS["worm_pitch"]] = self.e_worm.value()
+            meta[META_KEYS["worm_range"]] = self.e_range.value()
+            meta[META_KEYS["worm_start"]] = self.e_start.value()
+            meta[META_KEYS["blcorr"]] = self.applied_blcorr
+        meta[META_KEYS["comment"]] = self.e_comment.text().strip()
+        return meta
+
     def save(self):
-        if not self.data or not any(t for t, _ in self.data.values()):
+        if not self.has_view_data():
             return
         machine_no = self.e_machine.text().strip()
         if not machine_no:
             QtWidgets.QMessageBox.warning(self, "セーブ", "機番を入力してください")
             return
-        if self.e_blcorr.value() != self.applied_blcorr:
+        if not self.is_repeat() and self.e_blcorr.value() != self.applied_blcorr:
             answer = QtWidgets.QMessageBox.question(
                 self,
                 "セーブ",
@@ -536,23 +740,15 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if answer != QtWidgets.QMessageBox.Yes:
                 return
-        meta = {
-            "型式": self.e_model.text().strip(),
-            "機番": machine_no,
-            META_KEYS["date"]: self.e_date.date().toString("yyyy-MM-dd"),
-            META_KEYS["operator"]: self.e_operator.text().strip(),
-            META_KEYS["temperature"]: self.e_temp.text().strip(),
-            META_KEYS["wheel_pitch"]: self.e_wheel.value(),
-            META_KEYS["worm_pitch"]: self.e_worm.value(),
-            META_KEYS["worm_range"]: self.e_range.value(),
-            META_KEYS["worm_start"]: self.e_start.value(),
-            META_KEYS["comment"]: self.e_comment.text().strip(),
-            META_KEYS["blcorr"]: self.applied_blcorr,
-        }
-        summary, _ = summarize(self.data, self.applied_blcorr)
+        meta = self.build_meta()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            save_csv(path, self.data, summary, meta, self.current_judgements(summary))
+            if self.view_kind == "repeat":
+                rsum = repeatability_summary(self.rep_points, self.rep_data)
+                save_repeat_csv(path, self.rep_points, self.rep_data, rsum, meta)
+            else:
+                summary, _ = summarize(self.data, self.applied_blcorr)
+                save_csv(path, self.data, summary, meta, self.current_judgements(summary))
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
@@ -565,39 +761,59 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            meta, data = load_csv(path)
+            meta, kind, payload = load_measurement(path)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "ロード", f"読み込みに失敗しました:\n{e}")
             return
-        if not any(t for t, _ in data.values()):
-            QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
-            return
+
+        # モードを合わせる（on_mode_changed が状態をリセットする）
+        mode = meta.get(MODE_KEY)
+        if mode not in MODES:
+            mode = "回転再現性" if kind == "repeat" else "回転分割"
+        self.mode_combo.setCurrentText(mode)
+
+        if kind == "repeat":
+            points, data = payload
+            if not data:
+                QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
+                return
+            self.rep_points, self.rep_data = points, data
+        else:
+            if not any(t for t, _ in payload.values()):
+                QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
+                return
+            self.data = payload
+
         self.seq = None  # 取込中状態は解除
-        self.data = data
         self.e_model.setText(meta.get("型式", ""))
         self.e_machine.setText(meta.get("機番", ""))
         self.e_operator.setText(meta.get(META_KEYS["operator"], ""))
         self.e_temp.setText(meta.get(META_KEYS["temperature"], ""))
         self.e_comment.setText(meta.get(META_KEYS["comment"], ""))
+        date = QtCore.QDate.fromString(meta.get(META_KEYS["date"], ""), "yyyy-MM-dd")
+        if date.isValid():
+            self.e_date.setDate(date)
+        for spin, key in [
+            (self.e_wheel, META_KEYS["wheel_pitch"]),
+            (self.e_wheel, META_KEYS["block_pitch"]),
+            (self.e_worm, META_KEYS["worm_pitch"]),
+            (self.e_range, META_KEYS["worm_range"]),
+            (self.e_start, META_KEYS["worm_start"]),
+            (self.e_wstart, META_KEYS["wheel_start"]),
+            (self.e_wend, META_KEYS["wheel_end"]),
+            (self.e_repeats, META_KEYS["repeats"]),
+        ]:
+            if key in meta:
+                try:
+                    value = float(meta[key])
+                    spin.setValue(int(value) if isinstance(spin, QtWidgets.QSpinBox) else value)
+                except ValueError:
+                    pass
         try:
             self.applied_blcorr = float(meta.get(META_KEYS["blcorr"], 0.0))
         except ValueError:
             self.applied_blcorr = 0.0
         self.e_blcorr.setValue(self.applied_blcorr)
-        date = QtCore.QDate.fromString(meta.get(META_KEYS["date"], ""), "yyyy-MM-dd")
-        if date.isValid():
-            self.e_date.setDate(date)
-        for attr, key in [
-            (self.e_wheel, META_KEYS["wheel_pitch"]),
-            (self.e_worm, META_KEYS["worm_pitch"]),
-            (self.e_range, META_KEYS["worm_range"]),
-            (self.e_start, META_KEYS["worm_start"]),
-        ]:
-            if key in meta:
-                try:
-                    attr.setValue(float(meta[key]))
-                except ValueError:
-                    pass
         self.b_undo.setEnabled(False)
         self.live.setText("")
         self.redraw()

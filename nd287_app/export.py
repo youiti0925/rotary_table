@@ -21,6 +21,8 @@ RESULT_LABELS = {
     "worm_ccw": "ウォームCCW",
 }
 
+MODE_KEY = "測定モード"
+
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
@@ -145,30 +147,126 @@ def save_csv(path, data, summary, meta=None, judgements=None):
             w.writerow([item, value])
 
 
-def load_csv(path):
-    """save_csv が書いたCSVを読み戻す。(meta, data) を返す。
+def repeat_result_rows(rsum):
+    """再現性測定の結果サマリ → (項目, 値) 行リスト
 
-    結果サマリ行は読まない（ロード後に生データから再計算する）。
+    rsum: analysis.repeatability_summary() の返り値
     """
-    label_to_key = {v: k for k, v in SERIES_LABELS.items()}
-    meta = {}
-    data = {k: ([], []) for k in SERIES_KEYS}
+    rows = []
+    for i, b in enumerate(rsum["blocks"]):
+        for dirn, label in (("cw", "CW"), ("ccw", "CCW")):
+            if b[dirn] is not None:
+                rows.append((f"ブロック{i + 1} ({b['angle']:g}°) {label}範囲", f'{b[dirn]:.2f}"'))
+    for key, label in (
+        ("cw", "再現性 CW（全ブロック最大）"),
+        ("ccw", "再現性 CCW（全ブロック最大）"),
+        ("overall", "再現性 総合"),
+    ):
+        if rsum.get(key) is not None:
+            rows.append((label, f'{rsum[key]:.2f}"'))
+    return rows
+
+
+def save_repeat_csv(path, points, data, rsum, meta=None):
+    """再現性測定の生データと結果サマリをCSVに保存する。
+
+    points/data: RepeatabilitySequence の points / data
+    """
+    with open(path, "w", newline="", encoding="cp932", errors="replace") as f:
+        w = csv.writer(f)
+        w.writerow(["ND287 再現性測定結果"])
+        w.writerow(["保存日時", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        for key, value in (meta or {}).items():
+            w.writerow([key, value])
+        w.writerow([])
+        w.writerow(["ブロック", "指令角度[°]", "方向", "回", "測定値[°]", "偏差[\"]"])
+        for i, angle in enumerate(points):
+            for dirn, label in (("cw", "CW"), ("ccw", "CCW")):
+                for r, v in enumerate(data.get((dirn, i), []), start=1):
+                    w.writerow(
+                        [i + 1, f"{angle:.4f}", label, r, f"{v:.6f}", f"{(v - angle) * 3600.0:.2f}"]
+                    )
+        w.writerow([])
+        w.writerow(["項目", "値"])
+        for item, value in repeat_result_rows(rsum):
+            w.writerow([item, value])
+
+
+def _read_rows(path):
     with open(path, encoding="cp932") as f:
-        rows = list(csv.reader(f))
-    mode = "meta"
+        return list(csv.reader(f))
+
+
+def _parse_indexing(rows):
+    label_to_key = {v: k for k, v in SERIES_LABELS.items()}
+    data = {k: ([], []) for k in SERIES_KEYS}
+    in_data = False
     for row in rows:
         if not row or not row[0]:
             continue
         if row[0] == "系列":
-            mode = "data"
+            in_data = True
             continue
         if row[0] == "項目":
             break
-        if mode == "meta":
-            if row[0] != "ND287 分割測定結果" and len(row) >= 2:
-                meta[row[0]] = row[1]
-        elif row[0] in label_to_key and len(row) >= 3:
+        if in_data and row[0] in label_to_key and len(row) >= 3:
             key = label_to_key[row[0]]
             data[key][0].append(float(row[1]))
             data[key][1].append(float(row[2]))
-    return meta, data
+    return data
+
+
+def _parse_repeat(rows):
+    angles = {}  # ブロック番号(0始まり) -> 指令角度
+    data = {}
+    in_data = False
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        if row[0] == "ブロック":
+            in_data = True
+            continue
+        if row[0] == "項目":
+            break
+        if in_data and len(row) >= 5:
+            block = int(row[0]) - 1
+            angles[block] = float(row[1])
+            dirn = "cw" if row[2].upper() == "CW" else "ccw"
+            data.setdefault((dirn, block), []).append(float(row[4]))
+    points = [angles[i] for i in sorted(angles)]
+    return points, data
+
+
+def load_measurement(path):
+    """保存済みCSVを測定モードを判別して読み戻す。
+
+    返り値: (meta, kind, payload)
+      kind="indexing" → payload は系列データ dict
+      kind="repeat"   → payload は (points, data)
+    """
+    rows = _read_rows(path)
+    meta = {}
+    header = None
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        if row[0] in ("系列", "ブロック", "項目"):
+            header = row[0]
+            break
+        if not row[0].startswith("ND287") and len(row) >= 2:
+            meta[row[0]] = row[1]
+    is_repeat = "再現性" in meta.get(MODE_KEY, "") or header == "ブロック"
+    if is_repeat:
+        return meta, "repeat", _parse_repeat(rows)
+    return meta, "indexing", _parse_indexing(rows)
+
+
+def load_csv(path):
+    """save_csv が書いた分割測定CSVを読み戻す。(meta, data) を返す。
+
+    結果サマリ行は読まない（ロード後に生データから再計算する）。
+    """
+    meta, kind, payload = load_measurement(path)
+    if kind != "indexing":
+        raise ValueError("分割測定のファイルではありません")
+    return meta, payload

@@ -150,3 +150,31 @@ def summarize(data, backlash_correction=0.0):
             out["true"][dirn] = dict(true_min=tmin, true_max=tmax)
 
     return out, devs
+
+
+def repeatability_summary(points, data):
+    """再現性測定の結果サマリ。
+
+    points: ブロックの指令角度リスト
+    data: {("cw"|"ccw", ブロック番号): [測定値, …]}（RepeatabilitySequence.data）
+
+    各ブロック・方向で読み取り値の最大−最小[秒]を出し、
+    全ブロックで一番大きいものを再現性の結果にする。
+    """
+    blocks = []
+    for i, angle in enumerate(points):
+        row = dict(angle=float(angle))
+        for dirn in ("cw", "ccw"):
+            vals = data.get((dirn, i)) or []
+            row[dirn] = (max(vals) - min(vals)) * 3600.0 if len(vals) >= 2 else None
+        blocks.append(row)
+
+    def worst(dirn):
+        vals = [b[dirn] for b in blocks if b[dirn] is not None]
+        return max(vals) if vals else None
+
+    cw, ccw = worst("cw"), worst("ccw")
+    candidates = [v for v in (cw, ccw) if v is not None]
+    return dict(
+        blocks=blocks, cw=cw, ccw=ccw, overall=max(candidates) if candidates else None
+    )

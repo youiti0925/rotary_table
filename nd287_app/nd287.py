@@ -63,6 +63,20 @@ def deg_to_dms(deg: float) -> str:
     return f"{sign}{d}°{m:02d}'{s:04.1f}\""
 
 
+def extract_angles(buf: bytes):
+    """受信バッファから完結した行を取り出して角度に変換する。
+
+    (角度のリスト, 未完の残りバッファ) を返す。
+    """
+    angles = []
+    while b"\n" in buf:
+        line, buf = buf.split(b"\n", 1)
+        angle = parse_angle(line.rstrip(b"\r"))
+        if angle is not None:
+            angles.append(angle)
+    return angles, buf
+
+
 class ND287Device:
     """pyserial ラッパ。各割出ポイントで静止後に read_angle() で1点取得する。
 
@@ -76,6 +90,7 @@ class ND287Device:
         self.baudrate = baudrate or SERIAL_DEFAULTS["baudrate"]
         self.parity = parity or SERIAL_DEFAULTS["parity"]
         self.ser = None
+        self._rxbuf = b""
 
     @property
     def dummy(self):
@@ -113,6 +128,23 @@ class ND287Device:
 
     def prepare_point(self, target_deg: float, direction: int):
         """実機では何もしない（ダミーデバイスとのインターフェース合わせ）"""
+
+    def flush_input(self):
+        """受信バッファを空にする（取込開始時に古いデータを捨てる）"""
+        self._rxbuf = b""
+        if self.ser:
+            self.ser.reset_input_buffer()
+
+    def poll_received(self):
+        """ND287側から送られてきた値を非ブロッキングで回収する。
+
+        本体のPRINTキーやX41トリガで送信された行を、届いた順の角度リストで返す。
+        """
+        if not self.ser or not self.ser.in_waiting:
+            return []
+        self._rxbuf += self.ser.read(self.ser.in_waiting)
+        angles, self._rxbuf = extract_angles(self._rxbuf)
+        return angles
 
     def read_angle(self):
         """CTRL B を送り、表示値1点を読む。"""

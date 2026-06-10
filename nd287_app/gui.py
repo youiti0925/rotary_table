@@ -2,18 +2,25 @@
 """測定画面（PySide6 + pyqtgraph）
 
 操作の流れ:
-    測定開始 → 画面上部のガイドに従いテーブルを割り出して静止 → 「取込」で1点取得
-    → ホイールCW一周 → ホイールCCW一周 → ウォームCW → ウォームCCW → 結果表
+    1. 型式・機番を入力し、刻み等を確認して「取込開始」
+    2. データ受け取り状態になる。テーブルを割り出して静止し、ND287のPRINTキー
+       （またはX41トリガ）で値を送ると、順番どおりに箱へ入る。「手動取込」でも可
+    3. 箱が全部埋まると精度・バックラッシ・真の最大最小が自動表示される
+    4. 「セーブ」で <保存先>/<型式の系列>/<機番>.csv に保存（例 RWE-200 → RWE/12345.csv)
+    5. 「ロード」で過去の測定を読み戻してグラフ・結果を再表示
 """
+
+from pathlib import Path
 
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from .analysis import deviation_sec, summarize
-from .export import result_rows, save_csv
-from .nd287 import deg_to_dms
+from .export import build_save_path, load_csv, result_rows, save_csv
+from .nd287 import ND287Device, deg_to_dms
 from .sequence import Sequence, SERIES_LABELS
+from .settings import resolve_save_root, save_settings
 
 CURVE_STYLES = {
     "wheel_cw": dict(pen=pg.mkPen("#1f77b4", width=2), symbol="o", symbolSize=5),
@@ -26,17 +33,85 @@ CURVE_STYLES = {
     ),
 }
 
+BAUDRATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
+
+META_KEYS = {
+    "wheel_pitch": "ホイール刻み[°]",
+    "worm_pitch": "ウォーム刻み[°]",
+    "worm_range": "ウォーム範囲[°]",
+    "worm_start": "ウォーム開始[°]",
+}
+
+
+class SettingsDialog(QtWidgets.QDialog):
+    """通信（ポート・ボーレート・パリティ）と保存先の設定"""
+
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.setWindowTitle("設定")
+        form = QtWidgets.QFormLayout(self)
+
+        self.e_port = QtWidgets.QLineEdit(str(settings.get("port", "auto")))
+        self.e_port.setToolTip("auto = 自動検出。COM3 のように明示指定も可")
+        self.e_baud = QtWidgets.QComboBox()
+        self.e_baud.addItems(BAUDRATES)
+        self.e_baud.setEditable(True)
+        self.e_baud.setCurrentText(str(settings.get("baudrate", 9600)))
+        self.e_parity = QtWidgets.QComboBox()
+        self.e_parity.addItems(["E", "N", "O"])
+        self.e_parity.setCurrentText(str(settings.get("parity", "E")))
+
+        root_row = QtWidgets.QHBoxLayout()
+        self.e_root = QtWidgets.QLineEdit(str(settings.get("save_root", "測定データ")))
+        b_browse = QtWidgets.QPushButton("参照...")
+        b_browse.clicked.connect(self.browse_root)
+        root_row.addWidget(self.e_root)
+        root_row.addWidget(b_browse)
+
+        form.addRow("ポート", self.e_port)
+        form.addRow("ボーレート", self.e_baud)
+        form.addRow("パリティ", self.e_parity)
+        form.addRow("保存先フォルダ", root_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def browse_root(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "保存先フォルダを選択", self.e_root.text()
+        )
+        if path:
+            self.e_root.setText(path)
+
+    def values(self):
+        try:
+            baud = int(self.e_baud.currentText())
+        except ValueError:
+            baud = 9600
+        return dict(
+            port=self.e_port.text().strip() or "auto",
+            baudrate=baud,
+            parity=self.e_parity.currentText(),
+            save_root=self.e_root.text().strip() or "測定データ",
+        )
+
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start=0.0):
+    def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
-        self.resize(1100, 700)
+        self.resize(1100, 740)
         self.dev = device
-        self.seq = None
+        self.settings = settings
+        self.seq = None    # 取込中のシーケンス（ロード表示時は None）
+        self.data = None   # グラフ・結果・セーブの対象データ
 
-        # --- 上段: 測定条件と操作ボタン ---
-        top = QtWidgets.QHBoxLayout()
+        # --- 1段目: 測定条件と取込操作 ---
+        row1 = QtWidgets.QHBoxLayout()
         self.e_wheel = QtWidgets.QDoubleSpinBox()
         self.e_wheel.setRange(0.001, 180.0)
         self.e_wheel.setValue(wheel_pitch)
@@ -57,18 +132,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_start.setValue(worm_start)
         self.e_start.setSuffix(" °")
 
-        b_start = QtWidgets.QPushButton("測定開始")
-        self.b_take = QtWidgets.QPushButton("取込")
+        b_start = QtWidgets.QPushButton("取込開始")
+        b_start.setStyleSheet("font-size:16px; padding:4px 18px;")
+        self.b_take = QtWidgets.QPushButton("手動取込")
         self.b_take.setEnabled(False)
-        self.b_take.setStyleSheet("font-size:18px; padding:6px 24px;")
         self.b_undo = QtWidgets.QPushButton("1点戻る")
         self.b_undo.setEnabled(False)
-        self.b_save = QtWidgets.QPushButton("CSV保存")
-        self.b_save.setEnabled(False)
         b_start.clicked.connect(self.start)
-        self.b_take.clicked.connect(self.take)
+        self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
-        self.b_save.clicked.connect(self.save)
 
         for widget, label in [
             (self.e_wheel, "ホイール刻み"),
@@ -76,15 +148,38 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.e_range, "ウォーム範囲"),
             (self.e_start, "ウォーム開始"),
         ]:
-            top.addWidget(QtWidgets.QLabel(label))
-            top.addWidget(widget)
-        top.addStretch(1)
-        top.addWidget(b_start)
-        top.addWidget(self.b_take)
-        top.addWidget(self.b_undo)
-        top.addWidget(self.b_save)
+            row1.addWidget(QtWidgets.QLabel(label))
+            row1.addWidget(widget)
+        row1.addStretch(1)
+        row1.addWidget(b_start)
+        row1.addWidget(self.b_take)
+        row1.addWidget(self.b_undo)
 
-        # --- 中段: ガイドと受信値 ---
+        # --- 2段目: 型式・機番とファイル操作 ---
+        row2 = QtWidgets.QHBoxLayout()
+        self.e_model = QtWidgets.QLineEdit()
+        self.e_model.setPlaceholderText("例: RWE-200")
+        self.e_model.setMaximumWidth(160)
+        self.e_machine = QtWidgets.QLineEdit()
+        self.e_machine.setPlaceholderText("例: 12345")
+        self.e_machine.setMaximumWidth(160)
+        self.b_save = QtWidgets.QPushButton("セーブ")
+        self.b_save.setEnabled(False)
+        b_load = QtWidgets.QPushButton("ロード")
+        b_settings = QtWidgets.QPushButton("設定")
+        self.b_save.clicked.connect(self.save)
+        b_load.clicked.connect(self.load)
+        b_settings.clicked.connect(self.open_settings)
+        row2.addWidget(QtWidgets.QLabel("型式"))
+        row2.addWidget(self.e_model)
+        row2.addWidget(QtWidgets.QLabel("機番"))
+        row2.addWidget(self.e_machine)
+        row2.addStretch(1)
+        row2.addWidget(self.b_save)
+        row2.addWidget(b_load)
+        row2.addWidget(b_settings)
+
+        # --- ガイドと受信値 ---
         self.guide = QtWidgets.QLabel("―")
         self.guide.setStyleSheet("font-size:22px; font-family:monospace; padding:4px;")
         self.live = QtWidgets.QLabel("")
@@ -109,7 +204,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         container = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(container)
-        v.addLayout(top)
+        v.addLayout(row1)
+        v.addLayout(row2)
         v.addWidget(self.guide)
         v.addWidget(self.live)
         v.addWidget(self.plot, 1)
@@ -121,6 +217,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.b_conn)
         # ウィンドウ表示後に接続（自動検出は数秒かかるため、先に画面を出す）
         QtCore.QTimer.singleShot(100, self.connect_device)
+
+        # ND287側から送られてくるデータの受信ループ
+        self.rx_timer = QtCore.QTimer(self)
+        self.rx_timer.timeout.connect(self.poll_serial)
+        self.rx_timer.start(200)
+
+    # ----- 接続 -----
 
     def connect_device(self):
         if self.dev.dummy:
@@ -139,7 +242,24 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self.b_conn.setEnabled(True)
 
-    # ----- 操作 -----
+    def open_settings(self):
+        dlg = SettingsDialog(self, self.settings)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self.settings.update(dlg.values())
+        try:
+            save_settings(self.settings)
+        except Exception as e:
+            self.statusBar().showMessage(f"設定の保存に失敗: {e}")
+            return
+        if not self.dev.dummy:
+            self.dev.close()
+            self.dev = ND287Device(
+                self.settings["port"], self.settings["baudrate"], self.settings["parity"]
+            )
+            self.connect_device()
+
+    # ----- 取込 -----
 
     def start(self):
         self.seq = Sequence(
@@ -148,6 +268,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_range.value(),
             self.e_start.value(),
         )
+        self.data = self.seq.data
+        self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
         for curve in self.curves.values():
             curve.setData([], [])
         self.table.setRowCount(0)
@@ -159,20 +281,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_guide(self):
         cur = self.seq.current()
         if cur is None:
-            self.guide.setText("測定完了")
-            self.b_take.setEnabled(False)
             return
         key, target, _ = cur
         self.guide.setText(
-            f"[{SERIES_LABELS[key]}]  {deg_to_dms(target)} へ割り出して静止 → 取込"
-            f"   ({self.seq.idx + 1}/{len(self.seq)})"
+            f"[{SERIES_LABELS[key]}]  {deg_to_dms(target)} へ割り出して静止"
+            f" → ND287のPRINT（または手動取込）   ({self.seq.idx + 1}/{len(self.seq)})"
         )
 
-    def take(self):
-        cur = self.seq.current()
+    def poll_serial(self):
+        """ND287側から送信された値を受け取り、順番どおりに箱へ入れる"""
+        if self.seq is None or self.seq.done():
+            return
+        try:
+            angles = self.dev.poll_received()
+        except Exception:
+            return
+        for angle in angles:
+            if self.seq.done():
+                break
+            self.accept_point(angle)
+
+    def take_manual(self):
+        """PC側からCTRL Bで現在値を要求して1点取り込む"""
+        cur = self.seq.current() if self.seq else None
         if cur is None:
             return
-        key, target, direction = cur
+        _, target, direction = cur
         self.dev.prepare_point(target, direction)
         try:
             angle = self.dev.read_angle()
@@ -182,11 +316,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if angle is None:
             self.statusBar().showMessage("応答パース不可（本体出力設定を確認）")
             return
+        self.accept_point(angle)
+
+    def accept_point(self, angle):
         self.live.setText(f"受信: {deg_to_dms(angle)}")
         self.seq.record(angle)
         self.b_undo.setEnabled(True)
         self.redraw()
         if self.seq.done():
+            self.guide.setText("測定完了 → セーブで保存")
             self.finish()
         else:
             self.show_guide()
@@ -200,49 +338,106 @@ class MainWindow(QtWidgets.QMainWindow):
             self.redraw()
             self.show_guide()
 
+    # ----- 表示 -----
+
     def redraw(self):
         for key, curve in self.curves.items():
-            targets, measured = self.seq.data[key]
+            targets, measured = self.data[key]
             if targets:
                 curve.setData(np.asarray(targets), deviation_sec(targets, measured))
             else:
                 curve.setData([], [])
 
     def finish(self):
-        self.guide.setText("測定完了")
         self.b_take.setEnabled(False)
         self.b_save.setEnabled(True)
-        summary, _ = summarize(self.seq.data)
+        summary, _ = summarize(self.data)
         rows = result_rows(summary)
         self.table.setRowCount(len(rows))
         for i, (item, value) in enumerate(rows):
             self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
             self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(value))
 
+    # ----- セーブ・ロード -----
+
     def save(self):
-        if not self.seq or not self.seq.done():
+        if not self.data or not any(t for t, _ in self.data.values()):
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "測定結果を保存", "分割測定結果.csv", "CSV (*.csv)"
-        )
-        if not path:
+        machine_no = self.e_machine.text().strip()
+        if not machine_no:
+            QtWidgets.QMessageBox.warning(self, "セーブ", "機番を入力してください")
             return
-        summary, _ = summarize(self.seq.data)
+        root = resolve_save_root(self.settings)
+        path = build_save_path(root, self.e_model.text(), machine_no)
+        if path.exists():
+            answer = QtWidgets.QMessageBox.question(
+                self, "セーブ", f"{path.name} は既にあります。上書きしますか？"
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+        meta = {
+            "型式": self.e_model.text().strip(),
+            "機番": machine_no,
+            META_KEYS["wheel_pitch"]: self.e_wheel.value(),
+            META_KEYS["worm_pitch"]: self.e_worm.value(),
+            META_KEYS["worm_range"]: self.e_range.value(),
+            META_KEYS["worm_start"]: self.e_start.value(),
+        }
+        summary, _ = summarize(self.data)
         try:
-            save_csv(path, self.seq.data, summary)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save_csv(path, self.data, summary, meta)
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
 
+    def load(self):
+        root = resolve_save_root(self.settings)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "測定データを開く", str(root), "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            meta, data = load_csv(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "ロード", f"読み込みに失敗しました:\n{e}")
+            return
+        if not any(t for t, _ in data.values()):
+            QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
+            return
+        self.seq = None  # 取込中状態は解除
+        self.data = data
+        self.e_model.setText(meta.get("型式", ""))
+        self.e_machine.setText(meta.get("機番", ""))
+        for attr, key in [
+            (self.e_wheel, META_KEYS["wheel_pitch"]),
+            (self.e_worm, META_KEYS["worm_pitch"]),
+            (self.e_range, META_KEYS["worm_range"]),
+            (self.e_start, META_KEYS["worm_start"]),
+        ]:
+            if key in meta:
+                try:
+                    attr.setValue(float(meta[key]))
+                except ValueError:
+                    pass
+        self.b_undo.setEnabled(False)
+        self.live.setText("")
+        self.redraw()
+        self.finish()
+        self.guide.setText(f"ロード: {Path(path).name}")
+        self.statusBar().showMessage(f"ロードしました: {path}")
+
     def closeEvent(self, event):
+        self.rx_timer.stop()
         self.dev.close()
         super().closeEvent(event)
 
 
-def run(device, wheel_pitch, worm_pitch, worm_range, worm_start=0.0):
+def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     import sys
 
     app = QtWidgets.QApplication(sys.argv)
-    win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start)
+    win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)
     win.show()
     sys.exit(app.exec())

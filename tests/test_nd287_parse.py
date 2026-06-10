@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
 
-from nd287_app.nd287 import parse_angle, deg_to_dms, ACK
+from nd287_app.nd287 import parse_angle, deg_to_dms, extract_angles, ACK
 
 
 class TestParseAngle(unittest.TestCase):
@@ -34,6 +34,27 @@ class TestParseAngle(unittest.TestCase):
         self.assertIsNone(parse_angle(b""))
         self.assertIsNone(parse_angle(b"\r\n"))
         self.assertIsNone(parse_angle(b"ERROR\r\n"))
+
+
+class TestExtractAngles(unittest.TestCase):
+    def test_multiple_complete_lines(self):
+        angles, rest = extract_angles(b"10.0\r\n20.0\r\n")
+        self.assertEqual(angles, [10.0, 20.0])
+        self.assertEqual(rest, b"")
+
+    def test_incomplete_tail_kept_in_buffer(self):
+        angles, rest = extract_angles(b"10.0\r\n20.")
+        self.assertEqual(angles, [10.0])
+        self.assertEqual(rest, b"20.")
+
+    def test_garbage_lines_skipped(self):
+        angles, rest = extract_angles(b"\r\nERR\r\n30.5\r\n")
+        self.assertEqual(angles, [30.5])
+        self.assertEqual(rest, b"")
+
+    def test_lf_only_terminator(self):
+        angles, rest = extract_angles(b"45.0\n")
+        self.assertEqual(angles, [45.0])
 
 
 class TestDegToDms(unittest.TestCase):

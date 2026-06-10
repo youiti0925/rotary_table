@@ -116,13 +116,28 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(self.table)
         self.setCentralWidget(container)
 
-        try:
+        self.b_conn = QtWidgets.QPushButton("再接続")
+        self.b_conn.clicked.connect(self.connect_device)
+        self.statusBar().addPermanentWidget(self.b_conn)
+        # ウィンドウ表示後に接続（自動検出は数秒かかるため、先に画面を出す）
+        QtCore.QTimer.singleShot(100, self.connect_device)
+
+    def connect_device(self):
+        if self.dev.dummy:
             self.dev.open()
-            self.statusBar().showMessage(
-                "ダミーモード" if self.dev.dummy else f"接続: {self.dev.port}"
-            )
+            self.statusBar().showMessage("ダミーモード（実機なし）")
+            return
+        self.statusBar().showMessage("ND287を検索中...（数秒かかります）")
+        self.b_conn.setEnabled(False)
+        QtWidgets.QApplication.processEvents()
+        try:
+            self.dev.close()
+            self.dev.open()
+            self.statusBar().showMessage(f"接続: {self.dev.port}")
         except Exception as e:
             self.statusBar().showMessage(f"接続失敗: {e}")
+        finally:
+            self.b_conn.setEnabled(True)
 
     # ----- 操作 -----
 

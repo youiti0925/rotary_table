@@ -20,15 +20,42 @@ LabVIEW製「IK220分割測定」系アプリのPython移植版。
 | バックラッシ MIN / MAX | 同一指令角度での CCW偏差−CW偏差（ホイール・ウォーム各） |
 | 真の最大・最小 | ホイール偏差とウォーム偏差が最悪方向に重なった合成値（仮実装、下記参照） |
 
-## インストールと実行
+## 起動方法（Windows・ダブルクリック）
+
+| ファイル | 用途 |
+|---|---|
+| `ND287分割測定.bat` | 本番起動。初回だけ自動セットアップ（ライブラリのインストール）を行う |
+| `ダミーで起動.bat` | 実機なしの疑似データで画面・操作を確認 |
+| `exeを作る.bat` | Python無しの検査PCに配る単体exe（`dist\nd287_bunkatsu.exe`）を作る |
+
+前提: PCにPython（3.10以降推奨）が入っていること。入っていなければバッチが
+案内を出すので、https://www.python.org/downloads/ からインストール
+（「Add python.exe to PATH」に必ずチェック）して再度ダブルクリック。
+初回セットアップの1回だけインターネット接続が必要。2回目以降はオフラインで起動できる。
+
+## COMポートの自動検出
+
+起動時に全シリアルポートを順に探索し、CTRL B を送って角度応答が返った
+ポートをND287と判定して自動接続する。どのCOM番号に挿しても操作は不要。
+接続状態は画面下のステータスバーに表示され、ケーブルを挿し直したときは
+「再接続」ボタンで再探索できる。
+
+注意点:
+- 探索はND287本体のボーレート設定とPC側（既定 9600 8E1）が一致している前提。
+  本体設定が違う場合は `--baud` `--parity` を指定する
+- 探索中、各ポートに1バイト（CTRL B）を送信する。ND287以外のシリアル機器が
+  同じPCにつながっている環境では `--port COM3` のように明示指定が安全
+
+## コマンドラインでの実行
 
 ```
 pip install -r requirements.txt
 
+python -m nd287_app                          # 実機接続（COMポート自動検出、9600 8E1）
 python -m nd287_app --dummy                  # 実機なしで画面・流れを確認
-python -m nd287_app --port COM3              # 実機接続（9600 8E1）
+python -m nd287_app --port COM3              # ポート明示指定
 python -m nd287_app --port COM3 --baud 19200 --parity N
-python -m nd287_app --port COM3 --wheel-pitch 10 --worm-pitch 0.5 --worm-range 5
+python -m nd287_app --wheel-pitch 10 --worm-pitch 0.5 --worm-range 5
 ```
 
 ホイール刻み・ウォーム刻み・ウォーム範囲・ウォーム開始角度は画面上でも変更できる。
@@ -76,7 +103,12 @@ python -m unittest discover -s tests -v
 
 ## exe化（検査PC配布用）
 
+`exeを作る.bat` をダブルクリックするだけ。手動でやる場合:
+
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name nd287_bunkatsu -p . nd287_app/__main__.py
+pyinstaller --onefile --windowed --name nd287_bunkatsu --paths . nd287_app/__main__.py
 ```
+
+できた `dist\nd287_bunkatsu.exe` を検査PCにコピーすれば、Python無しで
+ダブルクリック起動できる。

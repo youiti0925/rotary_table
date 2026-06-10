@@ -64,10 +64,15 @@ def deg_to_dms(deg: float) -> str:
 
 
 class ND287Device:
-    """pyserial ラッパ。各割出ポイントで静止後に read_angle() で1点取得する。"""
+    """pyserial ラッパ。各割出ポイントで静止後に read_angle() で1点取得する。
 
-    def __init__(self, port: str, baudrate: int = None, parity: str = None):
+    port を None または "auto" にすると、open() 時に全シリアルポートへ
+    CTRL B を送って応答するポートを探す（自動検出）。
+    """
+
+    def __init__(self, port: str = None, baudrate: int = None, parity: str = None):
         self.port = port
+        self._auto = port in (None, "", "auto")
         self.baudrate = baudrate or SERIAL_DEFAULTS["baudrate"]
         self.parity = parity or SERIAL_DEFAULTS["parity"]
         self.ser = None
@@ -78,6 +83,14 @@ class ND287Device:
 
     def open(self):
         import serial
+
+        if self._auto:
+            found = find_nd287_port(self.baudrate, self.parity)
+            if found is None:
+                raise RuntimeError(
+                    "ND287が見つかりません（ケーブル・電源・本体のボーレート設定を確認）"
+                )
+            self.port = found
 
         parity_map = {
             "N": serial.PARITY_NONE,
@@ -106,6 +119,40 @@ class ND287Device:
         self.ser.reset_input_buffer()
         self.ser.write(REQUEST_CMD)
         return parse_angle(self.ser.read_until(TERM))
+
+
+def list_serial_ports():
+    """PC上のシリアルポート名一覧（COM番号順）"""
+    from serial.tools import list_ports
+
+    return [p.device for p in sorted(list_ports.comports(), key=lambda p: p.device)]
+
+
+def probe_port(port: str, baudrate: int = None, parity: str = None) -> bool:
+    """ポートに CTRL B を送り、角度として解釈できる応答が返れば True。"""
+    dev = ND287Device(port, baudrate, parity)
+    try:
+        dev.open()
+        try:
+            return dev.read_angle() is not None
+        finally:
+            dev.close()
+    except Exception:
+        return False
+
+
+def find_nd287_port(baudrate: int = None, parity: str = None, ports=None):
+    """全ポートを順に試し、ND287 が応答したポート名を返す。無ければ None。
+
+    注意: 探索中、各ポートに CTRL B (0x02) を1バイト送信する。ND287以外の
+    シリアル機器が同じPCに接続されている場合は --port で明示指定すること。
+    """
+    if ports is None:
+        ports = list_serial_ports()
+    for port in ports:
+        if probe_port(port, baudrate, parity):
+            return port
+    return None
 
 
 class DummyDevice(ND287Device):

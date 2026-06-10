@@ -2,8 +2,9 @@
 """エントリポイント
 
 実行例:
+    python -m nd287_app                    # 実機接続（COMポート自動検出、9600 8E1）
     python -m nd287_app --dummy            # 実機なしで画面確認
-    python -m nd287_app --port COM3        # 実機接続（9600 8E1）
+    python -m nd287_app --port COM3        # ポート明示指定
     python -m nd287_app --port COM3 --baud 19200 --parity N
 """
 
@@ -14,7 +15,11 @@ from .nd287 import ND287Device, DummyDevice
 
 def main():
     ap = argparse.ArgumentParser(description="ND287 分割測定アプリ")
-    ap.add_argument("--port", default="COM3", help="シリアルポート（例 COM3, /dev/ttyUSB0）")
+    ap.add_argument(
+        "--port",
+        default="auto",
+        help="シリアルポート（省略時は全ポートを探索して自動検出。例 COM3, /dev/ttyUSB0）",
+    )
     ap.add_argument("--baud", type=int, default=None, help="ボーレート（既定 9600）")
     ap.add_argument("--parity", default=None, choices=["N", "E", "O"], help="パリティ（既定 E）")
     ap.add_argument("--dummy", action="store_true", help="実機なしの疑似デバイスで起動")

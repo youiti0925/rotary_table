@@ -4,6 +4,7 @@
 設定ファイルはアプリ本体と同じフォルダに置く（exe化時はexeの隣）。
 """
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -13,6 +14,14 @@ DEFAULTS = dict(
     baudrate=9600,
     parity="E",        # N / E / O
     save_root="測定データ",  # セーブ先ルート（相対ならアプリフォルダ基準）
+    # バックラッシの温度別規格 [秒]。ホイールが合金製のため熱膨張で
+    # バックラッシが変わり、温度帯ごとに合否規格が異なる。
+    # ※下記は仮の値。実際の規格に合わせて settings.json で書き換えること。
+    backlash_spec=[
+        dict(temp_min=0.0, temp_max=15.0, min=0.0, max=30.0),
+        dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0),
+        dict(temp_min=25.0, temp_max=40.0, min=0.0, max=20.0),
+    ],
 )
 
 
@@ -28,7 +37,7 @@ def settings_path() -> Path:
 
 def load_settings(path=None) -> dict:
     p = Path(path) if path else settings_path()
-    settings = dict(DEFAULTS)
+    settings = copy.deepcopy(DEFAULTS)
     try:
         settings.update(json.loads(p.read_text(encoding="utf-8")))
     except FileNotFoundError:

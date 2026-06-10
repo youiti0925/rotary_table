@@ -3,7 +3,8 @@
 
 割出測定は時間ポーリングではなく「割り出して静止 → 1点取込」のトリガ方式。
 順序:
-  1. ホイール CW  … 0°→360° を wheel_pitch 刻みで一周
+  1. ホイール CW  … 0°→360° を wheel_pitch 刻みで一周（閉じ点360°込み。
+                     開始0°と終了360°の偏差差が「傾き」になる）
   2. ホイール CCW … 同じポイントを逆順に一周
   3. ウォーム CW  … worm_start からウォーム1回転ぶん(worm_range)を worm_pitch 刻み
   4. ウォーム CCW … 同じポイントを逆順
@@ -23,7 +24,7 @@ SERIES_LABELS = {
 
 class Sequence:
     def __init__(self, wheel_pitch, worm_pitch, worm_range, worm_start=0.0):
-        wheel_pts = np.arange(0.0, 360.0, wheel_pitch)
+        wheel_pts = np.arange(0.0, 360.0 + 1e-9, wheel_pitch)
         worm_pts = worm_start + np.arange(0.0, worm_range + 1e-9, worm_pitch)
         self.steps = []  # (系列キー, 指令角度, 方向 +1/-1)
         for a in wheel_pts:

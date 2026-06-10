@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .analysis import deviation_sec
+from .analysis import deviation_sec, judge_backlash
 from .sequence import SERIES_KEYS, SERIES_LABELS
 
 RESULT_LABELS = {
@@ -42,18 +42,42 @@ def build_save_path(root, model: str, machine_no: str) -> Path:
     return Path(root) / model_folder(model) / f"{sanitize_filename(machine_no)}.csv"
 
 
-def result_rows(summary):
-    """結果サマリ → 表示・保存用の (項目, 値) 行リスト"""
+def backlash_judgement_text(summary, temp_c, spec):
+    """測定温度に応じたホイールバックラッシの合否判定文。判定できなければ None。"""
+    if "wheel_backlash" not in summary or temp_c is None:
+        return None
+    ok, band = judge_backlash(
+        summary["wheel_backlash"]["min"], summary["wheel_backlash"]["max"], temp_c, spec
+    )
+    if ok is None:
+        return f"判定不可（{temp_c:g}°Cの規格が未設定）"
+    verdict = "OK" if ok else "NG"
+    return f'{verdict}（規格 {band["min"]:g}〜{band["max"]:g}" @ {temp_c:g}°C）'
+
+
+def series_rows(summary):
+    """系列ごとの結果 → (項目, 値) 行リスト"""
     rows = []
     for key, label in RESULT_LABELS.items():
         if key in summary:
-            rows.append((f"{label} 精度PP", f'{summary[key]["pp"]:.2f}"'))
-            rows.append((f"{label} 隣接", f'{summary[key]["adjacent"]:.2f}"'))
+            s = summary[key]
+            rows.append((f"{label} 精度PP", f'{s["pp"]:.2f}"'))
+            rows.append((f"{label} 単一誤差", f'{s["single"]:.2f}"'))
+            rows.append((f"{label} 隣接誤差", f'{s["adjacent"]:.2f}"'))
+            rows.append((f"{label} 傾き", f'{s["slope"]:+.2f}"'))
+    return rows
+
+
+def misc_rows(summary, judgement_text=None):
+    """バックラッシ・合否判定・真の最大最小 → (項目, 値) 行リスト"""
+    rows = []
     for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
         key = f"{grp}_backlash"
         if key in summary:
             rows.append((f"{label} バックラッシ MIN", f'{summary[key]["min"]:.2f}"'))
             rows.append((f"{label} バックラッシ MAX", f'{summary[key]["max"]:.2f}"'))
+    if judgement_text is not None:
+        rows.append(("ホイール バックラッシ 判定", judgement_text))
     for dirn, label in (("cw", "CW"), ("ccw", "CCW")):
         if dirn in summary.get("true", {}):
             rows.append((f"真の最大 ({label})", f'{summary["true"][dirn]["true_max"]:.2f}"'))
@@ -61,10 +85,16 @@ def result_rows(summary):
     return rows
 
 
-def save_csv(path, data, summary, meta=None):
+def result_rows(summary, judgement_text=None):
+    """結果サマリ全体 → 表示・保存用の (項目, 値) 行リスト"""
+    return series_rows(summary) + misc_rows(summary, judgement_text)
+
+
+def save_csv(path, data, summary, meta=None, judgement_text=None):
     """測定生データと結果サマリを1つのCSVに保存する。
 
-    meta: 型式・機番・測定条件などの dict（ロード時に復元される）
+    meta: 型式・機番・日付・名前・測定温度・測定条件などの dict（ロード時に復元される）
+    judgement_text: バックラッシ合否の判定文（結果サマリに含めて保存）
     """
     with open(path, "w", newline="", encoding="cp932", errors="replace") as f:
         w = csv.writer(f)
@@ -83,7 +113,7 @@ def save_csv(path, data, summary, meta=None):
                 w.writerow([SERIES_LABELS[key], f"{t:.4f}", f"{m:.6f}", f"{d:.2f}"])
         w.writerow([])
         w.writerow(["項目", "値"])
-        for item, value in result_rows(summary):
+        for item, value in result_rows(summary, judgement_text):
             w.writerow([item, value])
 
 

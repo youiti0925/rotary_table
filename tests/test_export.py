@@ -6,6 +6,7 @@ from pathlib import Path
 
 from nd287_app.analysis import summarize
 from nd287_app.export import (
+    backlash_judgement_text,
     build_save_path,
     load_csv,
     model_folder,
@@ -30,9 +31,30 @@ class TestExport(unittest.TestCase):
         summary, _ = summarize(seq.data)
         items = [r[0] for r in result_rows(summary)]
         self.assertIn("ホイールCW 精度PP", items)
+        self.assertIn("ホイールCW 単一誤差", items)
+        self.assertIn("ウォームCCW 隣接誤差", items)
+        self.assertIn("ウォームCW 傾き", items)
         self.assertIn("ホイール バックラッシ MIN", items)
         self.assertIn("真の最大 (CW)", items)
         self.assertIn("真の最小 (CCW)", items)
+        self.assertNotIn("ホイール バックラッシ 判定", items)  # 判定文なしのとき
+
+    def test_result_rows_with_judgement(self):
+        seq = make_finished_sequence()
+        summary, _ = summarize(seq.data)
+        rows = dict(result_rows(summary, "OK（規格 0〜25\" @ 23.5°C）"))
+        self.assertIn("ホイール バックラッシ 判定", rows)
+        self.assertTrue(rows["ホイール バックラッシ 判定"].startswith("OK"))
+
+    def test_backlash_judgement_text(self):
+        seq = make_finished_sequence()  # バックラッシ = CCW誤差2.5"-CW誤差1.0" = 1.5"
+        summary, _ = summarize(seq.data)
+        spec = [dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0)]
+        self.assertTrue(backlash_judgement_text(summary, 20.0, spec).startswith("OK"))
+        ng_spec = [dict(temp_min=15.0, temp_max=25.0, min=0.0, max=1.0)]
+        self.assertTrue(backlash_judgement_text(summary, 20.0, ng_spec).startswith("NG"))
+        self.assertTrue(backlash_judgement_text(summary, 50.0, spec).startswith("判定不可"))
+        self.assertIsNone(backlash_judgement_text(summary, None, spec))
 
     def test_save_csv_roundtrip(self):
         seq = make_finished_sequence()
@@ -45,10 +67,10 @@ class TestExport(unittest.TestCase):
         self.assertIn("ND287 分割測定結果", text)
         self.assertIn("ホイール CW", text)
         self.assertIn("真の最大 (CW)", text)
-        # 生データ行数 = 4+4+3+3 = 14系列点（結果サマリ行は系列名で始まらない）
+        # 生データ行数 = 5+5+3+3 = 16系列点（ホイールは閉じ点360°込み）
         series = ("ホイール CW,", "ホイール CCW,", "ウォーム CW,", "ウォーム CCW,")
         data_lines = [l for l in text.splitlines() if l.startswith(series)]
-        self.assertEqual(len(data_lines), 14)
+        self.assertEqual(len(data_lines), 16)
 
 
 class TestSavePathRules(unittest.TestCase):
@@ -107,7 +129,7 @@ class TestLoadCsv(unittest.TestCase):
             save_csv(path, seq.data, summary)  # メタなし（旧形式）
             meta, data = load_csv(path)
         self.assertNotIn("型式", meta)
-        self.assertEqual(len(data["wheel_cw"][0]), 4)
+        self.assertEqual(len(data["wheel_cw"][0]), 5)
 
 
 if __name__ == "__main__":

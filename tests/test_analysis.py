@@ -4,8 +4,12 @@ import unittest
 from nd287_app.analysis import (
     adjacent,
     backlash,
+    backlash_band_for_temp,
     deviation_sec,
+    judge_backlash,
     pp,
+    single,
+    slope,
     summarize,
     true_min_max,
 )
@@ -31,6 +35,16 @@ class TestDeviation(unittest.TestCase):
         self.assertAlmostEqual(adjacent([1.0, 0.0, -2.0]), 2.0)
         self.assertEqual(adjacent([5.0]), 0.0)
 
+    def test_single(self):
+        self.assertAlmostEqual(single([1.0, 0.0, -2.0]), 2.0)
+        self.assertEqual(single([]), 0.0)
+
+    def test_slope(self):
+        # 傾き = 終了の偏差 - 開始の偏差（測定順）
+        self.assertAlmostEqual(slope([1.0, 0.0, -2.0]), -3.0)
+        self.assertAlmostEqual(slope([-1.0, 0.0, 2.5]), 3.5)
+        self.assertEqual(slope([5.0]), 0.0)
+
 
 class TestBacklash(unittest.TestCase):
     def test_backlash_min_max(self):
@@ -53,19 +67,51 @@ class TestTrueMinMax(unittest.TestCase):
         self.assertAlmostEqual(tmax, 1.5)
 
 
+SPEC = [
+    dict(temp_min=0.0, temp_max=15.0, min=0.0, max=30.0),
+    dict(temp_min=15.0, temp_max=25.0, min=0.0, max=25.0),
+    dict(temp_min=25.0, temp_max=40.0, min=0.0, max=20.0),
+]
+
+
+class TestBacklashJudgement(unittest.TestCase):
+    def test_band_selection_by_temperature(self):
+        self.assertEqual(backlash_band_for_temp(SPEC, 10.0)["max"], 30.0)
+        self.assertEqual(backlash_band_for_temp(SPEC, 20.0)["max"], 25.0)
+        self.assertEqual(backlash_band_for_temp(SPEC, 30.0)["max"], 20.0)
+        self.assertIsNone(backlash_band_for_temp(SPEC, 50.0))
+        self.assertIsNone(backlash_band_for_temp([], 20.0))
+
+    def test_temperature_changes_verdict(self):
+        # バックラッシ22"は、10°C（規格30"まで）ならOK、30°C（規格20"まで）ならNG
+        ok_cold, _ = judge_backlash(5.0, 22.0, 10.0, SPEC)
+        ok_hot, _ = judge_backlash(5.0, 22.0, 30.0, SPEC)
+        self.assertTrue(ok_cold)
+        self.assertFalse(ok_hot)
+
+    def test_below_lower_limit_is_ng(self):
+        ok, _ = judge_backlash(-1.0, 10.0, 20.0, SPEC)
+        self.assertFalse(ok)
+
+    def test_no_band_returns_none(self):
+        ok, band = judge_backlash(0.0, 10.0, 99.0, SPEC)
+        self.assertIsNone(ok)
+        self.assertIsNone(band)
+
+
 class TestSequence(unittest.TestCase):
     def test_step_layout(self):
-        # ホイール90°刻み=4点、ウォーム1°刻みで2°ぶん=3点
+        # ホイール90°刻み=0,90,180,270,360の5点（閉じ点込み）、ウォーム1°刻みで2°ぶん=3点
         seq = Sequence(wheel_pitch=90.0, worm_pitch=1.0, worm_range=2.0)
-        self.assertEqual(len(seq), 4 + 4 + 3 + 3)
-        # CW は昇順で始まり、CCW は同じ点列の逆順
+        self.assertEqual(len(seq), 5 + 5 + 3 + 3)
+        # CW は昇順で始まり閉じ点360°で終わる。CCW は同じ点列の逆順
         self.assertEqual(seq.steps[0], ("wheel_cw", 0.0, +1))
-        self.assertEqual(seq.steps[3], ("wheel_cw", 270.0, +1))
-        self.assertEqual(seq.steps[4], ("wheel_ccw", 270.0, -1))
-        self.assertEqual(seq.steps[7], ("wheel_ccw", 0.0, -1))
-        self.assertEqual(seq.steps[8], ("worm_cw", 0.0, +1))
-        self.assertEqual(seq.steps[10], ("worm_cw", 2.0, +1))
-        self.assertEqual(seq.steps[11], ("worm_ccw", 2.0, -1))
+        self.assertEqual(seq.steps[4], ("wheel_cw", 360.0, +1))
+        self.assertEqual(seq.steps[5], ("wheel_ccw", 360.0, -1))
+        self.assertEqual(seq.steps[9], ("wheel_ccw", 0.0, -1))
+        self.assertEqual(seq.steps[10], ("worm_cw", 0.0, +1))
+        self.assertEqual(seq.steps[12], ("worm_cw", 2.0, +1))
+        self.assertEqual(seq.steps[13], ("worm_ccw", 2.0, -1))
 
     def test_record_and_undo(self):
         seq = Sequence(wheel_pitch=180.0, worm_pitch=1.0, worm_range=1.0)
@@ -96,6 +142,9 @@ class TestSummarize(unittest.TestCase):
         for key in ("wheel_cw", "wheel_ccw", "worm_cw", "worm_ccw"):
             self.assertIn(key, summary)
             self.assertAlmostEqual(summary[key]["pp"], 0.0, places=6)
+            # 一定オフセット誤差なので単一誤差=オフセット、傾き=0
+            self.assertGreater(summary[key]["single"], 0.0)
+            self.assertAlmostEqual(summary[key]["slope"], 0.0, places=6)
         # バックラッシ = CCW偏差(2") - CW偏差(1") = 1.0"
         self.assertAlmostEqual(summary["wheel_backlash"]["min"], 1.0, places=6)
         self.assertAlmostEqual(summary["wheel_backlash"]["max"], 1.0, places=6)

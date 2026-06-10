@@ -3,8 +3,13 @@
 
 偏差 = (測定値 - 指令値) を秒["]に換算して評価する。
   - 精度PP   : 偏差の最大値 - 最小値
-  - 最大隣接 : 隣り合う割出ポイント間の偏差差の最大値
+  - 単一誤差 : 1ポイントの偏差の絶対値の最大
+  - 隣接誤差 : 隣り合う割出ポイント間の偏差差の最大値
+  - 傾き     : 開始角度と終了角度の偏差の差（本来戻ってくるところに
+               戻ってこないときの数字。測定順の最後 - 最初）
   - バックラッシ : 同一指令角度での CCW偏差 - CW偏差。その MIN / MAX
+  - バックラッシ合否 : 測定温度に応じた規格（ホイールが合金製のため
+               熱膨張でバックラッシが変わる）と突き合わせて判定
   - 真の最大最小 : ホイール偏差とウォーム偏差が最悪方向に重なった合成値（仮実装）
 """
 
@@ -24,10 +29,26 @@ def pp(dev):
     return float(dev.max() - dev.min()) if len(dev) else 0.0
 
 
+def single(dev):
+    """単一誤差[秒] = 偏差の絶対値の最大"""
+    dev = np.asarray(dev, dtype=float)
+    return float(np.abs(dev).max()) if len(dev) else 0.0
+
+
 def adjacent(dev):
     """最大隣接誤差[秒] = 隣接ポイント間の偏差差の最大値"""
     dev = np.asarray(dev, dtype=float)
     return float(np.abs(np.diff(dev)).max()) if len(dev) >= 2 else 0.0
+
+
+def slope(dev):
+    """傾き[秒] = 終了角度の偏差 - 開始角度の偏差（測定順）
+
+    一周（またはウォーム1回転）して本来戻ってくるはずの位置に
+    戻ってこなかったぶん。
+    """
+    dev = np.asarray(dev, dtype=float)
+    return float(dev[-1] - dev[0]) if len(dev) >= 2 else 0.0
 
 
 def backlash(t_cw, d_cw, t_ccw, d_ccw):
@@ -54,6 +75,30 @@ def true_min_max(wheel_dev, worm_dev):
     return float(w.min() + v.min()), float(w.max() + v.max())
 
 
+def backlash_band_for_temp(spec, temp_c):
+    """温度に該当するバックラッシ規格帯を返す。無ければ None。
+
+    spec: [{"temp_min":…, "temp_max":…, "min":…, "max":…}, …]
+    """
+    for band in spec or []:
+        if band["temp_min"] <= temp_c < band["temp_max"]:
+            return band
+    return None
+
+
+def judge_backlash(bl_min, bl_max, temp_c, spec):
+    """測定温度に応じた規格でバックラッシを合否判定する。
+
+    返り値: (合否 True/False, 使用した規格帯)。温度に該当する規格が
+    無ければ (None, None)。
+    """
+    band = backlash_band_for_temp(spec, temp_c)
+    if band is None:
+        return None, None
+    ok = (band["min"] <= bl_min) and (bl_max <= band["max"])
+    return ok, band
+
+
 def summarize(data):
     """測定データ一式から結果サマリを作る。
 
@@ -66,7 +111,7 @@ def summarize(data):
         if targets:
             d = deviation_sec(targets, measured)
             devs[key] = (np.asarray(targets, dtype=float), d)
-            out[key] = dict(pp=pp(d), adjacent=adjacent(d))
+            out[key] = dict(pp=pp(d), single=single(d), adjacent=adjacent(d), slope=slope(d))
 
     for grp in ("wheel", "worm"):
         cw = devs.get(f"{grp}_cw")

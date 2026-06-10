@@ -2,10 +2,12 @@
 """測定画面（PySide6 + pyqtgraph）
 
 操作の流れ:
-    1. 型式・機番を入力し、刻み等を確認して「取込開始」
+    1. 型式・機番・日付・名前・測定温度を入力し、等分数を確認して「取込開始」
+       （全部そろっていないと取込は始まらない）
     2. データ受け取り状態になる。テーブルを割り出して静止し、ND287のPRINTキー
        （またはX41トリガ）で値を送ると、順番どおりに箱へ入る。「手動取込」でも可
-    3. 箱が全部埋まると精度・バックラッシ・真の最大最小が自動表示される
+    3. 箱が全部埋まると、系列ごとの精度PP・単一誤差・隣接誤差・傾きと、
+       バックラッシMIN/MAX・温度規格による合否・真の最大最小が自動表示される
     4. 「セーブ」で <保存先>/<型式の系列>/<機番>.csv に保存（例 RWE-200 → RWE/12345.csv)
     5. 「ロード」で過去の測定を読み戻してグラフ・結果を再表示
 """
@@ -13,11 +15,17 @@
 from pathlib import Path
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from .analysis import deviation_sec, summarize
-from .export import build_save_path, load_csv, result_rows, save_csv
+from .export import (
+    backlash_judgement_text,
+    build_save_path,
+    load_csv,
+    misc_rows,
+    save_csv,
+)
 from .nd287 import ND287Device, deg_to_dms
 from .sequence import Sequence, SERIES_LABELS
 from .settings import resolve_save_root, save_settings
@@ -40,7 +48,12 @@ META_KEYS = {
     "worm_pitch": "ウォーム刻み[°]",
     "worm_range": "ウォーム範囲[°]",
     "worm_start": "ウォーム開始[°]",
+    "date": "日付",
+    "operator": "名前",
+    "temperature": "測定温度[°C]",
 }
+
+SERIES_METRIC_HEADERS = ["系列", "精度PP", "単一誤差", "隣接誤差", "傾き"]
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -72,6 +85,12 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
         form.addRow("保存先フォルダ", root_row)
+
+        note = QtWidgets.QLabel(
+            "バックラッシの温度別規格は settings.json の backlash_spec で編集"
+        )
+        note.setStyleSheet("color:#666;")
+        form.addRow(note)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -155,14 +174,24 @@ class MainWindow(QtWidgets.QMainWindow):
         row1.addWidget(self.b_take)
         row1.addWidget(self.b_undo)
 
-        # --- 2段目: 型式・機番とファイル操作 ---
+        # --- 2段目: 測定情報（取込開始の必須項目）とファイル操作 ---
         row2 = QtWidgets.QHBoxLayout()
         self.e_model = QtWidgets.QLineEdit()
         self.e_model.setPlaceholderText("例: RWE-200")
-        self.e_model.setMaximumWidth(160)
+        self.e_model.setMaximumWidth(130)
         self.e_machine = QtWidgets.QLineEdit()
         self.e_machine.setPlaceholderText("例: 12345")
-        self.e_machine.setMaximumWidth(160)
+        self.e_machine.setMaximumWidth(110)
+        self.e_date = QtWidgets.QDateEdit(QtCore.QDate.currentDate())
+        self.e_date.setDisplayFormat("yyyy-MM-dd")
+        self.e_date.setCalendarPopup(True)
+        self.e_operator = QtWidgets.QLineEdit()
+        self.e_operator.setPlaceholderText("測定者")
+        self.e_operator.setMaximumWidth(110)
+        self.e_temp = QtWidgets.QLineEdit()
+        self.e_temp.setPlaceholderText("例: 23.5")
+        self.e_temp.setMaximumWidth(70)
+        self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
         self.b_save = QtWidgets.QPushButton("セーブ")
         self.b_save.setEnabled(False)
         b_load = QtWidgets.QPushButton("ロード")
@@ -170,10 +199,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_save.clicked.connect(self.save)
         b_load.clicked.connect(self.load)
         b_settings.clicked.connect(self.open_settings)
-        row2.addWidget(QtWidgets.QLabel("型式"))
-        row2.addWidget(self.e_model)
-        row2.addWidget(QtWidgets.QLabel("機番"))
-        row2.addWidget(self.e_machine)
+        for widget, label in [
+            (self.e_model, "型式"),
+            (self.e_machine, "機番"),
+            (self.e_date, "日付"),
+            (self.e_operator, "名前"),
+            (self.e_temp, "測定温度[°C]"),
+        ]:
+            row2.addWidget(QtWidgets.QLabel(label))
+            row2.addWidget(widget)
         row2.addStretch(1)
         row2.addWidget(self.b_save)
         row2.addWidget(b_load)
@@ -196,11 +230,20 @@ class MainWindow(QtWidgets.QMainWindow):
             for key, style in CURVE_STYLES.items()
         }
 
-        # --- 結果表 ---
-        self.table = QtWidgets.QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["項目", "値"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setMaximumHeight(230)
+        # --- 結果表（左: 系列ごとの指標 / 右: バックラッシ・判定・真の最大最小） ---
+        self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
+        self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
+        self.table_series.horizontalHeader().setStretchLastSection(True)
+        self.table_series.verticalHeader().setVisible(False)
+        self.table_series.setMaximumHeight(190)
+        self.table_misc = QtWidgets.QTableWidget(0, 2)
+        self.table_misc.setHorizontalHeaderLabels(["項目", "値"])
+        self.table_misc.horizontalHeader().setStretchLastSection(True)
+        self.table_misc.verticalHeader().setVisible(False)
+        self.table_misc.setMaximumHeight(190)
+        tables = QtWidgets.QHBoxLayout()
+        tables.addWidget(self.table_series, 5)
+        tables.addWidget(self.table_misc, 4)
 
         container = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(container)
@@ -209,7 +252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(self.guide)
         v.addWidget(self.live)
         v.addWidget(self.plot, 1)
-        v.addWidget(self.table)
+        v.addLayout(tables)
         self.setCentralWidget(container)
 
         self.b_conn = QtWidgets.QPushButton("再接続")
@@ -261,7 +304,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 取込 -----
 
+    def parse_temp(self):
+        """測定温度欄の値[°C]。未入力・不正なら None"""
+        try:
+            return float(self.e_temp.text().strip())
+        except ValueError:
+            return None
+
+    def missing_required_fields(self):
+        """取込開始に必要な未入力項目のリスト"""
+        missing = []
+        if not self.e_model.text().strip():
+            missing.append("型式")
+        if not self.e_machine.text().strip():
+            missing.append("機番")
+        if not self.e_operator.text().strip():
+            missing.append("名前")
+        if self.parse_temp() is None:
+            missing.append("測定温度")
+        return missing
+
     def start(self):
+        missing = self.missing_required_fields()
+        if missing:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "取込開始",
+                "次の項目を入力してから取込を開始してください:\n  " + "、".join(missing),
+            )
+            return
         self.seq = Sequence(
             self.e_wheel.value(),
             self.e_worm.value(),
@@ -272,7 +343,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
         for curve in self.curves.values():
             curve.setData([], [])
-        self.table.setRowCount(0)
+        self.table_series.setRowCount(0)
+        self.table_misc.setRowCount(0)
         self.b_take.setEnabled(True)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
@@ -331,7 +403,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def undo(self):
         if self.seq and self.seq.undo():
-            self.table.setRowCount(0)
+            self.table_series.setRowCount(0)
+            self.table_misc.setRowCount(0)
             self.b_save.setEnabled(False)
             self.b_take.setEnabled(True)
             self.b_undo.setEnabled(self.seq.idx > 0)
@@ -348,15 +421,43 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 curve.setData([], [])
 
+    def current_judgement_text(self, summary):
+        return backlash_judgement_text(
+            summary, self.parse_temp(), self.settings.get("backlash_spec")
+        )
+
     def finish(self):
         self.b_take.setEnabled(False)
         self.b_save.setEnabled(True)
         summary, _ = summarize(self.data)
-        rows = result_rows(summary)
-        self.table.setRowCount(len(rows))
+
+        # 左表: 系列ごとの 精度PP・単一誤差・隣接誤差・傾き
+        series = [k for k in SERIES_LABELS if k in summary]
+        self.table_series.setRowCount(len(series))
+        for i, key in enumerate(series):
+            s = summary[key]
+            cells = [
+                SERIES_LABELS[key],
+                f'{s["pp"]:.2f}"',
+                f'{s["single"]:.2f}"',
+                f'{s["adjacent"]:.2f}"',
+                f'{s["slope"]:+.2f}"',
+            ]
+            for j, text in enumerate(cells):
+                self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+
+        # 右表: バックラッシMIN/MAX・温度規格による合否・真の最大最小
+        rows = misc_rows(summary, self.current_judgement_text(summary))
+        self.table_misc.setRowCount(len(rows))
         for i, (item, value) in enumerate(rows):
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(value))
+            self.table_misc.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
+            cell = QtWidgets.QTableWidgetItem(value)
+            if "判定" in item:
+                if value.startswith("NG"):
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                elif value.startswith("OK"):
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor("green")))
+            self.table_misc.setItem(i, 1, cell)
 
     # ----- セーブ・ロード -----
 
@@ -378,6 +479,9 @@ class MainWindow(QtWidgets.QMainWindow):
         meta = {
             "型式": self.e_model.text().strip(),
             "機番": machine_no,
+            META_KEYS["date"]: self.e_date.date().toString("yyyy-MM-dd"),
+            META_KEYS["operator"]: self.e_operator.text().strip(),
+            META_KEYS["temperature"]: self.e_temp.text().strip(),
             META_KEYS["wheel_pitch"]: self.e_wheel.value(),
             META_KEYS["worm_pitch"]: self.e_worm.value(),
             META_KEYS["worm_range"]: self.e_range.value(),
@@ -386,7 +490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         summary, _ = summarize(self.data)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            save_csv(path, self.data, summary, meta)
+            save_csv(path, self.data, summary, meta, self.current_judgement_text(summary))
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
@@ -410,6 +514,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data = data
         self.e_model.setText(meta.get("型式", ""))
         self.e_machine.setText(meta.get("機番", ""))
+        self.e_operator.setText(meta.get(META_KEYS["operator"], ""))
+        self.e_temp.setText(meta.get(META_KEYS["temperature"], ""))
+        date = QtCore.QDate.fromString(meta.get(META_KEYS["date"], ""), "yyyy-MM-dd")
+        if date.isValid():
+            self.e_date.setDate(date)
         for attr, key in [
             (self.e_wheel, META_KEYS["wheel_pitch"]),
             (self.e_worm, META_KEYS["worm_pitch"]),

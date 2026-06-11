@@ -323,6 +323,10 @@ class MainWindow(QtWidgets.QMainWindow):
             plot.setLabel("bottom", "指令角度", units="°")
             plot.setLabel("left", "偏差", units='"')
             plot.showGrid(x=True, y=True, alpha=0.3)
+            # pyqtgraphの自動SI接頭辞を無効化。有効のままだと値が大きいとき
+            # 単位が「k"」（キロ秒角）等に化けて読み違いのもとになる
+            for axis_name in ("left", "bottom"):
+                plot.getAxis(axis_name).enableAutoSIPrefix(False)
         self.curves = {}
         plots = QtWidgets.QHBoxLayout()
         plots.addWidget(self.plot_wheel, 7)

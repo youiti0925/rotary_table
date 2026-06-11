@@ -84,11 +84,13 @@ class ND287Device:
     CTRL B を送って応答するポートを探す（自動検出）。
     """
 
-    def __init__(self, port: str = None, baudrate: int = None, parity: str = None):
+    def __init__(self, port: str = None, baudrate: int = None, parity: str = None,
+                 timeout: float = None):
         self.port = port
         self._auto = port in (None, "", "auto")
         self.baudrate = baudrate or SERIAL_DEFAULTS["baudrate"]
         self.parity = parity or SERIAL_DEFAULTS["parity"]
+        self.timeout = timeout if timeout is not None else SERIAL_DEFAULTS["timeout"]
         self.ser = None
         self._rxbuf = b""
 
@@ -118,7 +120,10 @@ class ND287Device:
             bytesize=serial.EIGHTBITS,
             parity=parity_map[self.parity.upper()],
             stopbits=serial.STOPBITS_ONE,
-            timeout=SERIAL_DEFAULTS["timeout"],
+            timeout=self.timeout,
+            # 書き込みタイムアウト必須: フロー制御で詰まったポート
+            # （Bluetooth仮想COM等）でwrite()が無期限に固まるのを防ぐ
+            write_timeout=1.0,
         )
 
     def close(self):
@@ -161,8 +166,11 @@ def list_serial_ports():
 
 
 def probe_port(port: str, baudrate: int = None, parity: str = None) -> bool:
-    """ポートに CTRL B を送り、角度として解釈できる応答が返れば True。"""
-    dev = ND287Device(port, baudrate, parity)
+    """ポートに CTRL B を送り、角度として解釈できる応答が返れば True。
+
+    探索を速く回すため読み取りタイムアウトは短め（0.5秒）。
+    """
+    dev = ND287Device(port, baudrate, parity, timeout=0.5)
     try:
         dev.open()
         try:

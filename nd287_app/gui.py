@@ -19,6 +19,7 @@
 """
 
 from pathlib import Path
+import threading
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -143,12 +144,16 @@ class SettingsDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
+    _conn_done = QtCore.Signal(bool, str)
+
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
         self.resize(1200, 800)
         self.dev = device
         self.settings = settings
+        self._connecting = False  # 接続スレッド実行中はシリアルに触らない
         self.seq = None        # 取込中のシーケンス（ロード表示時は None）
         self.data = None       # 分割測定の表示対象データ
         self.rep_points = None  # 再現性測定のブロック角度
@@ -335,7 +340,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_conn = QtWidgets.QPushButton("再接続")
         self.b_conn.clicked.connect(self.connect_device)
         self.statusBar().addPermanentWidget(self.b_conn)
-        # ウィンドウ表示後に接続（自動検出は数秒かかるため、先に画面を出す）
+        self._conn_done.connect(self.on_connect_done)
+        # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
         # ND287側から送られてくるデータの受信ループ
@@ -411,21 +417,36 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- 接続 -----
 
     def connect_device(self):
+        """接続（ポート自動探索）をバックグラウンドで実行する。
+
+        探索は1ポートあたり最大1秒前後かかり、Bluetooth仮想COMポート等は
+        開くだけで長時間固まることがあるため、GUIスレッドでは実行しない。
+        """
         if self.dev.dummy:
             self.dev.open()
             self.statusBar().showMessage("ダミーモード（実機なし）")
             return
-        self.statusBar().showMessage("ND287を検索中...（数秒かかります）")
+        if self._connecting:
+            return
+        self._connecting = True
         self.b_conn.setEnabled(False)
-        QtWidgets.QApplication.processEvents()
-        try:
-            self.dev.close()
-            self.dev.open()
-            self.statusBar().showMessage(f"接続: {self.dev.port}")
-        except Exception as e:
-            self.statusBar().showMessage(f"接続失敗: {e}")
-        finally:
-            self.b_conn.setEnabled(True)
+        self.statusBar().showMessage("ND287を検索中...（画面はそのまま操作できます）")
+        dev = self.dev
+
+        def work():
+            try:
+                dev.close()
+                dev.open()
+                self._conn_done.emit(True, f"接続: {dev.port}")
+            except Exception as e:
+                self._conn_done.emit(False, f"接続失敗: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_connect_done(self, ok, message):
+        self._connecting = False
+        self.b_conn.setEnabled(True)
+        self.statusBar().showMessage(message)
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
@@ -526,7 +547,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def poll_serial(self):
         """ND287側から送信された値を受け取り、順番どおりに箱へ入れる"""
-        if self.seq is None or self.seq.done():
+        if self._connecting or self.seq is None or self.seq.done():
             return
         try:
             angles = self.dev.poll_received()
@@ -539,6 +560,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def take_manual(self):
         """PC側からCTRL Bで現在値を要求して1点取り込む"""
+        if self._connecting:
+            self.statusBar().showMessage("接続処理中です。少し待ってください")
+            return
         cur = self.seq.current() if self.seq else None
         if cur is None:
             return

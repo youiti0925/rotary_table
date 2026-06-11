@@ -52,6 +52,10 @@ def tilt_blocks(start, end, n):
 
 
 class IndexingSequence:
+    #: 既定の測定順（測定条件マスタの測定順1,2,3,4 = HR,WR,WL,HL とは別に、
+    #: マスタ未使用時はホイール往復→ウォーム往復の順とする）
+    DEFAULT_ORDER = ("wheel_cw", "wheel_ccw", "worm_cw", "worm_ccw")
+
     def __init__(
         self,
         wheel_pitch,
@@ -60,18 +64,20 @@ class IndexingSequence:
         worm_start=0.0,
         wheel_start=0.0,
         wheel_end=360.0,
+        order=None,
     ):
         wheel_pts = block_points(wheel_start, wheel_end, wheel_pitch)
         worm_pts = block_points(worm_start, worm_start + worm_range, worm_pitch)
+        sections = {
+            "wheel_cw": [("wheel_cw", float(a), +1) for a in wheel_pts],
+            "wheel_ccw": [("wheel_ccw", float(a), -1) for a in wheel_pts[::-1]],
+            "worm_cw": [("worm_cw", float(a), +1) for a in worm_pts],
+            "worm_ccw": [("worm_ccw", float(a), -1) for a in worm_pts[::-1]],
+        }
+        self.order = tuple(order) if order else self.DEFAULT_ORDER
         self.steps = []  # (系列キー, 指令角度, 方向 +1/-1)
-        for a in wheel_pts:
-            self.steps.append(("wheel_cw", float(a), +1))
-        for a in wheel_pts[::-1]:
-            self.steps.append(("wheel_ccw", float(a), -1))
-        for a in worm_pts:
-            self.steps.append(("worm_cw", float(a), +1))
-        for a in worm_pts[::-1]:
-            self.steps.append(("worm_ccw", float(a), -1))
+        for key in self.order:
+            self.steps.extend(sections.get(key, []))
         self.idx = 0
         self.data = {k: ([], []) for k in SERIES_KEYS}
 

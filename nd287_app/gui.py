@@ -26,7 +26,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from .analysis import band_for_temp, deviation_sec, repeatability_summary, summarize
-from .bs_format import data_to_doc, doc_to_data, load_bs, save_bs
+from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
+from .masters import condition_params, find_entry, formula_minmax, load_masters
 from .export import (
     MODE_KEY,
     build_save_path,
@@ -417,7 +418,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rx_timer.timeout.connect(self.poll_serial)
         self.rx_timer.start(200)
 
+        # 型式マスタ（測定条件・合否判定）。型式入力で自動適用される
+        self.master_cond = None
+        self.master_judge = None
+        try:
+            self.masters = load_masters(self.settings)
+        except Exception as e:
+            self.masters = None
+            QtCore.QTimer.singleShot(
+                0, lambda: self.statusBar().showMessage(f"型式マスタの読み込みに失敗: {e}")
+            )
+        self.e_model.editingFinished.connect(self.on_model_entered)
+
         self.on_mode_changed(self.mode_combo.currentText())
+
+    # ----- 型式マスタ -----
+
+    def refresh_master_refs(self):
+        """型式に対応するマスタ参照だけ更新する（入力欄は書き換えない。ロード用）"""
+        text = self.e_model.text().strip()
+        if not self.masters:
+            return
+        self.master_cond = find_entry(self.masters["conditions"], text)
+        self.master_judge = find_entry(self.masters["judgement"], text)
+
+    def on_model_entered(self):
+        """型式が入力されたら測定条件・合否判定マスタを自動適用する"""
+        text = self.e_model.text().strip()
+        if not self.masters or not text:
+            return
+        cond = find_entry(self.masters["conditions"], text)
+        judge = find_entry(self.masters["judgement"], text)
+        self.master_cond = cond
+        self.master_judge = judge
+        if cond is None and judge is None:
+            self.statusBar().showMessage(f"型式 {text} はマスタに見つかりません（手入力で測定可）")
+            return
+        message = []
+        if cond:
+            params = condition_params(cond, judge)
+            if "wheel_pitch" in params:
+                self.e_wheel.setValue(params["wheel_pitch"])
+            if "worm_pitch" in params:
+                self.e_worm.setValue(params["worm_pitch"])
+            if "worm_range" in params:
+                self.e_range.setValue(params["worm_range"])
+            self.e_start.setValue(0.0)
+            message.append(
+                f"測定条件: ホイール{self.e_wheel.value():g}°刻み"
+                f"・ウォーム{self.e_worm.value():g}°×{self.e_range.value():g}°"
+                f"・測定順{'→'.join(params['order'])}"
+            )
+        if judge:
+            temp = self.parse_temp()
+            mm = formula_minmax(judge, temp if temp is not None else 20.0)
+            if mm:
+                message.append(f"規格 {mm[0]:.1f}〜{mm[1]:.1f}\"")
+        self.statusBar().showMessage(f"{text} マスタ適用: " + "　".join(message))
 
     # ----- モード -----
 
@@ -669,6 +726,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return RepeatabilitySequence(points, self.e_repeats.value())
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
         wheel_end = self.e_wend.value() if self.is_tilt() else 360.0
+        # マスタの測定順（HR/WR/WL/HL）があれば従う
+        order = None
+        if self.master_cond and not self.is_tilt():
+            sections = self.master_cond.get("order") or []
+            order = [SECTION_TO_SERIES[s] for s in sections if s in SECTION_TO_SERIES]
         return IndexingSequence(
             self.e_wheel.value(),
             self.e_worm.value(),
@@ -676,6 +738,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_start.value(),
             wheel_start,
             wheel_end,
+            order=order or None,
         )
 
     def start(self):
@@ -839,10 +902,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve.setData([], [])
 
     def current_judgements(self, summary):
-        """ホイール/ウォーム/総合の温度別合否判定文（測定温度・規格による）"""
-        return judgement_texts(
-            summary, self.parse_temp(), self.settings.get("judgement_spec")
-        )
+        """温度別合否判定文。型式マスタの温度式を優先し、無ければ規格帯設定を使う"""
+        temp = self.parse_temp()
+        mm = formula_minmax(self.master_judge, temp)
+        if mm is None:
+            return judgement_texts(summary, temp, self.settings.get("judgement_spec"))
+        spec_min, spec_max = mm
+        texts = {}
+        for key in ("wheel_backlash", "worm_backlash"):
+            if key in summary:
+                ok = spec_min <= summary[key]["min"] and summary[key]["max"] <= spec_max
+                texts[key] = (
+                    f'{"OK" if ok else "NG"}'
+                    f'（規格 {spec_min:.1f}〜{spec_max:.1f}" @ {temp:g}°C）'
+                )
+        return texts
+
+    def slope_judgement_rows(self, summary):
+        """型式マスタの傾きH/W規格との突き合わせ（|傾き| ≦ 規格）"""
+        rows = []
+        if not self.master_judge:
+            return rows
+        for key, label, limit in (
+            ("wheel_cw", "ホイールCW", self.master_judge.get("slope_h")),
+            ("wheel_ccw", "ホイールCCW", self.master_judge.get("slope_h")),
+            ("worm_cw", "ウォームCW", self.master_judge.get("slope_w")),
+            ("worm_ccw", "ウォームCCW", self.master_judge.get("slope_w")),
+        ):
+            if limit and key in summary:
+                slope = summary[key]["slope"]
+                ok = abs(slope) <= limit
+                rows.append(
+                    (f"{label} 傾き 判定",
+                     f'{"OK" if ok else "NG"}（|{slope:+.2f}"| ≦ {limit:g}"）')
+                )
+        return rows
 
     def finish(self):
         self.b_take.setEnabled(False)
@@ -874,8 +968,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for j, text in enumerate(cells):
                 self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
 
-        # 右表: バックラッシMIN/MAX・温度規格による合否・真の最大最小
+        # 右表: バックラッシMIN/MAX・温度規格による合否・傾き判定・真の最大最小
         rows = misc_rows(summary, self.current_judgements(summary))
+        rows.extend(self.slope_judgement_rows(summary))
         self.fill_misc_table(rows)
 
     def finish_repeat(self):
@@ -993,10 +1088,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not bs_root:
             return
         try:
-            band = band_for_temp(
-                (self.settings.get("judgement_spec") or {}).get("wheel_backlash"),
-                self.parse_temp() or 0.0,
-            )
+            mm = formula_minmax(self.master_judge, self.parse_temp())
+            if mm is None:
+                band = band_for_temp(
+                    (self.settings.get("judgement_spec") or {}).get("wheel_backlash"),
+                    self.parse_temp() or 0.0,
+                )
+                mm = (band["min"], band["max"]) if band else (0.0, 0.0)
             doc = data_to_doc(
                 self.data,
                 summary,
@@ -1004,8 +1102,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 date=self.e_date.date().toString("yyyy/MM/dd"),
                 operator=self.e_operator.text().strip(),
                 temperature=self.e_temp.text().strip(),
-                spec_min=band["min"] if band else 0.0,
-                spec_max=band["max"] if band else 0.0,
+                spec_min=mm[0],
+                spec_max=mm[1],
             )
             bs_path = Path(bs_root) / f"{sanitize_filename(machine_no)}.BS"
             bs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1085,6 +1183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_blcorr.setValue(self.applied_blcorr)
         self.b_undo.setEnabled(False)
         self.live.setText("")
+        self.refresh_master_refs()
         self.update_counts()
         self.redraw()
         self.finish()
@@ -1124,6 +1223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_blcorr.setValue(0.0)
         self.b_undo.setEnabled(False)
         self.live.setText("")
+        self.refresh_master_refs()
         self.update_counts()
         self.redraw()
         self.finish()

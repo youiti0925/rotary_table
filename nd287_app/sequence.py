@@ -108,6 +108,17 @@ class IndexingSequence:
     def done(self):
         return self.idx >= len(self.steps)
 
+    def counts(self):
+        """系列ごとの (表示名, 現在のデータ数, 必要数) のリスト"""
+        required = {}
+        for key, _, _ in self.steps:
+            required[key] = required.get(key, 0) + 1
+        return [
+            (SERIES_LABELS[key], len(self.data[key][0]), required[key])
+            for key in SERIES_KEYS
+            if required.get(key)
+        ]
+
     def __len__(self):
         return len(self.steps)
 
@@ -169,6 +180,17 @@ class RepeatabilitySequence:
 
     def done(self):
         return self.idx >= len(self.steps)
+
+    def counts(self):
+        """方向ごとの (表示名, 現在のデータ数, 必要数) のリスト"""
+        per_direction = len(self.points) * self.repeats
+        current = {"cw": 0, "ccw": 0}
+        for (dirn, _), vals in self.data.items():
+            current[dirn] += len(vals)
+        return [
+            ("CW", current["cw"], per_direction),
+            ("CCW", current["ccw"], per_direction),
+        ]
 
     def __len__(self):
         return len(self.steps)

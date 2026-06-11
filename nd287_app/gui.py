@@ -44,7 +44,12 @@ from .sequence import (
     rotary_blocks,
     tilt_blocks,
 )
-from .settings import resolve_save_root, save_settings
+from .settings import (
+    PROFILE_LABELS,
+    apply_active_profile,
+    resolve_save_root,
+    save_settings,
+)
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性")
 
@@ -309,11 +314,17 @@ class MainWindow(QtWidgets.QMainWindow):
         row3.addWidget(self.e_blcorr)
         row3.addWidget(self.b_corr)
 
-        # --- ガイドと受信値 ---
+        # --- ガイドと受信値・データ数 ---
         self.guide = QtWidgets.QLabel("―")
         self.guide.setStyleSheet("font-size:22px; font-family:monospace; padding:4px;")
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("font-size:15px; color:#666; padding:2px;")
+        self.counts = QtWidgets.QLabel("")
+        self.counts.setStyleSheet("font-size:15px; color:#444; padding:2px;")
+        live_row = QtWidgets.QHBoxLayout()
+        live_row.addWidget(self.live)
+        live_row.addStretch(1)
+        live_row.addWidget(self.counts)
 
         # --- グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ） ---
         self.plot_wheel = pg.PlotWidget(title="ホイール")
@@ -354,11 +365,21 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(row3)
         v.addLayout(row_ops)
         v.addWidget(self.guide)
-        v.addWidget(self.live)
+        v.addLayout(live_row)
         v.addLayout(plots, 1)
         v.addLayout(tables)
         self.setCentralWidget(container)
 
+        # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
+        self.profile_combo = QtWidgets.QComboBox()
+        for key, label in PROFILE_LABELS.items():
+            self.profile_combo.addItem(label, key)
+        index = self.profile_combo.findData(self.settings.get("active_profile", "X32"))
+        if index >= 0:
+            self.profile_combo.setCurrentIndex(index)
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_changed)
+        self.statusBar().addPermanentWidget(QtWidgets.QLabel("接続先"))
+        self.statusBar().addPermanentWidget(self.profile_combo)
         self.b_diag = QtWidgets.QPushButton("通信診断")
         self.b_diag.clicked.connect(self.run_diagnostics)
         self.statusBar().addPermanentWidget(self.b_diag)
@@ -426,6 +447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_corr.setEnabled(False)
         self.guide.setText("―")
         self.live.setText("")
+        self.counts.setText("")
 
     def cancel(self):
         """取込中の測定を中止する（取込済みデータは破棄）"""
@@ -547,11 +569,41 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(h)
         dlg.exec()
 
+    def on_profile_changed(self):
+        """接続先プロファイル（X32/X31）の切替 → 設定を読み替えて再接続"""
+        key = self.profile_combo.currentData()
+        if not key or key == self.settings.get("active_profile"):
+            return
+        self.settings["active_profile"] = key
+        apply_active_profile(self.settings)
+        try:
+            save_settings(self.settings)
+        except Exception as e:
+            self.statusBar().showMessage(f"設定の保存に失敗: {e}")
+        if not self.dev.dummy:
+            self.dev.close()
+            self.dev = ND287Device(
+                self.settings["port"], self.settings["baudrate"], self.settings["parity"]
+            )
+            self.connect_device()
+        else:
+            self.statusBar().showMessage(
+                f"接続先を {PROFILE_LABELS[key]} に切替（ダミーモード中）"
+            )
+
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
+        dlg.setWindowTitle(
+            f"設定（接続先: {PROFILE_LABELS[self.settings['active_profile']]}）"
+        )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        self.settings.update(dlg.values())
+        values = dlg.values()
+        self.settings.update(values)
+        # 接続設定は現在アクティブなプロファイルにも保存する
+        self.settings["profiles"][self.settings["active_profile"]].update(
+            {k: values[k] for k in ("port", "baudrate", "parity")}
+        )
         try:
             save_settings(self.settings)
         except Exception as e:
@@ -636,12 +688,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_cancel.setEnabled(True)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
+        self.update_counts()
         self.show_guide()
 
     def show_guide(self):
         text = self.seq.guide_text()
         if text is not None:
             self.guide.setText(text)
+
+    def update_counts(self):
+        """系列ごとの「現在のデータ数/必要数」を表示する（例 ホイール CW 5/37）"""
+        if self.seq is not None:
+            parts = [f"{label} {cur}/{req}" for label, cur, req in self.seq.counts()]
+        elif self.view_kind == "indexing" and self.data:
+            parts = [
+                f"{SERIES_LABELS[key]} {len(t)}/{len(t)}"
+                for key, (t, _) in self.data.items()
+                if t
+            ]
+        elif self.view_kind == "repeat" and self.rep_data:
+            totals = {"cw": 0, "ccw": 0}
+            for (dirn, _), vals in self.rep_data.items():
+                totals[dirn] += len(vals)
+            parts = [f"CW {totals['cw']}/{totals['cw']}", f"CCW {totals['ccw']}/{totals['ccw']}"]
+        else:
+            self.counts.setText("")
+            return
+        self.counts.setText("データ数:  " + "　".join(parts))
 
     def poll_serial(self):
         """ND287側から送信された値を受け取り、順番どおりに箱へ入れる"""
@@ -692,6 +765,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live.setText(f"受信: {deg_to_dms(angle)}")
         self.seq.record(angle)
         self.b_undo.setEnabled(True)
+        self.update_counts()
         self.redraw()
         if self.seq.done():
             self.guide.setText("測定完了 → セーブで保存")
@@ -707,6 +781,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.b_corr.setEnabled(False)
             self.b_take.setEnabled(True)
             self.b_undo.setEnabled(self.seq.idx > 0)
+            self.update_counts()
             self.redraw()
             self.show_guide()
 
@@ -951,6 +1026,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_blcorr.setValue(self.applied_blcorr)
         self.b_undo.setEnabled(False)
         self.live.setText("")
+        self.update_counts()
         self.redraw()
         self.finish()
         self.guide.setText(f"ロード: {Path(path).name}")

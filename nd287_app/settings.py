@@ -13,6 +13,13 @@ DEFAULTS = dict(
     port="auto",       # "auto" = COMポート自動検出、または "COM3" 等の明示指定
     baudrate=9600,
     parity="E",        # N / E / O
+    # 接続プロファイル: X32(USB直結) と X31(変換器経由) で別の設定を保持し、
+    # 画面の接続先プルダウンで切り替える
+    active_profile="X32",
+    profiles=dict(
+        X32=dict(port="auto", baudrate=9600, parity="E"),
+        X31=dict(port="auto", baudrate=9600, parity="E"),
+    ),
     save_root="測定データ",  # セーブ先ルート（相対ならアプリフォルダ基準）
     # 温度別の合否規格 [秒]。ホイールが合金製のため熱膨張で、ホイール・
     # ウォーム・総合（真の最大最小）のいずれも温度で変わり、温度帯ごとに
@@ -48,15 +55,48 @@ def settings_path() -> Path:
     return app_dir() / "settings.json"
 
 
+PROFILE_LABELS = {"X32": "X32（USB直結）", "X31": "X31（変換器経由）"}
+
+CONN_KEYS = ("port", "baudrate", "parity")
+
+
+def apply_active_profile(settings: dict):
+    """アクティブなプロファイルの接続設定をトップレベルに反映する。
+
+    既存コードは settings["port"] 等を直接読むため、切り替え時はこれを呼ぶ。
+    """
+    profile = settings["profiles"][settings["active_profile"]]
+    for key in CONN_KEYS:
+        settings[key] = profile[key]
+
+
 def load_settings(path=None) -> dict:
     p = Path(path) if path else settings_path()
     settings = copy.deepcopy(DEFAULTS)
+    raw = {}
     try:
-        settings.update(json.loads(p.read_text(encoding="utf-8")))
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        settings.update(raw)
     except FileNotFoundError:
         pass
     except Exception:
         pass  # 壊れたファイルでも既定値で起動できるようにする
+
+    # プロファイルの補完（欠けたキーは既定値で埋める）
+    profiles = settings.get("profiles") or {}
+    for key in ("X32", "X31"):
+        merged = dict(DEFAULTS["profiles"][key])
+        merged.update(profiles.get(key) or {})
+        profiles[key] = merged
+    settings["profiles"] = profiles
+    if settings.get("active_profile") not in PROFILE_LABELS:
+        settings["active_profile"] = "X32"
+    # 旧形式（プロファイル無しでトップレベルにport等だけある）からの移行
+    if "profiles" not in raw and any(k in raw for k in CONN_KEYS):
+        profiles[settings["active_profile"]].update(
+            {k: raw[k] for k in CONN_KEYS if k in raw}
+        )
+    apply_active_profile(settings)
     return settings
 
 

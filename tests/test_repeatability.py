@@ -97,6 +97,26 @@ class TestRepeatabilitySequence(unittest.TestCase):
             seq.record(target)
         self.assertTrue(seq.done())
 
+    def test_counts(self):
+        seq = RepeatabilitySequence([0.0, 90.0], repeats=3)
+        self.assertEqual(seq.counts(), [("CW", 0, 6), ("CCW", 0, 6)])
+        for _ in range(4):  # ブロック1 CW×3 + CCW×1
+            _, target, _ = seq.current()
+            seq.record(target)
+        self.assertEqual(seq.counts(), [("CW", 3, 6), ("CCW", 1, 6)])
+
+    def test_indexing_counts(self):
+        seq = IndexingSequence(90.0, 1.0, 2.0)  # ホイール5点×2方向、ウォーム3点×2方向
+        counts = dict((label, (cur, req)) for label, cur, req in seq.counts())
+        self.assertEqual(counts["ホイール CW"], (0, 5))
+        self.assertEqual(counts["ウォーム CCW"], (0, 3))
+        for _ in range(6):  # ホイールCW全5点 + CCW1点
+            _, target, _ = seq.current()
+            seq.record(target)
+        counts = dict((label, (cur, req)) for label, cur, req in seq.counts())
+        self.assertEqual(counts["ホイール CW"], (5, 5))
+        self.assertEqual(counts["ホイール CCW"], (1, 5))
+
 
 class TestRepeatabilitySummary(unittest.TestCase):
     def test_block_ranges_and_worst(self):

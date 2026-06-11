@@ -232,6 +232,12 @@ def _scan_one_port(device_name, bauds, parities):
             if not raw:
                 lines.append(f"  {baud} 8{par}1: 応答なし")
                 continue
+            if raw == REQUEST_CMD:
+                lines.append(
+                    f"  {baud} 8{par}1: 送信したCTRL B(02)がそのまま返ってきました"
+                    " ＝ ループバック接続（2-3ピン短絡）を検出。PC〜ここまでの経路はOK"
+                )
+                return lines
             hexs = " ".join(f"{b:02X}" for b in raw[:32])
             text = raw.decode("latin-1", "replace").strip()
             angle = parse_angle(raw)

@@ -641,7 +641,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def poll_serial(self):
         """ND287側から送信された値を受け取り、順番どおりに箱へ入れる"""
-        if self._connecting or self.seq is None or self.seq.done():
+        if self._connecting:
+            return
+        if self.seq is None or self.seq.done():
+            # 取込中でなくても受信値はモニタ表示する（記録はしない）。
+            # 配線確認: ND287のPRINTキーを押してここに値が出れば受信経路はOK
+            try:
+                angles = self.dev.poll_received()
+            except Exception:
+                return
+            if angles:
+                self.live.setText(f"受信（取込外・記録なし）: {deg_to_dms(angles[-1])}")
             return
         try:
             angles = self.dev.poll_received()

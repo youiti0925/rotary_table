@@ -655,7 +655,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             angles = self.dev.poll_received()
-        except Exception:
+        except Exception as e:
+            # 取込中の受信エラーは見えるようにする（USB抜け・ポート消失など）
+            self.statusBar().showMessage(f"受信エラー: {e} → ケーブル/ポートを確認して再接続")
             return
         for angle in angles:
             if self.seq.done():

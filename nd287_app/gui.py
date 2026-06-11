@@ -36,7 +36,7 @@ from .export import (
     save_csv,
     save_repeat_csv,
 )
-from .nd287 import ND287Device, deg_to_dms
+from .nd287 import ND287Device, deg_to_dms, scan_report
 from .sequence import (
     IndexingSequence,
     RepeatabilitySequence,
@@ -147,6 +147,8 @@ class SettingsDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
+    # 通信診断スレッド完了通知（レポート文字列）
+    _diag_done = QtCore.Signal(str)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -353,10 +355,14 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(tables)
         self.setCentralWidget(container)
 
+        self.b_diag = QtWidgets.QPushButton("通信診断")
+        self.b_diag.clicked.connect(self.run_diagnostics)
+        self.statusBar().addPermanentWidget(self.b_diag)
         self.b_conn = QtWidgets.QPushButton("再接続")
         self.b_conn.clicked.connect(self.connect_device)
         self.statusBar().addPermanentWidget(self.b_conn)
         self._conn_done.connect(self.on_connect_done)
+        self._diag_done.connect(self.on_diagnostics_done)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -482,6 +488,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connecting = False
         self.b_conn.setEnabled(True)
         self.statusBar().showMessage(message)
+
+    def run_diagnostics(self):
+        """全ポート×複数ボーレートでCTRL Bを試す通信診断（バックグラウンド実行）"""
+        if self.dev.dummy:
+            QtWidgets.QMessageBox.information(
+                self, "通信診断", "ダミーモードで起動中のため診断対象がありません"
+            )
+            return
+        if self._connecting:
+            self.statusBar().showMessage("接続処理中です。終わってから診断してください")
+            return
+        self._connecting = True  # 診断中はシリアルを独占する
+        self.b_diag.setEnabled(False)
+        self.b_conn.setEnabled(False)
+        self.statusBar().showMessage("通信診断中...（全ポート×複数ボーレートを試します）")
+        dev = self.dev
+        baud = self.settings.get("baudrate")
+        parity = self.settings.get("parity")
+
+        def work():
+            try:
+                dev.close()  # 自分で開いているポートも診断対象にするため一旦閉じる
+                report = scan_report(baud, parity)
+            except Exception as e:
+                report = f"診断に失敗しました: {e}"
+            self._diag_done.emit(report)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_diagnostics_done(self, report):
+        self._connecting = False
+        self.b_diag.setEnabled(True)
+        self.b_conn.setEnabled(True)
+        self.statusBar().showMessage("通信診断が完了しました（接続するには再接続を押す）")
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("通信診断結果")
+        dlg.resize(720, 480)
+        v = QtWidgets.QVBoxLayout(dlg)
+        text = QtWidgets.QPlainTextEdit(report)
+        text.setReadOnly(True)
+        text.setStyleSheet("font-family: monospace; font-size: 13px;")
+        b_copy = QtWidgets.QPushButton("コピー")
+        b_copy.clicked.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(report)
+        )
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(dlg.accept)
+        h = QtWidgets.QHBoxLayout()
+        h.addStretch(1)
+        h.addWidget(b_copy)
+        h.addWidget(b_close)
+        v.addWidget(text)
+        v.addLayout(h)
+        dlg.exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)

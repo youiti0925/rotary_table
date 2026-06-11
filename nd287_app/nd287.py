@@ -102,10 +102,17 @@ class ND287Device:
         import serial
 
         if self._auto:
-            found = find_nd287_port(self.baudrate, self.parity)
+            ports = list_serial_ports()
+            if not ports:
+                raise RuntimeError(
+                    "シリアルポートが1つもありません"
+                    "（USB-シリアル変換器の接続とドライバを確認）"
+                )
+            found = find_nd287_port(self.baudrate, self.parity, ports)
             if found is None:
                 raise RuntimeError(
-                    "ND287が見つかりません（ケーブル・電源・本体のボーレート設定を確認）"
+                    f"ND287が見つかりません（探索: {', '.join(ports)}）。"
+                    "ボーレート不一致の可能性 →「通信診断」で確認"
                 )
             self.port = found
 
@@ -193,6 +200,82 @@ def find_nd287_port(baudrate: int = None, parity: str = None, ports=None):
         if probe_port(port, baudrate, parity):
             return port
     return None
+
+
+def _scan_one_port(device_name, bauds, parities):
+    """1ポートに対して設定の組み合わせを試し、レポート行を返す。"""
+    lines = []
+    for baud in bauds:
+        for par in parities:
+            dev = ND287Device(device_name, baud, par, timeout=0.5)
+            try:
+                dev.open()
+                try:
+                    dev.ser.reset_input_buffer()
+                    dev.ser.write(REQUEST_CMD)
+                    raw = dev.ser.read(64)
+                finally:
+                    dev.close()
+            except Exception as e:
+                lines.append(f"  {baud} 8{par}1: ポートを開けません/送信失敗 ({e})")
+                return lines  # 開けないポートは他の設定でも開けない
+            if not raw:
+                lines.append(f"  {baud} 8{par}1: 応答なし")
+                continue
+            hexs = " ".join(f"{b:02X}" for b in raw[:32])
+            text = raw.decode("latin-1", "replace").strip()
+            angle = parse_angle(raw)
+            if angle is not None:
+                lines.append(
+                    f"  {baud} 8{par}1: 受信 {len(raw)}bytes [{hexs}] \"{text}\""
+                    f" → 角度として解釈OK: {angle:.6f}°"
+                )
+                lines.append("  ★ この設定で通信できます。「設定」画面に入力してください")
+                return lines
+            lines.append(
+                f"  {baud} 8{par}1: 受信 {len(raw)}bytes [{hexs}] \"{text}\""
+                " → 角度として解釈不可"
+            )
+    return lines
+
+
+def scan_report(preferred_baud=None, preferred_parity=None):
+    """通信診断: 全シリアルポート×複数ボーレートで CTRL B を送り、生の応答を集める。
+
+    どのポートで何が返ってくるか（または何も返らないか）を人が読める
+    レポート文字列で返す。
+    """
+    from serial.tools import list_ports
+
+    lines = ["=== ND287 通信診断 ===",
+             "ND287の電源を入れ、ケーブルを接続した状態で実行すること。", ""]
+    ports = sorted(list_ports.comports(), key=lambda p: p.device)
+    if not ports:
+        lines.append("シリアルポートが1つも見つかりません。")
+        lines.append("・USB-シリアル変換器がPCに刺さっているか")
+        lines.append("・デバイスマネージャーの「ポート(COMとLPT)」にCOMが出ているか")
+        lines.append("　（出ていなければ変換器のドライバを入れる）")
+        return "\n".join(lines)
+
+    bauds = []
+    for b in [preferred_baud or SERIAL_DEFAULTS["baudrate"], 9600, 19200, 38400, 57600, 115200]:
+        if b not in bauds:
+            bauds.append(b)
+    parities = []
+    for p in [(preferred_parity or SERIAL_DEFAULTS["parity"]).upper(), "N"]:
+        if p not in parities:
+            parities.append(p)
+
+    lines.append(f"検出されたシリアルポート: {len(ports)}件")
+    for info in ports:
+        lines.append("")
+        lines.append(f"[{info.device}] {info.description}")
+        lines.extend(_scan_one_port(info.device, bauds, parities))
+    lines.append("")
+    lines.append("どのポートでも応答が無い場合の確認:")
+    lines.append("・ND287本体のINSTALLATION SETUPでデータインターフェースがX31(RS-232C)になっているか")
+    lines.append("・ケーブル配線（クロス/ストレート）が合っているか")
+    return "\n".join(lines)
 
 
 class DummyDevice(ND287Device):

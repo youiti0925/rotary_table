@@ -27,6 +27,7 @@ import pyqtgraph as pg
 
 from .analysis import band_for_temp, deviation_sec, repeatability_summary, summarize
 from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
+from .ks_format import doc_to_data as ks_doc_to_data, load_ks, tilt_accuracy
 from .masters import condition_params, find_entry, formula_minmax, load_masters
 from .export import (
     MODE_KEY,
@@ -274,6 +275,34 @@ class MainWindow(QtWidgets.QMainWindow):
         row_ops.addWidget(self.b_take)
         row_ops.addWidget(self.b_undo)
 
+        # --- 評価範囲（傾斜分割のみ。客先要求の部分抜き出し評価）---
+        row_ranges = QtWidgets.QHBoxLayout()
+        self.c_r1 = QtWidgets.QCheckBox("評価範囲1")
+        self.e_r1s = QtWidgets.QDoubleSpinBox()
+        self.e_r1e = QtWidgets.QDoubleSpinBox()
+        self.c_r2 = QtWidgets.QCheckBox("評価範囲2")
+        self.e_r2s = QtWidgets.QDoubleSpinBox()
+        self.e_r2e = QtWidgets.QDoubleSpinBox()
+        for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
+            spin.setRange(-360.0, 720.0)
+            spin.setSuffix(" °")
+        self.e_r1s.setValue(0.0)
+        self.e_r1e.setValue(90.0)
+        self.e_r2s.setValue(-90.0)
+        self.e_r2e.setValue(0.0)
+        self.range_widgets = []
+        for w in (self.c_r1, QtWidgets.QLabel("開始"), self.e_r1s,
+                  QtWidgets.QLabel("終了"), self.e_r1e,
+                  self.c_r2, QtWidgets.QLabel("開始"), self.e_r2s,
+                  QtWidgets.QLabel("終了"), self.e_r2e):
+            row_ranges.addWidget(w)
+            self.range_widgets.append(w)
+        row_ranges.addStretch(1)
+        for check in (self.c_r1, self.c_r2):
+            check.toggled.connect(self.refresh_results)
+        for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
+            spin.valueChanged.connect(self.refresh_results)
+
         # --- 2段目: 測定情報（取込開始の必須項目）とファイル操作 ---
         row2 = QtWidgets.QHBoxLayout()
         self.e_model = QtWidgets.QLineEdit()
@@ -383,6 +412,7 @@ class MainWindow(QtWidgets.QMainWindow):
         container = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(container)
         v.addLayout(row1)
+        v.addLayout(row_ranges)
         v.addLayout(row2)
         v.addLayout(row3)
         v.addLayout(row_ops)
@@ -500,6 +530,8 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setVisible(is_repeat)
         for w in (self.l_blcorr, self.e_blcorr, self.b_corr):
             w.setVisible(not is_repeat)
+        for w in self.range_widgets:
+            w.setVisible(is_tilt and not is_repeat)
         self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
         self.plot_worm.setVisible(not is_repeat)
         self.plot_wheel.setTitle("再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
@@ -901,8 +933,19 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 curve.setData([], [])
 
+    def refresh_results(self):
+        """評価範囲の変更で結果表を再計算する（測定完了後のみ）"""
+        if self.view_kind == "indexing" and self.data and not self.b_take.isEnabled():
+            if any(t for t, _ in self.data.values()):
+                self.finish_indexing()
+
     def current_judgements(self, summary):
-        """温度別合否判定文。型式マスタの温度式を優先し、無ければ規格帯設定を使う"""
+        """温度別合否判定文。型式マスタの温度式を優先し、無ければ規格帯設定を使う
+
+        傾斜分割はバックラッシの合否判定をしない（旧アプリと同じ）。
+        """
+        if self.is_tilt():
+            return {}
         temp = self.parse_temp()
         mm = formula_minmax(self.master_judge, temp)
         if mm is None:
@@ -971,7 +1014,30 @@ class MainWindow(QtWidgets.QMainWindow):
         # 右表: バックラッシMIN/MAX・温度規格による合否・傾き判定・真の最大最小
         rows = misc_rows(summary, self.current_judgements(summary))
         rows.extend(self.slope_judgement_rows(summary))
+        if self.is_tilt():
+            rows.extend(self.tilt_accuracy_rows())
         self.fill_misc_table(rows)
+
+    def tilt_accuracy_rows(self):
+        """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""
+        specs = [("全範囲", None)]
+        if self.c_r1.isChecked():
+            specs.append((f"範囲1 {self.e_r1s.value():g}〜{self.e_r1e.value():g}°",
+                          (self.e_r1s.value(), self.e_r1e.value())))
+        if self.c_r2.isChecked():
+            specs.append((f"範囲2 {self.e_r2s.value():g}〜{self.e_r2e.value():g}°",
+                          (self.e_r2s.value(), self.e_r2e.value())))
+        rows = []
+        for label, range_ in specs:
+            acc = tilt_accuracy(self.data, range_=range_)
+            for dirn, jp in (("cw", "正"), ("ccw", "逆")):
+                entry = acc.get(dirn, {})
+                if "total" in entry:
+                    rows.append((
+                        f"任意誤差 {jp}（{label}）",
+                        f'H {entry["h"]:.1f}" + W {entry["w"]:.1f}" = {entry["total"]:.1f}"',
+                    ))
+        return rows
 
     def finish_repeat(self):
         rsum = repeatability_summary(self.rep_points, self.rep_data)
@@ -1123,12 +1189,16 @@ class MainWindow(QtWidgets.QMainWindow):
         root = resolve_save_root(self.settings)
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "測定データを開く", str(root),
-            "測定データ (*.csv *.bs *.BS);;CSV (*.csv);;旧形式 (*.bs *.BS)",
+            "測定データ (*.csv *.bs *.BS *.ks *.KS);;CSV (*.csv);;"
+            "旧形式 回転 (*.bs *.BS);;旧形式 傾斜 (*.ks *.KS)",
         )
         if not path:
             return
         if path.lower().endswith(".bs"):
             self.load_bs_file(path)
+            return
+        if path.lower().endswith(".ks"):
+            self.load_ks_file(path)
             return
         try:
             meta, kind, payload = load_measurement(path)
@@ -1231,6 +1301,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redraw()
         self.finish()
         self.guide.setText(f"ロード(.BS): {Path(path).name}")
+        self.statusBar().showMessage(f"ロードしました: {path}")
+
+    def load_ks_file(self, path):
+        """旧形式（傾斜分割 .KS）を読み戻す。機番はファイル名から取る"""
+        try:
+            doc = load_ks(path)
+            data = ks_doc_to_data(doc)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "ロード", f".KSの読み込みに失敗しました:\n{e}")
+            return
+        if not any(t for t, _ in data.values()):
+            QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
+            return
+        self.mode_combo.setCurrentText("傾斜分割")
+        self.seq = None
+        self.data = data
+        self.e_model.setText(doc["model"])
+        self.e_machine.setText(Path(path).stem)
+        self.e_operator.setText(doc["operator"])
+        date = QtCore.QDate.fromString(doc["date"], "yyyy/MM/dd")
+        if date.isValid():
+            self.e_date.setDate(date)
+        wheel_targets = data["wheel_cw"][0]
+        if len(wheel_targets) >= 2:
+            self.e_wstart.setValue(wheel_targets[0])
+            self.e_wend.setValue(wheel_targets[-1])
+            self.e_wheel.setValue(abs(wheel_targets[1] - wheel_targets[0]))
+        worm_targets = data["worm_cw"][0]
+        if len(worm_targets) >= 2:
+            self.e_worm.setValue(abs(worm_targets[1] - worm_targets[0]))
+            self.e_range.setValue(worm_targets[-1] - worm_targets[0])
+            self.e_start.setValue(worm_targets[0])
+        # 評価範囲1をヘッダから復元（0.0001°単位）
+        if doc.get("range1_start") is not None and doc.get("range1_end"):
+            self.e_r1s.setValue(doc["range1_start"] * 1e-4)
+            self.e_r1e.setValue(doc["range1_end"] * 1e-4)
+            self.c_r1.setChecked(True)
+        self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(0.0)
+        self.b_undo.setEnabled(False)
+        self.live.setText("")
+        self.refresh_master_refs()
+        self.update_counts()
+        self.redraw()
+        self.finish()
+        self.guide.setText(f"ロード(.KS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
 
     def closeEvent(self, event):

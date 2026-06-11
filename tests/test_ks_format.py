@@ -1,0 +1,84 @@
+# -*- coding: utf-8 -*-
+import unittest
+from pathlib import Path
+
+from nd287_app.ks_format import (
+    doc_to_data,
+    format_ks,
+    parse_ks,
+    tilt_accuracy,
+)
+
+FIXTURE = Path(__file__).parent / "fixtures" / "261166ITY.ks"
+
+
+class TestParseKs(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = FIXTURE.read_text(encoding="utf-8")
+        cls.doc = parse_ks(cls.text)
+
+    def test_header(self):
+        doc = self.doc
+        self.assertEqual(doc["model"], "TWA-200")
+        self.assertEqual(doc["operator"], "ODA")
+        self.assertEqual(doc["start_h"], -1800000)   # -180°
+        self.assertEqual(doc["end_h"], 1800000)      # +180°
+        self.assertEqual(doc["interval_h"], 50000)   # 5°
+        self.assertEqual(doc["range1_start"], 0)     # 評価範囲1 = 0〜90°
+        self.assertEqual(doc["range1_end"], 900000)
+        self.assertEqual(doc["points_h"], 72)
+        self.assertEqual(doc["points_w"], 10)
+        self.assertEqual(doc["order"], [1, 3, 4, 2])
+
+    def test_row_counts(self):
+        self.assertEqual(len(self.doc["rows"]["wheel"]), 73)
+        self.assertEqual(len(self.doc["rows"]["worm"]), 11)
+
+    def test_row_has_signed_command_and_deviations(self):
+        # 先頭行: 指令-180°、CW測定179°59'54.5"、CW偏差-5.5"、CCW偏差+7.5"
+        row = self.doc["rows"]["wheel"][0]
+        self.assertEqual(row[0], 180.0)    # カウンタ表示
+        self.assertEqual(row[1], -180.0)   # 符号付指令
+        self.assertEqual((row[2], row[3], row[4]), (179.0, 59.0, 54.5))
+        self.assertEqual(row[8], -5.5)
+        self.assertEqual(row[9], 7.5)
+
+    def test_roundtrip_byte_identical(self):
+        self.assertEqual(format_ks(self.doc, newline="\n"), self.text)
+
+
+class TestTiltAccuracyParity(unittest.TestCase):
+    """261166ITY.KS: 旧アプリ表示（精度H/精度W/精度 × 正逆 × 全範囲・範囲1）と一致"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = parse_ks(FIXTURE.read_text(encoding="utf-8"))
+        cls.data = doc_to_data(cls.doc)
+
+    def test_full_range(self):
+        acc = tilt_accuracy(self.data)
+        self.assertEqual((acc["cw"]["h"], acc["cw"]["w"], acc["cw"]["total"]),
+                         (18.0, 2.0, 20.0))
+        self.assertEqual((acc["ccw"]["h"], acc["ccw"]["w"], acc["ccw"]["total"]),
+                         (15.5, 4.5, 20.0))
+
+    def test_partial_range1(self):
+        # 評価範囲1 = 0〜90°（客先要求の部分抜き出し評価）
+        acc = tilt_accuracy(self.data, range_=(0.0, 90.0))
+        self.assertEqual((acc["cw"]["h"], acc["cw"]["w"], acc["cw"]["total"]),
+                         (7.0, 2.0, 9.0))
+        self.assertEqual((acc["ccw"]["h"], acc["ccw"]["w"], acc["ccw"]["total"]),
+                         (6.0, 4.5, 10.5))
+
+    def test_data_series(self):
+        self.assertEqual(len(self.data["wheel_cw"][0]), 73)
+        self.assertEqual(self.data["wheel_cw"][0][0], -180.0)
+        self.assertEqual(self.data["wheel_cw"][0][-1], 180.0)
+        # CCWは測定順（降順）
+        self.assertEqual(self.data["wheel_ccw"][0][0], 180.0)
+        self.assertEqual(len(self.data["worm_cw"][0]), 11)
+
+
+if __name__ == "__main__":
+    unittest.main()

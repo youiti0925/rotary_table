@@ -48,18 +48,28 @@ def pp_step(dev, step=1):
     return pp(dev[::max(int(step), 1)])
 
 
-def slope_corrected_pp(dev):
-    """傾き補正後PP[秒]。旧アプリの「精度2」。
+def detrended_pp(dev):
+    """傾き補正後PP[秒]: 始終点を結ぶ直線成分（傾き）を除いたPP。
 
-    始終点を結ぶ直線成分（傾き）を除いたPPと素のPPの小さい方
-    （補正で悪化する場合は補正しない）。devは角度昇順であること。
-    260976K.BSの全4系列で旧アプリのヘッダ値（0.5刻み）と一致することを確認済み。
+    devは角度昇順であること。
     """
     dev = np.asarray(dev, dtype=float)
     if len(dev) < 2:
         return 0.0
     detrended = dev - (dev[-1] - dev[0]) * np.arange(len(dev)) / (len(dev) - 1)
-    return min(pp(dev), pp(detrended))
+    return pp(detrended)
+
+
+def slope_corrected_pp(dev):
+    """傾き補正後PPと素のPPの小さい方[秒]。旧アプリ（回転分割）の「精度2」。
+
+    補正で悪化する場合は補正しない。260976K.BSの全4系列で旧アプリの
+    ヘッダ値（0.5刻み）と一致することを確認済み。
+    """
+    dev = np.asarray(dev, dtype=float)
+    if len(dev) < 2:
+        return 0.0
+    return min(pp(dev), detrended_pp(dev))
 
 
 def step_errors(dev):

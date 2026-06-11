@@ -165,11 +165,21 @@ class ND287Device:
         return parse_angle(self.ser.read_until(TERM))
 
 
-def list_serial_ports():
-    """PC上のシリアルポート名一覧（COM番号順）"""
+def _is_bluetooth_port(info) -> bool:
+    """Bluetooth仮想COMか（ND287がBluetoothであることはなく、開くのも遅いため後回し）"""
+    text = f"{info.description or ''} {getattr(info, 'hwid', '') or ''}".lower()
+    return "bluetooth" in text or "bthenum" in text
+
+
+def _sorted_port_infos():
     from serial.tools import list_ports
 
-    return [p.device for p in sorted(list_ports.comports(), key=lambda p: p.device)]
+    return sorted(list_ports.comports(), key=lambda p: (_is_bluetooth_port(p), p.device))
+
+
+def list_serial_ports():
+    """PC上のシリアルポート名一覧（USB変換器等を先、Bluetooth仮想COMを後）"""
+    return [p.device for p in _sorted_port_infos()]
 
 
 def probe_port(port: str, baudrate: int = None, parity: str = None) -> bool:
@@ -245,11 +255,9 @@ def scan_report(preferred_baud=None, preferred_parity=None):
     どのポートで何が返ってくるか（または何も返らないか）を人が読める
     レポート文字列で返す。
     """
-    from serial.tools import list_ports
-
     lines = ["=== ND287 通信診断 ===",
              "ND287の電源を入れ、ケーブルを接続した状態で実行すること。", ""]
-    ports = sorted(list_ports.comports(), key=lambda p: p.device)
+    ports = _sorted_port_infos()
     if not ports:
         lines.append("シリアルポートが1つも見つかりません。")
         lines.append("・USB-シリアル変換器がPCに刺さっているか")

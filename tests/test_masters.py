@@ -37,13 +37,13 @@ class TestConditionsMaster(unittest.TestCase):
         self.assertAlmostEqual(params["worm_pitch"], 0.3)
         self.assertAlmostEqual(params["worm_range"], 3.0)
 
-    def test_rw250_worm_uses_teeth(self):
-        # RW-250は歯数72 → ウォーム1回転=5°、5°/10=0.5°刻み（実測.BSと一致）
+    def test_worm_comes_from_conditions_not_teeth(self):
+        # ウォームは測定条件の間隔W基準（歯数はP補正用で測定条件には使わない）
         cond = find_entry(self.conditions, "RW-250")
-        judge = find_entry(self.judgement, "RW-250")
+        judge = find_entry(self.judgement, "RW-250")  # 歯数72があっても無関係
         params = condition_params(cond, judge)
-        self.assertAlmostEqual(params["worm_range"], 5.0)
-        self.assertAlmostEqual(params["worm_pitch"], 0.5)
+        self.assertAlmostEqual(params["worm_pitch"], 0.3)
+        self.assertAlmostEqual(params["worm_range"], 3.0)
         self.assertAlmostEqual(params["wheel_pitch"], 10.0)
 
     def test_variant_lookup(self):

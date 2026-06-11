@@ -1104,6 +1104,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 temperature=self.e_temp.text().strip(),
                 spec_min=mm[0],
                 spec_max=mm[1],
+                # 精度1の主点グリッドはマスタの1/N（例 RWE-200は30°主点=3おき）
+                wheel_n=self.master_cond["n_h"] if self.master_cond else 1,
+                worm_n=self.master_cond["n_w"] if self.master_cond else 1,
             )
             bs_path = Path(bs_root) / f"{sanitize_filename(machine_no)}.BS"
             bs_path.parent.mkdir(parents=True, exist_ok=True)

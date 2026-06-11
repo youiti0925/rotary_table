@@ -134,18 +134,13 @@ def find_entry(entries: dict, model_text: str):
 def condition_params(cond: dict, judge: dict = None) -> dict:
     """測定条件エントリ → アプリの設定値（ホイール刻み・ウォーム刻み等）
 
-    ウォームは歯数があれば 1回転=360/歯数 を分割数2で刻む（実測と一致する定義）。
-    歯数が無い場合は 間隔W/N を刻みとして使う。
+    ウォームの刻み・範囲も測定条件（間隔W・分割数2）から決める。
+    合否判定マスタの歯数はP補正用のデータで、測定条件には使わない。
     """
     params = {}
     if cond.get("interval_h") and cond.get("div1"):
         params["wheel_pitch"] = cond["interval_h"] * 1e-4 / cond["n_h"]
-    teeth = judge.get("teeth") if judge else None
-    if teeth and cond.get("div2"):
-        worm_range = 360.0 / teeth
-        params["worm_range"] = worm_range
-        params["worm_pitch"] = worm_range / (cond["div2"] * cond["n_w"])
-    elif cond.get("interval_w") and cond.get("div2"):
+    if cond.get("interval_w") and cond.get("div2"):
         pitch = cond["interval_w"] * 1e-4 / cond["n_w"]
         params["worm_pitch"] = pitch
         params["worm_range"] = pitch * cond["div2"] * cond["n_w"]

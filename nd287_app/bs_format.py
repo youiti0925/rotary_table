@@ -16,7 +16,7 @@
 機番はファイル名（<機番>.BS）。文字コードはcp932、改行はCRLFを既定とする。
 """
 
-from .analysis import deviation_sec
+from .analysis import deviation_sec, pp_step, slope_corrected_pp
 
 SECTION_KEYS = ("HR", "WR", "WL", "HL")  # R=CW, L=CCW
 
@@ -178,14 +178,21 @@ def _ascending_slope(targets, measured):
     return int(round(float(devs[-1] - devs[0])))
 
 
+def _half_round(value: float) -> float:
+    """旧アプリの表示分解能（0.5"刻み）に丸める"""
+    return round(float(value) * 2.0) / 2.0
+
+
 def data_to_doc(data, summary, *, model, date, operator, temperature,
-                spec_min=0.0, spec_max=0.0) -> dict:
+                spec_min=0.0, spec_max=0.0, wheel_n=1, worm_n=1) -> dict:
     """アプリの測定データ＋結果サマリ → .BS構造
 
     CW/CCWを指令角度でペアにして1行にまとめる。測定値はカウンタ表示
     （0..360°）の度分秒で書く（旧アプリと同じ。例: 指令360°のCCW測定値は
     0°00'xx"）。
-    summary: analysis.summarize() の返り値（傾き・精度の列に使用）
+    精度1 = 主点（間隔グリッド = wheel_n/worm_n おき）のPP、
+    精度2 = 傾き補正後PP（補正で悪化する場合は素のPP）、0.5"刻み。
+    260976K.BSで旧アプリのヘッダ値と全12値一致を確認済み。
     """
     doc = dict(model=model, date=date, operator=operator, temperature=temperature,
                spec_min=float(spec_min), spec_max=float(spec_max))
@@ -210,19 +217,24 @@ def data_to_doc(data, summary, *, model, date, operator, temperature,
 
         pitch = abs(targets[1] - targets[0]) if len(targets) >= 2 else 0.0
         n_points = max(len(rows) - 1, 0)
+        step = wheel_n if block == "wheel" else worm_n
         for direction, series_key, meas_targets, meas in (
             ("R", cw_key, targets, cw_meas),
             ("L", ccw_key, ccw_targets, ccw_meas),
         ):
             section = ("H" if block == "wheel" else "W") + direction
-            s = summary.get(series_key, {})
+            ordered = sorted(zip(meas_targets, meas))
+            devs = (
+                deviation_sec([p[0] for p in ordered], [p[1] for p in ordered])
+                if ordered else []
+            )
             doc["series"][section] = dict(
                 interval=int(round(pitch * 10000)),
                 n=1,
                 points=n_points,
                 slope=_ascending_slope(meas_targets, meas),
-                acc1=round(float(s.get("pp", 0.0)), 1),
-                acc2=round(float(s.get("single", 0.0)), 1),
+                acc1=_half_round(pp_step(devs, step)),
+                acc2=_half_round(slope_corrected_pp(devs)),
             )
     return doc
 

@@ -36,6 +36,32 @@ def pp(dev):
     return float(dev.max() - dev.min()) if len(dev) else 0.0
 
 
+def pp_step(dev, step=1):
+    """主点（間隔グリッド = stepおき）のPP[秒]。旧アプリの「精度1」。
+
+    例: 間隔30°を1/3分割で10°刻み測定した場合、step=3で30°主点のみのPP。
+    260976K.BSの全4系列で旧アプリのヘッダ値と一致することを確認済み。
+    """
+    dev = np.asarray(dev, dtype=float)
+    if not len(dev):
+        return 0.0
+    return pp(dev[::max(int(step), 1)])
+
+
+def slope_corrected_pp(dev):
+    """傾き補正後PP[秒]。旧アプリの「精度2」。
+
+    始終点を結ぶ直線成分（傾き）を除いたPPと素のPPの小さい方
+    （補正で悪化する場合は補正しない）。devは角度昇順であること。
+    260976K.BSの全4系列で旧アプリのヘッダ値（0.5刻み）と一致することを確認済み。
+    """
+    dev = np.asarray(dev, dtype=float)
+    if len(dev) < 2:
+        return 0.0
+    detrended = dev - (dev[-1] - dev[0]) * np.arange(len(dev)) / (len(dev) - 1)
+    return min(pp(dev), pp(detrended))
+
+
 def step_errors(dev):
     """各ステップの単一誤差[秒] = その点から次の点へ移ったときに発生した誤差"""
     dev = np.asarray(dev, dtype=float)

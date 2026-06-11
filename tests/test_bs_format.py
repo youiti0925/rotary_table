@@ -137,6 +137,27 @@ class TestConversion(unittest.TestCase):
         self.assertEqual(doc2["series"]["WL"]["slope"], 0)
         self.assertEqual(doc2["series"]["HL"]["slope"], 1)
 
+    def test_old_app_parity_all_12_values(self):
+        """260976K.BS: 傾・精度1・精度2の全12値が旧アプリの計算結果と一致すること
+
+        精度1 = 主点（間隔グリッド）のPP、
+        精度2 = min(素のPP, 傾き補正後PP) を0.5"刻みに丸め
+        """
+        summary, _ = summarize(self.data)
+        doc2 = data_to_doc(self.data, summary, model="x", date="d", operator="o",
+                           temperature="26", wheel_n=3, worm_n=1)
+        expected = {
+            "HR": (-4, 7.5, 6.5),
+            "WR": (1, 6.0, 5.5),
+            "WL": (0, 2.5, 2.5),
+            "HL": (1, 5.0, 6.0),
+        }
+        for section, (slope, acc1, acc2) in expected.items():
+            series = doc2["series"][section]
+            self.assertEqual(series["slope"], slope, section)
+            self.assertAlmostEqual(series["acc1"], acc1, places=6, msg=section)
+            self.assertAlmostEqual(series["acc2"], acc2, places=6, msg=section)
+
 
 if __name__ == "__main__":
     unittest.main()

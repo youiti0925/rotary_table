@@ -18,6 +18,9 @@ TERM = b"\r\n"
 
 SERIAL_DEFAULTS = dict(baudrate=9600, bytesize=8, parity="E", stopbits=1, timeout=1.0)
 
+# ND287が対応するボーレート（総当たり診断用、ありそうな順）
+ALL_BAUDS = [9600, 19200, 38400, 57600, 115200, 4800, 2400, 1200, 600, 300, 150, 110]
+
 
 def parse_angle(raw: bytes):
     """ND287 の応答バイト列を角度[度]に変換する。
@@ -85,11 +88,12 @@ class ND287Device:
     """
 
     def __init__(self, port: str = None, baudrate: int = None, parity: str = None,
-                 timeout: float = None):
+                 timeout: float = None, bytesize: int = None):
         self.port = port
         self._auto = port in (None, "", "auto")
         self.baudrate = baudrate or SERIAL_DEFAULTS["baudrate"]
         self.parity = parity or SERIAL_DEFAULTS["parity"]
+        self.bytesize = bytesize or SERIAL_DEFAULTS["bytesize"]
         self.timeout = timeout if timeout is not None else SERIAL_DEFAULTS["timeout"]
         self.ser = None
         self._rxbuf = b""
@@ -124,7 +128,7 @@ class ND287Device:
         self.ser = serial.Serial(
             port=self.port,
             baudrate=self.baudrate,
-            bytesize=serial.EIGHTBITS,
+            bytesize=serial.SEVENBITS if self.bytesize == 7 else serial.EIGHTBITS,
             parity=parity_map[self.parity.upper()],
             stopbits=serial.STOPBITS_ONE,
             timeout=self.timeout,
@@ -212,46 +216,98 @@ def find_nd287_port(baudrate: int = None, parity: str = None, ports=None):
     return None
 
 
+class _PortUnusable(Exception):
+    pass
+
+
+def _try_setting(device_name, baud, par, bits, send=True, wait=0.5):
+    """1つの設定で開いて（必要なら）CTRL Bを送り、受信バイト列を返す。"""
+    dev = ND287Device(device_name, baud, par, timeout=wait, bytesize=bits)
+    try:
+        dev.open()
+        try:
+            dev.ser.reset_input_buffer()
+            if send:
+                dev.ser.write(REQUEST_CMD)
+            return dev.ser.read(64)
+        finally:
+            dev.close()
+    except Exception as e:
+        raise _PortUnusable(str(e))
+
+
+def _describe(raw, label, lines):
+    """受信結果をレポート行にする。解釈できたら True を返す。"""
+    if raw == REQUEST_CMD:
+        lines.append(
+            f"  {label}: 送信したCTRL B(02)がそのまま返ってきました"
+            " ＝ ループバック接続（2-3ピン短絡）を検出。PC〜ここまでの経路はOK"
+        )
+        return False
+    hexs = " ".join(f"{b:02X}" for b in raw[:32])
+    text = raw.decode("latin-1", "replace").strip()
+    angle = parse_angle(raw)
+    if angle is not None:
+        lines.append(f"  {label}: 受信 {len(raw)}bytes [{hexs}] \"{text}\""
+                     f" → 角度として解釈OK: {angle:.6f}°")
+        lines.append(f"  ★ この設定（{label}）で通信できます。「設定」画面に入力してください")
+        return True
+    lines.append(f"  {label}: 受信 {len(raw)}bytes [{hexs}] \"{text}\" → 角度として解釈不可")
+    return False
+
+
 def _scan_one_port(device_name, bauds, parities):
     """1ポートに対して設定の組み合わせを試し、レポート行を返す。"""
     lines = []
+    got_bytes = False
+
+    # 送信せずに聞くだけ（連続出力モードや別機器の通信を検出）
+    try:
+        raw = _try_setting(device_name, bauds[0], parities[0], 8, send=False, wait=1.0)
+    except _PortUnusable as e:
+        lines.append(f"  ポートを開けません ({e})")
+        return lines
+    if raw:
+        got_bytes = True
+        lines.append("  【送信なしで受信あり】こちらから要求していないのにデータが来ています")
+        lines.append("  （ND287の連続出力モード、または別のPC/機器の通信が混ざっている可能性）")
+        _describe(raw, f"{bauds[0]} 8{parities[0]}1 受信のみ", lines)
+
+    # 通常スキャン（8ビット × 指定ボーレート × パリティ）
+    tried = set()
     for baud in bauds:
         for par in parities:
-            dev = ND287Device(device_name, baud, par, timeout=0.5)
+            tried.add((baud, par, 8))
             try:
-                dev.open()
-                try:
-                    dev.ser.reset_input_buffer()
-                    dev.ser.write(REQUEST_CMD)
-                    raw = dev.ser.read(64)
-                finally:
-                    dev.close()
-            except Exception as e:
+                raw = _try_setting(device_name, baud, par, 8)
+            except _PortUnusable as e:
                 lines.append(f"  {baud} 8{par}1: ポートを開けません/送信失敗 ({e})")
-                return lines  # 開けないポートは他の設定でも開けない
+                return lines
             if not raw:
                 lines.append(f"  {baud} 8{par}1: 応答なし")
                 continue
-            if raw == REQUEST_CMD:
-                lines.append(
-                    f"  {baud} 8{par}1: 送信したCTRL B(02)がそのまま返ってきました"
-                    " ＝ ループバック接続（2-3ピン短絡）を検出。PC〜ここまでの経路はOK"
-                )
+            got_bytes = True
+            if _describe(raw, f"{baud} 8{par}1", lines):
                 return lines
-            hexs = " ".join(f"{b:02X}" for b in raw[:32])
-            text = raw.decode("latin-1", "replace").strip()
-            angle = parse_angle(raw)
-            if angle is not None:
-                lines.append(
-                    f"  {baud} 8{par}1: 受信 {len(raw)}bytes [{hexs}] \"{text}\""
-                    f" → 角度として解釈OK: {angle:.6f}°"
-                )
-                lines.append("  ★ この設定で通信できます。「設定」画面に入力してください")
-                return lines
-            lines.append(
-                f"  {baud} 8{par}1: 受信 {len(raw)}bytes [{hexs}] \"{text}\""
-                " → 角度として解釈不可"
-            )
+
+    # 何か受信しているのに解釈できない → 全設定の総当たり（7ビット・低ボーレート・奇数パリティ込み）
+    if got_bytes:
+        lines.append("  → 受信はあるが解釈不可のため、全設定を総当たりします（最大30秒ほど）")
+        for baud in ALL_BAUDS:
+            for par in ("E", "N", "O"):
+                for bits in (8, 7):
+                    if (baud, par, bits) in tried:
+                        continue
+                    try:
+                        raw = _try_setting(device_name, baud, par, bits)
+                    except _PortUnusable:
+                        continue
+                    if raw and _describe(raw, f"{baud} {bits}{par}1", lines):
+                        return lines
+        lines.append("  総当たりでも解釈できる応答はありませんでした。")
+        lines.append("  → ND287本体のインターフェイス設定画面の値（ボーレート/データビット/")
+        lines.append("    パリティ）を直接確認して教えてください。信号レベル（RS-232C用で")
+        lines.append("    ない TTL変換器の使用）が原因の場合もあります")
     return lines
 
 

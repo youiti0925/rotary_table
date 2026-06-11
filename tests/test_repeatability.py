@@ -14,6 +14,8 @@ from nd287_app.sequence import (
     IndexingSequence,
     RepeatabilitySequence,
     block_points,
+    rotary_blocks,
+    tilt_blocks,
 )
 
 SEC = 1.0 / 3600.0
@@ -30,6 +32,20 @@ class TestBlockPoints(unittest.TestCase):
         self.assertEqual(len(pts), 15)
         self.assertEqual(pts[0], -30.0)
         self.assertEqual(pts[-1], 110.0)
+
+    def test_rotary_blocks_by_count(self):
+        # ブロック数指定: 4箇所 → 0,90,180,270
+        self.assertEqual(rotary_blocks(4), [0.0, 90.0, 180.0, 270.0])
+        self.assertEqual(rotary_blocks(6), [0.0, 60.0, 120.0, 180.0, 240.0, 300.0])
+
+    def test_tilt_blocks_by_count(self):
+        # 傾斜: 範囲をn箇所で等分割（両端含む）
+        pts = tilt_blocks(-30.0, 110.0, 4)
+        self.assertEqual(len(pts), 4)
+        self.assertAlmostEqual(pts[0], -30.0)
+        self.assertAlmostEqual(pts[1], 16.0 + 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(pts[-1], 110.0)
+        self.assertEqual(tilt_blocks(0.0, 100.0, 1), [0.0])
 
 
 class TestTiltIndexingSequence(unittest.TestCase):

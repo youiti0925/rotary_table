@@ -41,7 +41,8 @@ from .sequence import (
     IndexingSequence,
     RepeatabilitySequence,
     SERIES_LABELS,
-    block_points,
+    rotary_blocks,
+    tilt_blocks,
 )
 from .settings import resolve_save_root, save_settings
 
@@ -62,7 +63,7 @@ BAUDRATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"
 
 META_KEYS = {
     "wheel_pitch": "ホイール刻み[°]",
-    "block_pitch": "ブロック刻み[°]",
+    "blocks": "ブロック数",
     "worm_pitch": "ウォーム刻み[°]",
     "worm_range": "ウォーム範囲[°]",
     "worm_start": "ウォーム開始[°]",
@@ -191,6 +192,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_wheel.setSuffix(" °/pt")
         self.l_wheel = add_field("ホイール刻み", self.e_wheel)
 
+        self.e_blocks = QtWidgets.QSpinBox()
+        self.e_blocks.setRange(2, 360)
+        self.e_blocks.setValue(4)
+        self.e_blocks.setSuffix(" 箇所")
+        self.l_blocks = add_field("ブロック数", self.e_blocks)
+
         self.e_repeats = QtWidgets.QSpinBox()
         self.e_repeats.setRange(2, 99)
         self.e_repeats.setValue(7)
@@ -216,19 +223,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_start.setSuffix(" °")
         self.l_start = add_field("ウォーム開始", self.e_start)
 
+        row1.addStretch(1)
+
+        # --- 操作ボタン段（条件欄と分けて、欄が増えてもボタンが隠れないようにする） ---
+        row_ops = QtWidgets.QHBoxLayout()
         b_start = QtWidgets.QPushButton("取込開始")
         b_start.setStyleSheet("font-size:16px; padding:4px 18px;")
+        self.b_cancel = QtWidgets.QPushButton("中止")
+        self.b_cancel.setEnabled(False)
         self.b_take = QtWidgets.QPushButton("手動取込")
         self.b_take.setEnabled(False)
         self.b_undo = QtWidgets.QPushButton("1点戻る")
         self.b_undo.setEnabled(False)
         b_start.clicked.connect(self.start)
+        self.b_cancel.clicked.connect(self.cancel)
         self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
-        row1.addStretch(1)
-        row1.addWidget(b_start)
-        row1.addWidget(self.b_take)
-        row1.addWidget(self.b_undo)
+        row_ops.addStretch(1)
+        row_ops.addWidget(b_start)
+        row_ops.addWidget(self.b_cancel)
+        row_ops.addWidget(self.b_take)
+        row_ops.addWidget(self.b_undo)
 
         # --- 2段目: 測定情報（取込開始の必須項目）とファイル操作 ---
         row2 = QtWidgets.QHBoxLayout()
@@ -331,6 +346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(row1)
         v.addLayout(row2)
         v.addLayout(row3)
+        v.addLayout(row_ops)
         v.addWidget(self.guide)
         v.addWidget(self.live)
         v.addLayout(plots, 1)
@@ -368,27 +384,46 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setVisible(is_tilt)
         for w in (
             self.l_worm, self.e_worm, self.l_range, self.e_range, self.l_start, self.e_start,
+            self.l_wheel, self.e_wheel,
         ):
             w.setVisible(not is_repeat)
-        for w in (self.l_repeats, self.e_repeats):
+        for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats):
             w.setVisible(is_repeat)
         for w in (self.l_blcorr, self.e_blcorr, self.b_corr):
             w.setVisible(not is_repeat)
-        self.l_wheel.setText("ブロック刻み" if is_repeat else ("刻み" if is_tilt else "ホイール刻み"))
+        self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
         self.plot_worm.setVisible(not is_repeat)
         self.plot_wheel.setTitle("再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
-        # モードを変えたら取込中の状態は破棄
-        self.seq = None
+        # モードを変えたら取込中の測定はキャンセル
         self.view_kind = "repeat" if is_repeat else "indexing"
+        self.discard_measurement()
+
+    def discard_measurement(self):
+        """取込中の測定を破棄して初期状態に戻す"""
+        self.seq = None
+        if self.view_kind == "repeat":
+            self.rep_points = None
+            self.rep_data = None
+        else:
+            self.data = None
         self.rebuild_curves()
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
         self.b_take.setEnabled(False)
+        self.b_cancel.setEnabled(False)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
         self.b_corr.setEnabled(False)
         self.guide.setText("―")
         self.live.setText("")
+
+    def cancel(self):
+        """取込中の測定を中止する（取込済みデータは破棄）"""
+        if self.seq is None:
+            return
+        taken = self.seq.idx
+        self.discard_measurement()
+        self.statusBar().showMessage(f"取込を中止しました（{taken}点破棄）")
 
     def rebuild_curves(self):
         for plot in (self.plot_wheel, self.plot_worm):
@@ -489,13 +524,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def build_sequence(self):
         if self.is_repeat():
+            n = self.e_blocks.value()
             if self.is_tilt():
-                points = block_points(
-                    self.e_wstart.value(), self.e_wend.value(), self.e_wheel.value()
-                )
+                points = tilt_blocks(self.e_wstart.value(), self.e_wend.value(), n)
             else:
-                # 回転は一周なので閉じ点（360°=0°）はブロックに含めない
-                points = block_points(0.0, 360.0, self.e_wheel.value(), include_end=False)
+                points = rotary_blocks(n)  # 一周をn等分（例 4 → 0,90,180,270）
             return RepeatabilitySequence(points, self.e_repeats.value())
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
         wheel_end = self.e_wend.value() if self.is_tilt() else 360.0
@@ -536,6 +569,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_blcorr.setValue(0.0)
         self.b_corr.setEnabled(False)
         self.b_take.setEnabled(True)
+        self.b_cancel.setEnabled(True)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
         self.show_guide()
@@ -640,6 +674,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def finish(self):
         self.b_take.setEnabled(False)
+        self.b_cancel.setEnabled(False)
         self.b_save.setEnabled(True)
         if self.view_kind == "repeat":
             self.finish_repeat()
@@ -729,7 +764,7 @@ class MainWindow(QtWidgets.QMainWindow):
             meta[META_KEYS["wheel_start"]] = self.e_wstart.value()
             meta[META_KEYS["wheel_end"]] = self.e_wend.value()
         if self.is_repeat():
-            meta[META_KEYS["block_pitch"]] = self.e_wheel.value()
+            meta[META_KEYS["blocks"]] = self.e_blocks.value()
             meta[META_KEYS["repeats"]] = self.e_repeats.value()
         else:
             meta[META_KEYS["wheel_pitch"]] = self.e_wheel.value()
@@ -819,7 +854,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_date.setDate(date)
         for spin, key in [
             (self.e_wheel, META_KEYS["wheel_pitch"]),
-            (self.e_wheel, META_KEYS["block_pitch"]),
+            (self.e_blocks, META_KEYS["blocks"]),
             (self.e_worm, META_KEYS["worm_pitch"]),
             (self.e_range, META_KEYS["worm_range"]),
             (self.e_start, META_KEYS["worm_start"]),

@@ -35,6 +35,22 @@ def block_points(start, end, pitch, include_end=True):
     return [float(a) for a in np.arange(start, stop, pitch)]
 
 
+def rotary_blocks(n):
+    """一周をn等分したブロック角度。例 n=4 → 0,90,180,270
+    （360°は0°と同じ場所なので含めない）"""
+    return [i * 360.0 / n for i in range(int(n))]
+
+
+def tilt_blocks(start, end, n):
+    """開始〜終了をn箇所に等分割したブロック角度（両端を含む）。
+    例 -30〜110 で n=4 → -30, 16.67, 63.33, 110"""
+    n = int(n)
+    if n <= 1:
+        return [float(start)]
+    step = (end - start) / (n - 1)
+    return [float(start + i * step) for i in range(n)]
+
+
 class IndexingSequence:
     def __init__(
         self,

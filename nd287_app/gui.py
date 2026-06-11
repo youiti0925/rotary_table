@@ -25,7 +25,8 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from .analysis import deviation_sec, repeatability_summary, summarize
+from .analysis import band_for_temp, deviation_sec, repeatability_summary, summarize
+from .bs_format import data_to_doc, doc_to_data, load_bs, save_bs
 from .export import (
     MODE_KEY,
     build_save_path,
@@ -33,6 +34,7 @@ from .export import (
     load_measurement,
     misc_rows,
     repeat_result_rows,
+    sanitize_filename,
     save_csv,
     save_repeat_csv,
 )
@@ -111,10 +113,21 @@ class SettingsDialog(QtWidgets.QDialog):
         root_row.addWidget(self.e_root)
         root_row.addWidget(b_browse)
 
+        bs_row = QtWidgets.QHBoxLayout()
+        self.e_bs_root = QtWidgets.QLineEdit(str(settings.get("bs_save_root", "")))
+        self.e_bs_root.setToolTip(
+            "旧形式(.BS)の保存先（検査表システムのデータフォルダ）。空にすると.BSを書かない"
+        )
+        b_bs_browse = QtWidgets.QPushButton("参照...")
+        b_bs_browse.clicked.connect(self.browse_bs_root)
+        bs_row.addWidget(self.e_bs_root)
+        bs_row.addWidget(b_bs_browse)
+
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
         form.addRow("保存先フォルダ", root_row)
+        form.addRow(".BS保存先（旧形式）", bs_row)
 
         note = QtWidgets.QLabel(
             "温度別の合否規格（ホイール/ウォーム/総合）は settings.json の judgement_spec で編集"
@@ -136,6 +149,13 @@ class SettingsDialog(QtWidgets.QDialog):
         if path:
             self.e_root.setText(path)
 
+    def browse_bs_root(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, ".BS保存先フォルダを選択", self.e_bs_root.text()
+        )
+        if path:
+            self.e_bs_root.setText(path)
+
     def values(self):
         try:
             baud = int(self.e_baud.currentText())
@@ -146,6 +166,7 @@ class SettingsDialog(QtWidgets.QDialog):
             baudrate=baud,
             parity=self.e_parity.currentText(),
             save_root=self.e_root.text().strip() or "測定データ",
+            bs_save_root=self.e_bs_root.text().strip(),
         )
 
 
@@ -962,13 +983,51 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
+            return
+        if self.view_kind == "indexing":
+            self.save_bs_file(machine_no, summary)
+
+    def save_bs_file(self, machine_no, summary):
+        """旧形式(.BS)を併せて保存する（検査表システム互換、分割測定のみ）"""
+        bs_root = str(self.settings.get("bs_save_root") or "").strip()
+        if not bs_root:
+            return
+        try:
+            band = band_for_temp(
+                (self.settings.get("judgement_spec") or {}).get("wheel_backlash"),
+                self.parse_temp() or 0.0,
+            )
+            doc = data_to_doc(
+                self.data,
+                summary,
+                model=self.e_model.text().strip(),
+                date=self.e_date.date().toString("yyyy/MM/dd"),
+                operator=self.e_operator.text().strip(),
+                temperature=self.e_temp.text().strip(),
+                spec_min=band["min"] if band else 0.0,
+                spec_max=band["max"] if band else 0.0,
+            )
+            bs_path = Path(bs_root) / f"{sanitize_filename(machine_no)}.BS"
+            bs_path.parent.mkdir(parents=True, exist_ok=True)
+            save_bs(bs_path, doc)
+            self.statusBar().showMessage(
+                f"{self.statusBar().currentMessage()} ／ .BSも保存: {bs_path}"
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "セーブ", f".BS（旧形式）の保存に失敗しました（CSVは保存済み）:\n{e}"
+            )
 
     def load(self):
         root = resolve_save_root(self.settings)
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "測定データを開く", str(root), "CSV (*.csv)"
+            self, "測定データを開く", str(root),
+            "測定データ (*.csv *.bs *.BS);;CSV (*.csv);;旧形式 (*.bs *.BS)",
         )
         if not path:
+            return
+        if path.lower().endswith(".bs"):
+            self.load_bs_file(path)
             return
         try:
             meta, kind, payload = load_measurement(path)
@@ -1030,6 +1089,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redraw()
         self.finish()
         self.guide.setText(f"ロード: {Path(path).name}")
+        self.statusBar().showMessage(f"ロードしました: {path}")
+
+    def load_bs_file(self, path):
+        """旧形式(.BS)を読み戻す。機番はファイル名から取る"""
+        try:
+            doc = load_bs(path)
+            data = doc_to_data(doc)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "ロード", f".BSの読み込みに失敗しました:\n{e}")
+            return
+        if not any(t for t, _ in data.values()):
+            QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
+            return
+        self.mode_combo.setCurrentText("回転分割")
+        self.seq = None
+        self.data = data
+        self.e_model.setText(doc["model"])
+        self.e_machine.setText(Path(path).stem)
+        self.e_operator.setText(doc["operator"])
+        self.e_temp.setText(doc["temperature"])
+        date = QtCore.QDate.fromString(doc["date"], "yyyy/MM/dd")
+        if date.isValid():
+            self.e_date.setDate(date)
+        wheel_targets = data["wheel_cw"][0]
+        if len(wheel_targets) >= 2:
+            self.e_wheel.setValue(abs(wheel_targets[1] - wheel_targets[0]))
+        worm_targets = data["worm_cw"][0]
+        if len(worm_targets) >= 2:
+            self.e_worm.setValue(abs(worm_targets[1] - worm_targets[0]))
+            self.e_range.setValue(worm_targets[-1] - worm_targets[0])
+            self.e_start.setValue(worm_targets[0])
+        self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(0.0)
+        self.b_undo.setEnabled(False)
+        self.live.setText("")
+        self.update_counts()
+        self.redraw()
+        self.finish()
+        self.guide.setText(f"ロード(.BS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
 
     def closeEvent(self, event):

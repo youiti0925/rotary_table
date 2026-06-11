@@ -19,10 +19,15 @@ import numpy as np
 
 
 def deviation_sec(targets, measured):
-    """各ポイントの偏差[秒]（測定値 - 指令値）"""
+    """各ポイントの偏差[秒]（測定値 - 指令値）
+
+    一周の閉じ点ではカウンタ表示が0°へ巻き戻る（指令360°に対し測定0°00'xx"）
+    ため、差を±180°に正規化してから秒に換算する。
+    """
     t = np.asarray(targets, dtype=float)
     m = np.asarray(measured, dtype=float)
-    return (m - t) * 3600.0
+    diff = (m - t + 180.0) % 360.0 - 180.0
+    return diff * 3600.0
 
 
 def pp(dev):

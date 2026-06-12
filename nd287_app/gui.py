@@ -29,9 +29,11 @@ from .analysis import (
     band_for_temp,
     composite_backlash_minmax,
     deviation_sec,
+    pp,
     repeatability_summary,
     summarize,
 )
+from .pcorr import apply_compensation, compensation_table
 from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
 from .ks_format import (
     data_to_doc as ks_data_to_doc,
@@ -335,9 +337,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
         self.b_save = QtWidgets.QPushButton("セーブ")
         self.b_save.setEnabled(False)
+        self.b_print = QtWidgets.QPushButton("印刷")
+        self.b_print.setEnabled(False)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         self.b_save.clicked.connect(self.save)
+        self.b_print.clicked.connect(self.print_report)
         b_load.clicked.connect(self.load)
         b_settings.clicked.connect(self.open_settings)
         for widget, label in [
@@ -351,6 +356,7 @@ class MainWindow(QtWidgets.QMainWindow):
             row2.addWidget(widget)
         row2.addStretch(1)
         row2.addWidget(self.b_save)
+        row2.addWidget(self.b_print)
         row2.addWidget(b_load)
         row2.addWidget(b_settings)
 
@@ -371,8 +377,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_corr.clicked.connect(self.apply_correction)
         self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
         self.l_blcorr = QtWidgets.QLabel("バックラッシ補正")
+        # 主点評価: 測定の等分数より粗い格子で精度を評価し直す（例 72等分測定→12等分評価）
+        self.e_evald = QtWidgets.QSpinBox()
+        self.e_evald.setRange(0, 720)
+        self.e_evald.setSpecialValueText("なし")
+        self.e_evald.setSuffix(" 等分")
+        self.e_evald.valueChanged.connect(self.refresh_results)
+        self.l_evald = QtWidgets.QLabel("主点評価")
         row3.addWidget(QtWidgets.QLabel("コメント"))
         row3.addWidget(self.e_comment, 1)
+        row3.addWidget(self.l_evald)
+        row3.addWidget(self.e_evald)
         row3.addWidget(self.l_blcorr)
         row3.addWidget(self.e_blcorr)
         row3.addWidget(self.b_corr)
@@ -540,7 +555,8 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setVisible(not is_repeat)
         for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats):
             w.setVisible(is_repeat)
-        for w in (self.l_blcorr, self.e_blcorr, self.b_corr):
+        for w in (self.l_blcorr, self.e_blcorr, self.b_corr,
+                  self.l_evald, self.e_evald):
             w.setVisible(not is_repeat)
         for w in self.range_widgets:
             w.setVisible(is_tilt and not is_repeat)
@@ -566,6 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_cancel.setEnabled(False)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
+        self.b_print.setEnabled(False)
         self.b_corr.setEnabled(False)
         self.guide.setText("―")
         self.live.setText("")
@@ -816,6 +833,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_cancel.setEnabled(True)
         self.b_undo.setEnabled(False)
         self.b_save.setEnabled(False)
+        self.b_print.setEnabled(False)
         self.update_counts()
         self.show_guide()
 
@@ -906,6 +924,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table_series.setRowCount(0)
             self.table_misc.setRowCount(0)
             self.b_save.setEnabled(False)
+            self.b_print.setEnabled(False)
             self.b_corr.setEnabled(False)
             self.b_take.setEnabled(True)
             self.b_undo.setEnabled(self.seq.idx > 0)
@@ -997,6 +1016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_take.setEnabled(False)
         self.b_cancel.setEnabled(False)
         self.b_save.setEnabled(True)
+        self.b_print.setEnabled(True)
         if self.view_kind == "repeat":
             self.finish_repeat()
         else:
@@ -1026,10 +1046,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # 右表: バックラッシMIN/MAX・温度規格による合否・傾き判定・真の最大最小
         rows = misc_rows(summary, self.current_judgements(summary))
         rows.extend(self.composite_backlash_rows())
+        rows.extend(self.main_grid_rows())
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
         self.fill_misc_table(rows)
+
+    def main_grid_rows(self):
+        """主点評価: 測定より粗い任意の等分数で精度を評価し直す（例 72等分→12等分）"""
+        divisions = self.e_evald.value()
+        if divisions <= 0:
+            return []
+        targets = sorted(self.data.get("wheel_cw", ([], []))[0])
+        intervals = len(targets) - 1
+        if intervals <= 0:
+            return []
+        if intervals % divisions != 0 or divisions > intervals:
+            return [("主点評価", f"{divisions}等分は測定{intervals}等分と割り切れません")]
+        step = intervals // divisions
+        rows = []
+        for key, label in (("wheel_cw", "ホイールCW"), ("wheel_ccw", "ホイールCCW")):
+            t, m = self.data.get(key, ([], []))
+            pairs = sorted(zip(t, m))
+            devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
+            rows.append((f"主点精度 {label}（{divisions}等分）", f'{pp(devs[::step]):.2f}"'))
+        return rows
 
     def composite_backlash_rows(self):
         """総合バックラッシ（ウォームを0°位置でホイールに合わせた機械全体の値）"""
@@ -1430,6 +1471,180 @@ class MainWindow(QtWidgets.QMainWindow):
         self.finish()
         self.guide.setText(f"ロード(.KS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
+
+    # ----- 印刷 -----
+
+    def print_report(self):
+        """A4一枚（＋分割モードはP補正ページ）の検査記録を印刷する"""
+        if not self.has_view_data():
+            return
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageOrientation(QtGui.QPageLayout.Portrait)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("検査記録の印刷")
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        document = self.build_report_document()
+        document.print_(printer)
+        self.statusBar().showMessage("印刷しました")
+
+    def _plot_image(self, plot):
+        return plot.grab().toImage()
+
+    def _render_series_plot(self, series, title):
+        """印刷用に系列をオフスクリーン描画して画像にする"""
+        plot = pg.PlotWidget(title=title)
+        plot.resize(880, 360)
+        plot.addLegend(offset=(10, 10))
+        plot.setLabel("bottom", "指令角度", units="°")
+        plot.setLabel("left", "偏差", units='"')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        for axis in ("left", "bottom"):
+            plot.getAxis(axis).enableAutoSIPrefix(False)
+        colors = {"wheel_cw": "#1f77b4", "wheel_ccw": "#d62728"}
+        for key, (t, dev) in series.items():
+            plot.plot(t, dev, pen=pg.mkPen(colors.get(key, "#2ca02c"), width=2),
+                      symbol="o", symbolSize=4,
+                      name=SERIES_LABELS.get(key, key))
+        image = plot.grab().toImage()
+        plot.deleteLater()
+        return image
+
+    def _meta_html(self):
+        items = [
+            ("型式", self.e_model.text()), ("機番", self.e_machine.text()),
+            ("測定日", self.e_date.date().toString("yyyy/MM/dd")),
+            ("測定者", self.e_operator.text()),
+            ("測定温度", f"{self.e_temp.text()} °C"),
+            ("モード", self.current_mode()),
+        ]
+        if self.is_tilt():
+            items.append(("測定範囲",
+                          f"{self.e_wstart.value():g}〜{self.e_wend.value():g}°"))
+        items += [
+            ("刻み", f"{self.e_wheel.value():g}°"),
+            ("ウォーム", f"{self.e_worm.value():g}°×{self.e_range.value():g}°"),
+        ]
+        if self.applied_blcorr:
+            items.append(("バックラッシ手動補正", f"{self.applied_blcorr:+.2f}\""))
+        cells = "".join(
+            f"<td style='border:1px solid #999; padding:1px 6px;'>"
+            f"<b>{k}</b>: {v}</td>" for k, v in items
+        )
+        comment = self.e_comment.text().strip()
+        comment_html = (f"<p style='margin:2px;'>コメント: {comment}</p>"
+                        if comment else "")
+        return (f"<table style='font-size:7pt;' cellspacing='0'><tr>{cells}</tr></table>"
+                + comment_html)
+
+    def _results_html(self, summary):
+        head = "".join(f"<th style='border:1px solid #999; padding:1px 5px;'>{h}</th>"
+                       for h in SERIES_METRIC_HEADERS)
+        body = ""
+        for key in SERIES_LABELS:
+            if key not in summary:
+                continue
+            s = summary[key]
+            cells = [SERIES_LABELS[key], f'{s["pp"]:.2f}"', f'{s["single"]:.2f}"',
+                     f'{s["adjacent"]:.2f}"', f'{s["slope"]:+.2f}"']
+            body += "<tr>" + "".join(
+                f"<td style='border:1px solid #999; padding:1px 5px;'>{c}</td>"
+                for c in cells) + "</tr>"
+        series_table = (f"<table style='font-size:7pt;' cellspacing='0'>"
+                        f"<tr>{head}</tr>{body}</table>")
+
+        rows = misc_rows(summary, self.current_judgements(summary))
+        rows.extend(self.composite_backlash_rows())
+        rows.extend(self.main_grid_rows())
+        rows.extend(self.slope_judgement_rows(summary))
+        if self.is_tilt():
+            rows.extend(self.tilt_accuracy_rows())
+        misc = "".join(
+            "<tr>"
+            f"<td style='border:1px solid #999; padding:1px 5px;'>{item}</td>"
+            f"<td style='border:1px solid #999; padding:1px 5px;"
+            f"{' color:red;' if value.startswith('NG') else ''}'>{value}</td></tr>"
+            for item, value in rows
+        )
+        misc_table = (f"<table style='font-size:7pt;' cellspacing='0'>{misc}</table>")
+        return (f"<table width='100%'><tr><td valign='top'>{series_table}</td>"
+                f"<td valign='top'>{misc_table}</td></tr></table>")
+
+    def _pcorr_html(self, document):
+        """P補正表＋補正後グラフのページ（分割モードのみ）"""
+        interval = float(self.settings.get("p_interval") or 100000) * 1e-4
+        unit = float(self.settings.get("p_unit") or 0.001)
+        table = compensation_table(self.data, interval, unit)
+        if not table:
+            return ""
+        corrected = apply_compensation(self.data, table)
+        image = self._render_series_plot(corrected, "ピッチエラー補正後（シミュレーション）")
+        document.addResource(QtGui.QTextDocument.ImageResource,
+                             QtCore.QUrl("pcorr.png"), image)
+        head = "".join(
+            f"<th style='border:1px solid #999; padding:1px 5px;'>{h}</th>"
+            for h in ("No", "角度[°]", "CW偏差[\"]", "CCW偏差[\"]",
+                      "平均[\"]", f"補正値[{unit:g}°]")
+        )
+        body = ""
+        for row in table:
+            ccw = "―" if row["ccw"] is None else f'{row["ccw"]:.2f}'
+            body += "<tr>" + "".join(
+                f"<td style='border:1px solid #999; padding:1px 5px;"
+                f" text-align:right;'>{c}</td>"
+                for c in (row["no"], f'{row["angle"]:g}', f'{row["cw"]:.2f}',
+                          ccw, f'{row["mean"]:.2f}', row["units"])
+            ) + "</tr>"
+        return (
+            "<div style='page-break-before:always;'></div>"
+            "<h3 style='margin:2px;'>ピッチエラー補正表"
+            f"（間隔 {interval:g}°・単位 {unit:g}°）</h3>"
+            "<p style='font-size:7pt; margin:2px;'>補正値はCW/CCW平均偏差を"
+            "打ち消す向き。客先フォーマットは見本に合わせて要確認。</p>"
+            f"<table style='font-size:7pt;' cellspacing='0'>"
+            f"<tr>{head}</tr>{body}</table>"
+            "<p><img src='pcorr.png' width='680'></p>"
+        )
+
+    def build_report_document(self):
+        document = QtGui.QTextDocument()
+        wheel_img = self._plot_image(self.plot_wheel)
+        document.addResource(QtGui.QTextDocument.ImageResource,
+                             QtCore.QUrl("wheel.png"), wheel_img)
+        graphs = "<p style='margin:2px;'><img src='wheel.png' width='620'></p>"
+        has_worm = (self.view_kind == "indexing"
+                    and bool(self.data.get("worm_cw", ([], []))[0]))
+        if has_worm:
+            worm_img = self._plot_image(self.plot_worm)
+            document.addResource(QtGui.QTextDocument.ImageResource,
+                                 QtCore.QUrl("worm.png"), worm_img)
+            graphs += "<p style='margin:2px;'><img src='worm.png' width='300'></p>"
+        if self.view_kind == "repeat":
+            rsum = repeatability_summary(self.rep_points, self.rep_data)
+            rows = [(f"ブロック{i + 1} ({b['angle']:g}°)",
+                     f'CW {b["cw"]:.2f}" / CCW {b["ccw"]:.2f}"')
+                    for i, b in enumerate(rsum["blocks"])
+                    if b["cw"] is not None and b["ccw"] is not None]
+            rows += [("再現性 CW（全ブロック最大）", f'{rsum["cw"]:.2f}"'),
+                     ("再現性 CCW（全ブロック最大）", f'{rsum["ccw"]:.2f}"'),
+                     ("再現性 総合", f'{rsum["overall"]:.2f}"')]
+            results = "<table style='font-size:7pt;' cellspacing='0'>" + "".join(
+                f"<tr><td style='border:1px solid #999; padding:1px 5px;'>{k}</td>"
+                f"<td style='border:1px solid #999; padding:1px 5px;'>{v}</td></tr>"
+                for k, v in rows) + "</table>"
+            pcorr = ""
+        else:
+            summary, _ = summarize(self.data, self.applied_blcorr)
+            results = self._results_html(summary)
+            pcorr = self._pcorr_html(document)
+        html = (
+            "<h2 style='margin:2px;'>分割測定 検査記録</h2>"
+            + self._meta_html() + graphs + results + pcorr
+        )
+        document.setHtml(html)
+        return document
 
     def closeEvent(self, event):
         self.rx_timer.stop()

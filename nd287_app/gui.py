@@ -27,7 +27,13 @@ import pyqtgraph as pg
 
 from .analysis import band_for_temp, deviation_sec, repeatability_summary, summarize
 from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
-from .ks_format import doc_to_data as ks_doc_to_data, load_ks, tilt_accuracy
+from .ks_format import (
+    data_to_doc as ks_data_to_doc,
+    doc_to_data as ks_doc_to_data,
+    load_ks,
+    save_ks,
+    tilt_accuracy,
+)
 from .masters import condition_params, find_entry, formula_minmax, load_masters
 from .export import (
     MODE_KEY,
@@ -1146,7 +1152,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"保存失敗: {e}")
             return
         if self.view_kind == "indexing":
-            self.save_bs_file(machine_no, summary)
+            if self.is_tilt():
+                self.save_ks_file(machine_no)
+            else:
+                self.save_bs_file(machine_no, summary)
 
     def save_bs_file(self, machine_no, summary):
         """旧形式(.BS)を併せて保存する（検査表システム互換、分割測定のみ）"""
@@ -1303,6 +1312,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide.setText(f"ロード(.BS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
 
+    def save_ks_file(self, machine_no):
+        """旧形式（傾斜分割 .KS）を併せて保存する（検査表システム互換）"""
+        bs_root = str(self.settings.get("bs_save_root") or "").strip()
+        if not bs_root:
+            return
+        try:
+            range1 = ((self.e_r1s.value(), self.e_r1e.value())
+                      if self.c_r1.isChecked() else None)
+            range2 = ((self.e_r2s.value(), self.e_r2e.value())
+                      if self.c_r2.isChecked() else None)
+            order = [1, 2, 3, 4]
+            if self.master_cond:
+                # 測定順（HR,WR,WL,HLの順番号）をマスタから
+                sections = self.master_cond.get("order") or []
+                positions = {s: i + 1 for i, s in enumerate(sections)}
+                order = [positions.get(s, 0) for s in ("HR", "WR", "WL", "HL")]
+            doc = ks_data_to_doc(
+                self.data,
+                model=self.e_model.text().strip(),
+                date=self.e_date.date().toString("yyyy/MM/dd"),
+                operator=self.e_operator.text().strip(),
+                range1=range1,
+                range2=range2,
+                b_corr=self.applied_blcorr,
+                order=order,
+            )
+            ks_path = Path(bs_root) / f"{sanitize_filename(machine_no)}.KS"
+            ks_path.parent.mkdir(parents=True, exist_ok=True)
+            save_ks(ks_path, doc)
+            self.statusBar().showMessage(
+                f"{self.statusBar().currentMessage()} ／ .KSも保存: {ks_path}"
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "セーブ", f".KS（旧形式）の保存に失敗しました（CSVは保存済み）:\n{e}"
+            )
+
     def load_ks_file(self, path):
         """旧形式（傾斜分割 .KS）を読み戻す。機番はファイル名から取る"""
         try:
@@ -1333,11 +1379,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_worm.setValue(abs(worm_targets[1] - worm_targets[0]))
             self.e_range.setValue(worm_targets[-1] - worm_targets[0])
             self.e_start.setValue(worm_targets[0])
-        # 評価範囲1をヘッダから復元（0.0001°単位）
+        # 評価範囲1/2をヘッダから復元（0.0001°単位）
         if doc.get("range1_start") is not None and doc.get("range1_end"):
             self.e_r1s.setValue(doc["range1_start"] * 1e-4)
             self.e_r1e.setValue(doc["range1_end"] * 1e-4)
             self.c_r1.setChecked(True)
+        if doc.get("range2_start") is not None and doc.get("range2_end"):
+            self.e_r2s.setValue(doc["range2_start"] * 1e-4)
+            self.e_r2e.setValue(doc["range2_end"] * 1e-4)
+            self.c_r2.setChecked(True)
+        else:
+            self.c_r2.setChecked(False)
         self.applied_blcorr = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_undo.setEnabled(False)

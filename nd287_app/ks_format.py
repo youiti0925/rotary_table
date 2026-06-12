@@ -4,8 +4,9 @@
 実物（261166ITY.KS）から解読した構造:
     1行目  : 型式
     2行目  : 測定日,測定者
-    3行目  : 開始角度H, 開始角度W, 評価範囲1の開始角度（0.0001°単位）
-    4行目  : 終了角度H, 終了角度W, 評価範囲1の終了角度
+    3行目  : 開始角度H, 開始角度W, 評価範囲1の開始角度[, 評価範囲2の開始角度]
+    4行目  : 終了角度H, 終了角度W, 評価範囲1の終了角度[, 評価範囲2の終了角度]
+              （0.0001°単位。範囲2の列は推測——範囲2入りの実物で要確認）
     5行目  : 間隔H, 間隔W
     6行目  : 正（CW）の 精度H, 精度W, 精度（=H+W）
     7行目  : 逆（CCW）の 精度H, 精度W, 精度
@@ -21,16 +22,18 @@
         CCW測定の度,分,秒, CW偏差["], CCW偏差["]
     ホイール（点数H+1行）→ ウォーム（点数W+1行）
 
-検証済みの計算（261166ITYで旧アプリ表示と一致）:
+検証済みの計算（261166ITYで旧アプリ表示と一致。全範囲・範囲1(0〜90°)・
+範囲2(-30〜+90°)の計18値）:
     精度H = 素のPP（0.5"丸め）
     精度W = 傾き補正後PP（0.5"丸め）
     精度  = 精度H + 精度W（任意誤差評価）
     範囲評価 = 範囲内のホイール素PP + 精度W
-バックラッシの合否判定はしない。MAX/MIN行の定義は未確認。
+バックラッシの合否判定はしない。MAX/MIN行はバックラッシの最大/最小
+（旧アプリは補正後の値のため、保存時はこちらの端点補正後の値を書く）。
 """
 
 from .analysis import detrended_pp, deviation_sec, pp
-from .bs_format import join_dms
+from .bs_format import join_dms, split_dms
 
 SECTION_KEYS = ("HR", "WR", "WL", "HL")
 
@@ -57,8 +60,10 @@ def parse_ks(text: str) -> dict:
     intervals = _nums(lines[4])
     doc["start_h"], doc["start_w"] = starts[0], starts[1]
     doc["range1_start"] = starts[2] if len(starts) > 2 else None
+    doc["range2_start"] = starts[3] if len(starts) > 3 else None
     doc["end_h"], doc["end_w"] = ends[0], ends[1]
     doc["range1_end"] = ends[2] if len(ends) > 2 else None
+    doc["range2_end"] = ends[3] if len(ends) > 3 else None
     doc["interval_h"], doc["interval_w"] = intervals[0], intervals[1]
 
     doc["acc_cw"] = _nums(lines[5])    # 精度H, 精度W, 精度
@@ -101,11 +106,17 @@ def format_ks(doc: dict, newline: str = "\r\n") -> str:
     def acc(values):
         return ",".join("" if v is None else f"{float(v):.1f}" for v in values)
 
+    # 範囲2が無いファイルは3列のまま（実物とのバイト一致のため）
+    starts = [doc["start_h"], doc["start_w"], doc["range1_start"]]
+    ends = [doc["end_h"], doc["end_w"], doc["range1_end"]]
+    if doc.get("range2_start") is not None or doc.get("range2_end") is not None:
+        starts.append(doc.get("range2_start"))
+        ends.append(doc.get("range2_end"))
     out = [
         doc["model"],
         f'{doc["date"]},{doc["operator"]}',
-        join([doc["start_h"], doc["start_w"], doc["range1_start"]]),
-        join([doc["end_h"], doc["end_w"], doc["range1_end"]]),
+        join(starts),
+        join(ends),
         join([doc["interval_h"], doc["interval_w"]]),
         acc(doc["acc_cw"]),
         acc(doc["acc_ccw"]),
@@ -186,3 +197,115 @@ def tilt_accuracy(data, range_=None) -> dict:
             entry["total"] = entry["h"] + entry["w"]  # 任意誤差 = H + W
         result[dirn] = entry
     return result
+
+
+def save_ks(path, doc: dict):
+    with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
+        f.write(format_ks(doc))
+
+
+def _detrend(values):
+    if len(values) < 2:
+        return list(values)
+    n = len(values) - 1
+    return [v - (values[-1] - values[0]) * i / n for i, v in enumerate(values)]
+
+
+def backlash_minmax(data, range_=None, blcorr=0.0):
+    """ホイールの補正後バックラッシ（CCW偏差-CW偏差、各系列を端点補正）のMIN/MAX。
+
+    .KSヘッダのMAX/MIN行用。旧アプリも補正後の値のため完全一致はしない場合がある。
+    """
+    targets, cw_meas = data.get("wheel_cw", ([], []))
+    ccw_by_target = {round(t, 6): m
+                     for t, m in zip(*data.get("wheel_ccw", ([], [])))}
+    pairs = []
+    for t, m_cw in sorted(zip(targets, cw_meas)):
+        m_ccw = ccw_by_target.get(round(t, 6))
+        if m_ccw is None:
+            continue
+        if range_ is not None and not (range_[0] <= t <= range_[1]):
+            continue
+        pairs.append((t, m_cw, m_ccw))
+    if len(pairs) < 2:
+        return None
+    cw_dev = list(deviation_sec([p[0] for p in pairs], [p[1] for p in pairs]))
+    ccw_dev = list(deviation_sec([p[0] for p in pairs], [p[2] for p in pairs]))
+    bl = [c2 - c1 + blcorr for c1, c2 in zip(_detrend(cw_dev), _detrend(ccw_dev))]
+    return (min(bl), max(bl))
+
+
+def data_to_doc(data, *, model, date, operator, range1=None, range2=None,
+                b_corr=0.0, p_interval=100000, p_unit=0.001,
+                order=(1, 2, 3, 4)) -> dict:
+    """アプリの測定データ → .KS構造（傾斜分割の保存用）
+
+    range1/range2: (開始角度, 終了角度)[°] または None（未使用）。
+    精度行は tilt_accuracy（旧アプリと一致を確認した式）で計算する。
+    """
+    doc = dict(model=model, date=date, operator=operator,
+               b_corr=b_corr, p_interval=p_interval, p_unit=p_unit,
+               order=list(order))
+
+    doc["rows"] = {}
+    for block, (cw_key, ccw_key) in (
+        ("wheel", ("wheel_cw", "wheel_ccw")),
+        ("worm", ("worm_cw", "worm_ccw")),
+    ):
+        targets, cw_meas = data.get(cw_key, ([], []))
+        ccw_by_target = {round(t, 6): m
+                         for t, m in zip(*data.get(ccw_key, ([], [])))}
+        rows = []
+        for t, m_cw in sorted(zip(targets, cw_meas)):
+            m_ccw = ccw_by_target.get(round(t, 6), t)
+            cw_disp = m_cw % 360.0
+            ccw_disp = m_ccw % 360.0
+            cw_dev = float(deviation_sec([t], [m_cw])[0])
+            ccw_dev = float(deviation_sec([t], [m_ccw])[0])
+            rows.append((t % 360.0, t) + split_dms(cw_disp) + split_dms(ccw_disp)
+                        + (cw_dev, ccw_dev))
+        doc["rows"][block] = rows
+
+    wheel_t = sorted(data.get("wheel_cw", ([], []))[0])
+    worm_t = sorted(data.get("worm_cw", ([], []))[0])
+    doc["start_h"] = round(wheel_t[0] * 10000) if wheel_t else 0
+    doc["end_h"] = round(wheel_t[-1] * 10000) if wheel_t else 0
+    doc["interval_h"] = round((wheel_t[1] - wheel_t[0]) * 10000) if len(wheel_t) > 1 else 0
+    doc["start_w"] = round(worm_t[0] * 10000) if worm_t else 0
+    doc["end_w"] = round(worm_t[-1] * 10000) if worm_t else 0
+    doc["interval_w"] = round((worm_t[1] - worm_t[0]) * 10000) if len(worm_t) > 1 else 0
+    doc["points_h"] = max(len(wheel_t) - 1, 0)
+    doc["points_w"] = max(len(worm_t) - 1, 0)
+    doc["range1_start"] = round(range1[0] * 10000) if range1 else None
+    doc["range1_end"] = round(range1[1] * 10000) if range1 else None
+    doc["range2_start"] = round(range2[0] * 10000) if range2 else None
+    doc["range2_end"] = round(range2[1] * 10000) if range2 else None
+
+    # 精度行（全範囲・範囲1・範囲2）
+    full = tilt_accuracy(data)
+    doc["acc_cw"] = [full["cw"].get(k) for k in ("h", "w", "total")]
+    doc["acc_ccw"] = [full["ccw"].get(k) for k in ("h", "w", "total")]
+    range_cw, range_ccw = [], []
+    for rng in (range1, range2):
+        if rng:
+            acc = tilt_accuracy(data, range_=rng)
+            range_cw += [acc["cw"].get(k) for k in ("h", "w", "total")]
+            range_ccw += [acc["ccw"].get(k) for k in ("h", "w", "total")]
+        else:
+            range_cw += [None] * 3
+            range_ccw += [None] * 3
+    doc["range_cw"] = range_cw
+    doc["range_ccw"] = range_ccw
+
+    # MAX/MIN行 = バックラッシ（補正後）の最大/最小（全範囲・範囲1・範囲2）
+    max3, min3 = [], []
+    full_mm = backlash_minmax(data, blcorr=b_corr)
+    for slot_range, used in ((None, True), (range1, range1 is not None),
+                             (range2, range2 is not None)):
+        mm = (full_mm if slot_range is None
+              else backlash_minmax(data, range_=slot_range, blcorr=b_corr)) if used else None
+        max3.append(round(mm[1], 1) if mm else None)
+        min3.append(round(mm[0], 1) if mm else None)
+    doc["max3"] = max3
+    doc["min3"] = min3
+    return doc

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from nd287_app.ks_format import (
+    data_to_doc,
     doc_to_data,
     format_ks,
     parse_ks,
@@ -71,6 +72,14 @@ class TestTiltAccuracyParity(unittest.TestCase):
         self.assertEqual((acc["ccw"]["h"], acc["ccw"]["w"], acc["ccw"]["total"]),
                          (6.0, 4.5, 10.5))
 
+    def test_partial_range2(self):
+        # 評価範囲2 = -30〜+90°（旧アプリ画面の開始角度2/終了角度2で確認）
+        acc = tilt_accuracy(self.data, range_=(-30.0, 90.0))
+        self.assertEqual((acc["cw"]["h"], acc["cw"]["w"], acc["cw"]["total"]),
+                         (7.5, 2.0, 9.5))
+        self.assertEqual((acc["ccw"]["h"], acc["ccw"]["w"], acc["ccw"]["total"]),
+                         (7.0, 4.5, 11.5))
+
     def test_data_series(self):
         self.assertEqual(len(self.data["wheel_cw"][0]), 73)
         self.assertEqual(self.data["wheel_cw"][0][0], -180.0)
@@ -78,6 +87,52 @@ class TestTiltAccuracyParity(unittest.TestCase):
         # CCWは測定順（降順）
         self.assertEqual(self.data["wheel_ccw"][0][0], 180.0)
         self.assertEqual(len(self.data["worm_cw"][0]), 11)
+
+
+class TestKsSave(unittest.TestCase):
+    """アプリの測定データ → .KS 書き出し"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = parse_ks(FIXTURE.read_text(encoding="utf-8"))
+        cls.data = doc_to_data(cls.doc)
+        cls.rebuilt = data_to_doc(
+            cls.data, model="TWA-200", date="2026/06/11", operator="ODA",
+            range1=(0.0, 90.0), range2=(-30.0, 90.0), order=[1, 3, 4, 2],
+        )
+
+    def test_header_geometry(self):
+        doc = self.rebuilt
+        self.assertEqual(doc["start_h"], -1800000)
+        self.assertEqual(doc["end_h"], 1800000)
+        self.assertEqual(doc["interval_h"], 50000)
+        self.assertEqual(doc["points_h"], 72)
+        self.assertEqual(doc["points_w"], 10)
+        self.assertEqual(doc["range1_start"], 0)
+        self.assertEqual(doc["range1_end"], 900000)
+        self.assertEqual(doc["range2_start"], -300000)
+        self.assertEqual(doc["range2_end"], 900000)
+
+    def test_accuracy_lines_match_old_app(self):
+        # 精度行は旧アプリのヘッダ値（全18値）と一致する
+        doc = self.rebuilt
+        self.assertEqual(doc["acc_cw"], [18.0, 2.0, 20.0])
+        self.assertEqual(doc["acc_ccw"], [15.5, 4.5, 20.0])
+        self.assertEqual(doc["range_cw"], [7.0, 2.0, 9.0, 7.5, 2.0, 9.5])
+        self.assertEqual(doc["range_ccw"], [6.0, 4.5, 10.5, 7.0, 4.5, 11.5])
+
+    def test_data_rows_roundtrip(self):
+        # データ行は実物とバイト一致で再生成される
+        original = FIXTURE.read_text(encoding="utf-8").splitlines()[14:]
+        regenerated = format_ks(self.rebuilt, newline="\n").splitlines()[14:]
+        self.assertEqual(regenerated, original)
+
+    def test_reparse(self):
+        # 書いたものを読み戻せる
+        doc2 = parse_ks(format_ks(self.rebuilt, newline="\n"))
+        self.assertEqual(doc2["range2_start"], -300000)
+        self.assertEqual(len(doc2["rows"]["wheel"]), 73)
+        self.assertEqual(doc2["order"], [1, 3, 4, 2])
 
 
 if __name__ == "__main__":

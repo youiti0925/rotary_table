@@ -55,6 +55,7 @@ from .export import (
     save_repeat_csv,
 )
 from .nd287 import ND287Device, deg_to_dms, scan_report
+from .switchbot import fetch_temperature
 from .sequence import (
     IndexingSequence,
     RepeatabilitySequence,
@@ -186,11 +187,124 @@ class SettingsDialog(QtWidgets.QDialog):
         )
 
 
+class RawDataDialog(QtWidgets.QDialog):
+    """生データ（数値）の一覧。Ctrl+Shift+E → 管理者パスワードで編集可能になる"""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.admin = False
+        self.entries = []  # 行 → データ書き戻し先
+        self.setWindowTitle("生データ")
+        self.resize(680, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.table = QtWidgets.QTableWidget()
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+        bottom = QtWidgets.QHBoxLayout()
+        self.status = QtWidgets.QLabel("表示のみ")
+        self.b_apply = QtWidgets.QPushButton("編集を適用")
+        self.b_apply.setVisible(False)
+        self.b_apply.clicked.connect(self.apply_edits)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        bottom.addWidget(self.status)
+        bottom.addStretch(1)
+        bottom.addWidget(self.b_apply)
+        bottom.addWidget(b_close)
+        layout.addLayout(bottom)
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+E"), self,
+                        activated=self.enter_admin)
+        self.populate()
+
+    def populate(self):
+        self.entries = []
+        if self.win.view_kind == "repeat":
+            headers = ["ブロック", "方向", "回", "指令角度[°]", "測定値[°]", "偏差[\"]"]
+            rows = []
+            points = self.win.rep_points or []
+            for (dirn, block), values in sorted((self.win.rep_data or {}).items(),
+                                                key=lambda kv: (kv[0][1], kv[0][0])):
+                angle = points[block] if block < len(points) else 0.0
+                for rep, value in enumerate(values):
+                    dev = float(deviation_sec([angle], [value])[0])
+                    rows.append([f"ブロック{block + 1}", dirn.upper(), rep + 1,
+                                 f"{angle:.4f}", f"{value:.6f}", f"{dev:.2f}"])
+                    self.entries.append(("repeat", (dirn, block), rep))
+            value_column = 4
+        else:
+            headers = ["系列", "指令角度[°]", "測定値[°]", "測定値(度分秒)", "偏差[\"]"]
+            rows = []
+            for key in SERIES_LABELS:
+                targets, measured = (self.win.data or {}).get(key, ([], []))
+                for index, (t, m) in enumerate(zip(targets, measured)):
+                    dev = float(deviation_sec([t], [m])[0])
+                    rows.append([SERIES_LABELS[key], f"{t:.4f}", f"{m:.6f}",
+                                 deg_to_dms(m), f"{dev:.2f}"])
+                    self.entries.append(("indexing", key, index))
+            value_column = 2
+        self.value_column = value_column
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            for j, text in enumerate(row):
+                item = QtWidgets.QTableWidgetItem(str(text))
+                if not (self.admin and j == value_column):
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                self.table.setItem(i, j, item)
+        self.table.resizeColumnsToContents()
+
+    def enter_admin(self):
+        password, ok = QtWidgets.QInputDialog.getText(
+            self, "管理者モード", "パスワード:", QtWidgets.QLineEdit.Password
+        )
+        expected = str(self.win.settings.get("admin_password") or "")
+        if not ok:
+            return
+        if not expected or password != expected:
+            self.status.setText("パスワードが違います")
+            return
+        self.admin = True
+        self.b_apply.setVisible(True)
+        self.status.setText("管理者モード: 測定値[°]列を編集できます")
+        self.populate()
+
+    def apply_edits(self):
+        if not self.admin:
+            return
+        errors = 0
+        for i, entry in enumerate(self.entries):
+            item = self.table.item(i, self.value_column)
+            try:
+                value = float(item.text())
+            except (TypeError, ValueError):
+                errors += 1
+                continue
+            if entry[0] == "indexing":
+                _, key, index = entry
+                self.win.data[key][1][index] = value
+            else:
+                _, data_key, rep = entry
+                self.win.rep_data[data_key][rep] = value
+        self.win.redraw()
+        if not self.win.b_take.isEnabled():
+            self.win.finish()
+        self.win.update_counts()
+        self.win.statusBar().showMessage("生データを編集しました（管理者モード）")
+        self.status.setText(
+            "適用しました" + (f"（{errors}件は数値でないため無視）" if errors else "")
+        )
+        self.populate()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
     # 通信診断スレッド完了通知（レポート文字列）
     _diag_done = QtCore.Signal(str)
+    # SwitchBot温度取得完了通知（成功か, メッセージ, 温度）
+    _temp_done = QtCore.Signal(bool, str, float)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -335,10 +449,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_temp.setPlaceholderText("例: 23.5")
         self.e_temp.setMaximumWidth(70)
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
+        self.b_temp = QtWidgets.QPushButton("取得")
+        self.b_temp.setMaximumWidth(44)
+        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得"
+                               "（settings.jsonのswitchbot_token等を設定）")
+        self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
         self.b_save = QtWidgets.QPushButton("セーブ")
         self.b_save.setEnabled(False)
         self.b_print = QtWidgets.QPushButton("印刷")
         self.b_print.setEnabled(False)
+        self.b_raw = QtWidgets.QPushButton("生データ")
+        self.b_raw.clicked.connect(self.show_raw_data)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         self.b_save.clicked.connect(self.save)
@@ -354,9 +475,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ]:
             row2.addWidget(QtWidgets.QLabel(label))
             row2.addWidget(widget)
+        row2.addWidget(self.b_temp)
         row2.addStretch(1)
         row2.addWidget(self.b_save)
         row2.addWidget(self.b_print)
+        row2.addWidget(self.b_raw)
         row2.addWidget(b_load)
         row2.addWidget(b_settings)
 
@@ -467,6 +590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.b_conn)
         self._conn_done.connect(self.on_connect_done)
         self._diag_done.connect(self.on_diagnostics_done)
+        self._temp_done.connect(self.on_temp_done)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -1472,6 +1596,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide.setText(f"ロード(.KS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
 
+    # ----- 生データ・温度取得 -----
+
+    def show_raw_data(self):
+        """生データ（数値）の一覧を表示する（Ctrl+Shift+Eで管理者編集）"""
+        if not self.has_view_data():
+            self.statusBar().showMessage("表示する生データがありません")
+            return
+        RawDataDialog(self).exec()
+
+    def fetch_temp_from_switchbot(self):
+        """SwitchBot温湿度計から測定温度を取得して入力欄に入れる"""
+        token = str(self.settings.get("switchbot_token") or "")
+        secret = str(self.settings.get("switchbot_secret") or "")
+        device = str(self.settings.get("switchbot_device") or "")
+        if not (token and secret and device):
+            QtWidgets.QMessageBox.information(
+                self, "温度取得",
+                "SwitchBotが未設定です。settings.json に\n"
+                "switchbot_token / switchbot_secret / switchbot_device\n"
+                "を設定してください（SwitchBotアプリの開発者向けオプションで取得）",
+            )
+            return
+        self.b_temp.setEnabled(False)
+        self.statusBar().showMessage("SwitchBotから温度を取得中...")
+
+        def work():
+            try:
+                temperature = fetch_temperature(token, secret, device)
+                self._temp_done.emit(True, f"温度を取得: {temperature:g}°C", temperature)
+            except Exception as e:
+                self._temp_done.emit(False, f"温度取得に失敗: {e}", 0.0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_temp_done(self, ok, message, temperature):
+        self.b_temp.setEnabled(True)
+        self.statusBar().showMessage(message)
+        if ok:
+            self.e_temp.setText(f"{temperature:g}")
+
     # ----- 印刷 -----
 
     def print_report(self):
@@ -1481,7 +1645,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 
         printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageOrientation(QtGui.QPageLayout.Portrait)
+        printer.setPageOrientation(QtGui.QPageLayout.Landscape)
         dialog = QPrintDialog(printer, self)
         dialog.setWindowTitle("検査記録の印刷")
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -1605,7 +1769,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "打ち消す向き。客先フォーマットは見本に合わせて要確認。</p>"
             f"<table style='font-size:7pt;' cellspacing='0'>"
             f"<tr>{head}</tr>{body}</table>"
-            "<p><img src='pcorr.png' width='680'></p>"
+            "<p><img src='pcorr.png' width='900'></p>"
         )
 
     def build_report_document(self):
@@ -1613,14 +1777,19 @@ class MainWindow(QtWidgets.QMainWindow):
         wheel_img = self._plot_image(self.plot_wheel)
         document.addResource(QtGui.QTextDocument.ImageResource,
                              QtCore.QUrl("wheel.png"), wheel_img)
-        graphs = "<p style='margin:2px;'><img src='wheel.png' width='620'></p>"
         has_worm = (self.view_kind == "indexing"
                     and bool(self.data.get("worm_cw", ([], []))[0]))
         if has_worm:
             worm_img = self._plot_image(self.plot_worm)
             document.addResource(QtGui.QTextDocument.ImageResource,
                                  QtCore.QUrl("worm.png"), worm_img)
-            graphs += "<p style='margin:2px;'><img src='worm.png' width='300'></p>"
+            # ホイール:ウォーム = 7:3 で横並び（A4横）
+            graphs = ("<table width='100%' cellspacing='0'><tr>"
+                      "<td><img src='wheel.png' width='670'></td>"
+                      "<td><img src='worm.png' width='287'></td>"
+                      "</tr></table>")
+        else:
+            graphs = "<p style='margin:2px;'><img src='wheel.png' width='930'></p>"
         if self.view_kind == "repeat":
             rsum = repeatability_summary(self.rep_points, self.rep_data)
             rows = [(f"ブロック{i + 1} ({b['angle']:g}°)",

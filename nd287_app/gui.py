@@ -313,6 +313,8 @@ class MainWindow(QtWidgets.QMainWindow):
     _temp_done = QtCore.Signal(bool, str, float)
     # SwitchBot Bot押下の経過通知
     _bot_msg = QtCore.Signal(str)
+    # Webモニタからのコマンド（HTTPスレッド→GUIスレッド）
+    _remote_cmd = QtCore.Signal(str)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -323,6 +325,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない
         self.auto_mode = False    # 自動測定（SwitchBot起動＋NG自動再測定）中か
         self.auto_retries = 0
+        self.web = None           # Webモニタ（起動は__init__末尾で）
+        self._web_lock = threading.Lock()
+        self._web_state = {}
+        self._web_png = b""
         self.seq = None        # 取込中のシーケンス（ロード表示時は None）
         self.data = None       # 分割測定の表示対象データ
         self.rep_points = None  # 再現性測定のブロック角度
@@ -609,6 +615,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._diag_done.connect(self.on_diagnostics_done)
         self._temp_done.connect(self.on_temp_done)
         self._bot_msg.connect(self.on_bot_msg)
+        self._remote_cmd.connect(self.on_remote_command)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -630,6 +637,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_model.editingFinished.connect(self.on_model_entered)
 
         self.on_mode_changed(self.mode_combo.currentText())
+
+        # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）
+        if self.settings.get("web_enabled"):
+            try:
+                from .webmonitor import WebMonitor
+                port = int(self.settings.get("web_port") or 8765)
+                self.web = WebMonitor(
+                    self.web_status, self.web_png,
+                    lambda cmd: self._remote_cmd.emit(cmd),
+                    port=port, token=self.settings.get("web_token", ""),
+                )
+                self.web.start()
+                self.statusBar().showMessage(
+                    f"Webモニタ起動: http://<このPCのIP>:{port}/ "
+                    f"{'（token必須）' if self.settings.get('web_token') else ''}"
+                )
+            except Exception as e:
+                self.web = None
+                self.statusBar().showMessage(f"Webモニタ起動失敗: {e}")
+        self.update_web_snapshot()
 
     # ----- 型式マスタ -----
 
@@ -729,6 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide.setText("―")
         self.live.setText("")
         self.counts.setText("")
+        self.update_web_snapshot(with_png=True)
 
     def cancel(self):
         """取込中の測定を中止する（取込済みデータは破棄。自動測定も停止）"""
@@ -738,6 +766,78 @@ class MainWindow(QtWidgets.QMainWindow):
         taken = self.seq.idx
         self.discard_measurement()
         self.statusBar().showMessage(f"取込を中止しました（{taken}点破棄）")
+
+    # ----- Webモニタ -----
+
+    def web_status(self):
+        """HTTPスレッドから呼ばれる: スナップショットを返す（プレーンデータのみ）"""
+        with self._web_lock:
+            return dict(self._web_state)
+
+    def web_png(self):
+        with self._web_lock:
+            return self._web_png
+
+    def update_web_snapshot(self, with_png=False):
+        """GUIスレッドで現在の状態をスナップショット化してWebモニタへ公開する"""
+        if self.web is None:
+            return
+        if self.seq is not None and not self.seq.done():
+            state = f"測定中 {self.seq.idx}/{len(self.seq)}"
+            if self.auto_mode:
+                state += f"（自動測定 再測定{self.auto_retries}回目）" if self.auto_retries else "（自動測定）"
+        elif self.has_view_data():
+            state = "測定完了"
+        else:
+            state = "待機中"
+        results = []
+        if self.has_view_data() and not self.b_take.isEnabled():
+            try:
+                if self.view_kind == "repeat":
+                    rsum = repeatability_summary(self.rep_points, self.rep_data)
+                    results = repeat_result_rows(rsum)
+                else:
+                    # 系列＋バックラッシ・判定・総合・主点・傾き判定・任意誤差
+                    from .export import series_rows
+                    summary, _ = summarize(self.data, self.applied_blcorr)
+                    results = series_rows(summary)
+                    results += misc_rows(summary, self.current_judgements(summary))
+                    results += self.composite_backlash_rows()
+                    results += self.main_grid_rows()
+                    results += self.slope_judgement_rows(summary)
+                    if self.is_tilt():
+                        results += self.tilt_accuracy_rows()
+            except Exception:
+                results = []
+        snapshot = dict(
+            state=state,
+            timestamp=QtCore.QDateTime.currentDateTime().toString("HH:mm:ss"),
+            meta=dict(
+                model=self.e_model.text(), machine=self.e_machine.text(),
+                operator=self.e_operator.text(), temperature=self.e_temp.text(),
+                mode=self.current_mode(),
+            ),
+            counts=self.counts.text(),
+            results=[[k, v] for k, v in results],
+        )
+        with self._web_lock:
+            self._web_state = snapshot
+        if with_png:
+            image = self.plot_wheel.grab().toImage()
+            buffer = QtCore.QBuffer()
+            buffer.open(QtCore.QIODevice.WriteOnly)
+            image.save(buffer, "PNG")
+            with self._web_lock:
+                self._web_png = bytes(buffer.data())
+
+    def on_remote_command(self, command):
+        """Webモニタからの指示（GUIスレッドで実行）"""
+        if command == "remeasure":
+            self.statusBar().showMessage("Webモニタから再測定指示を受信")
+            if self.seq is not None and not self.seq.done():
+                self.cancel()
+            self.auto_start()
+            self.update_web_snapshot(with_png=True)
 
     # ----- 自動測定（SwitchBotで機械起動 + 傾きNG自動再測定） -----
 
@@ -1064,6 +1164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_print.setEnabled(False)
         self.update_counts()
         self.show_guide()
+        self.update_web_snapshot(with_png=True)
 
     def show_guide(self):
         text = self.seq.guide_text()
@@ -1144,9 +1245,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.seq.done():
             self.guide.setText("測定完了 → セーブで保存")
             self.finish()
+            self.update_web_snapshot(with_png=True)
             self.auto_after_complete()
         else:
             self.show_guide()
+            self.update_web_snapshot(with_png=(self.seq.idx % 5 == 0))
 
     def undo(self):
         if self.seq and self.seq.undo():
@@ -1571,6 +1674,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.finish()
         self.guide.setText(f"ロード: {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
+        self.update_web_snapshot(with_png=True)
 
     def load_bs_file(self, path):
         """旧形式(.BS)を読み戻す。機番はファイル名から取る"""
@@ -1611,6 +1715,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.finish()
         self.guide.setText(f"ロード(.BS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
+        self.update_web_snapshot(with_png=True)
 
     def save_ks_file(self, machine_no):
         """旧形式（傾斜分割 .KS）を併せて保存する（検査表システム互換）"""
@@ -1700,6 +1805,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.finish()
         self.guide.setText(f"ロード(.KS): {Path(path).name}")
         self.statusBar().showMessage(f"ロードしました: {path}")
+        self.update_web_snapshot(with_png=True)
 
     # ----- 生データ・温度取得 -----
 

@@ -30,11 +30,26 @@ DEFAULTS = dict(
     # P補正（ピッチエラー補正表）の既定値
     p_interval=100000,   # 補正間隔（0.0001°単位。100000=10°）
     p_unit=0.001,        # 補正単位[°]
-    # SwitchBot温湿度計（測定温度の自動取得）。トークン等はSwitchBotアプリの
-    # 開発者向けオプションから取得して設定する
+    # SwitchBot（測定温度の自動取得＝温湿度計のID / 自動測定＝Botで機械の
+    # 起動ボタンを物理押し）。トークン等はSwitchBotアプリの開発者向け
+    # オプションから取得して設定する
     switchbot_token="",
     switchbot_secret="",
-    switchbot_device="",
+    switchbot_device="",        # 温湿度計 or Bot のデバイスID（クラウドAPI用）
+    switchbot_use_ble=False,    # True: PCのBluetoothからBotを直接操作（ハブ不要）
+    switchbot_ble_mac="",
+    switchbot_ble_password="",
+    switchbot_patterns={
+        "1回押し": [0.0],
+        "2回押し（5秒間隔）": [5.0, 0.0],
+        "2回押し（3秒間隔）": [3.0, 0.0],
+        "3回押し（3秒間隔）": [3.0, 3.0, 0.0],
+    },
+    switchbot_pattern_name="1回押し",
+    # 自動測定（XR20監視ツールの状態機械を移植）:
+    # 取込開始→SwitchBotで機械起動→完了→傾き判定→NGなら自動で再測定
+    auto_max_retries=2,          # 傾きNG時の自動再測定の上限回数
+    auto_wait_before_press=1.0,  # 取込開始からSwitchBot押下までの待ち[秒]
     # 生データ編集（管理者モード）のパスワード
     admin_password="0925",
     # 温度別の合否規格 [秒]。ホイールが合金製のため熱膨張で、ホイール・

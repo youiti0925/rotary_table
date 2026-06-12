@@ -29,5 +29,35 @@ class TestSwitchBot(unittest.TestCase):
             fetch_temperature("", "", "")
 
 
+
+
+class TestBotControl(unittest.TestCase):
+    def test_ble_payload_without_password(self):
+        from nd287_app.switchbot import ble_press_payload
+        self.assertEqual(ble_press_payload(""), bytes([0x57, 0x01, 0x00]))
+
+    def test_ble_payload_with_password(self):
+        import binascii
+        from nd287_app.switchbot import ble_press_payload
+        payload = ble_press_payload("pass123")
+        crc = binascii.crc32(b"pass123") & 0xFFFFFFFF
+        self.assertEqual(payload, bytes([0x57, 0x11]) + crc.to_bytes(4, "big") + b"\x00")
+
+    def test_bot_configured(self):
+        from nd287_app.switchbot import bot_configured
+        self.assertFalse(bot_configured({}))
+        self.assertTrue(bot_configured({"switchbot_token": "t", "switchbot_secret": "s",
+                                        "switchbot_device": "d"}))
+        self.assertFalse(bot_configured({"switchbot_token": "t"}))
+        self.assertTrue(bot_configured({"switchbot_use_ble": True,
+                                        "switchbot_ble_mac": "AA:BB"}))
+        self.assertFalse(bot_configured({"switchbot_use_ble": True}))
+
+    def test_cloud_unconfigured(self):
+        from nd287_app.switchbot import press_bot_cloud
+        ok, message = press_bot_cloud("", "", "")
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

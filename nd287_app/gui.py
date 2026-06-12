@@ -20,6 +20,7 @@
 
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -55,7 +56,12 @@ from .export import (
     save_repeat_csv,
 )
 from .nd287 import ND287Device, deg_to_dms, scan_report
-from .switchbot import fetch_temperature
+from .switchbot import (
+    DEFAULT_PATTERNS,
+    bot_configured,
+    fetch_temperature,
+    press_bot,
+)
 from .sequence import (
     IndexingSequence,
     RepeatabilitySequence,
@@ -305,6 +311,8 @@ class MainWindow(QtWidgets.QMainWindow):
     _diag_done = QtCore.Signal(str)
     # SwitchBot温度取得完了通知（成功か, メッセージ, 温度）
     _temp_done = QtCore.Signal(bool, str, float)
+    # SwitchBot Bot押下の経過通知
+    _bot_msg = QtCore.Signal(str)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -313,6 +321,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dev = device
         self.settings = settings
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない
+        self.auto_mode = False    # 自動測定（SwitchBot起動＋NG自動再測定）中か
+        self.auto_retries = 0
         self.seq = None        # 取込中のシーケンス（ロード表示時は None）
         self.data = None       # 分割測定の表示対象データ
         self.rep_points = None  # 再現性測定のブロック角度
@@ -387,6 +397,11 @@ class MainWindow(QtWidgets.QMainWindow):
         row_ops = QtWidgets.QHBoxLayout()
         b_start = QtWidgets.QPushButton("取込開始")
         b_start.setStyleSheet("font-size:16px; padding:4px 18px;")
+        self.b_auto = QtWidgets.QPushButton("自動測定")
+        self.b_auto.setStyleSheet("font-size:16px; padding:4px 18px;")
+        self.b_auto.setToolTip(
+            "取込開始→SwitchBotで機械を起動→完了後に傾き判定→NGなら自動で再測定"
+        )
         self.b_cancel = QtWidgets.QPushButton("中止")
         self.b_cancel.setEnabled(False)
         self.b_take = QtWidgets.QPushButton("手動取込")
@@ -394,11 +409,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_undo = QtWidgets.QPushButton("1点戻る")
         self.b_undo.setEnabled(False)
         b_start.clicked.connect(self.start)
+        self.b_auto.clicked.connect(self.auto_start)
         self.b_cancel.clicked.connect(self.cancel)
         self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
         row_ops.addStretch(1)
         row_ops.addWidget(b_start)
+        row_ops.addWidget(self.b_auto)
         row_ops.addWidget(self.b_cancel)
         row_ops.addWidget(self.b_take)
         row_ops.addWidget(self.b_undo)
@@ -591,6 +608,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._conn_done.connect(self.on_connect_done)
         self._diag_done.connect(self.on_diagnostics_done)
         self._temp_done.connect(self.on_temp_done)
+        self._bot_msg.connect(self.on_bot_msg)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -713,12 +731,98 @@ class MainWindow(QtWidgets.QMainWindow):
         self.counts.setText("")
 
     def cancel(self):
-        """取込中の測定を中止する（取込済みデータは破棄）"""
+        """取込中の測定を中止する（取込済みデータは破棄。自動測定も停止）"""
         if self.seq is None:
             return
+        self.auto_mode = False
         taken = self.seq.idx
         self.discard_measurement()
         self.statusBar().showMessage(f"取込を中止しました（{taken}点破棄）")
+
+    # ----- 自動測定（SwitchBotで機械起動 + 傾きNG自動再測定） -----
+
+    def auto_start(self):
+        """自動測定: 取込開始→SwitchBotで機械起動→完了後に傾き判定→NGなら再測定"""
+        self.start()
+        if self.seq is None or not self.b_take.isEnabled():
+            return  # 必須項目の検証で開始できなかった
+        self.auto_mode = True
+        self.auto_retries = 0
+        if not bot_configured(self.settings):
+            self.statusBar().showMessage(
+                "自動測定（SwitchBot未設定のため物理押下はスキップ。"
+                "機械は手動で起動してください）"
+            )
+        self.trigger_bot()
+
+    def trigger_bot(self):
+        """SwitchBot Botを押しパターンに従ってバックグラウンドで起動する"""
+        settings = dict(self.settings)
+        patterns = settings.get("switchbot_patterns") or DEFAULT_PATTERNS
+        name = settings.get("switchbot_pattern_name") or "1回押し"
+        pattern = patterns.get(name) or [0.0]
+        wait_before = float(settings.get("auto_wait_before_press") or 0.0)
+        configured = bot_configured(settings)
+
+        def work():
+            if wait_before > 0:
+                time.sleep(wait_before)
+            total = len(pattern)
+            for i, wait_after in enumerate(pattern, start=1):
+                if not configured:
+                    self._bot_msg.emit(f"SwitchBot未設定: 押下スキップ {i}/{total}")
+                else:
+                    ok, message = press_bot(settings)
+                    self._bot_msg.emit(
+                        f"SwitchBot {i}/{total}: {'OK' if ok else 'NG'} {message}")
+                if wait_after > 0:
+                    time.sleep(wait_after)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_bot_msg(self, message):
+        self.statusBar().showMessage(message)
+
+    def auto_judge_ok(self):
+        """自動測定の合否: マスタの傾きH/W規格と突き合わせる（無ければOK扱い）"""
+        if self.view_kind != "indexing" or not self.master_judge:
+            return True
+        summary, _ = summarize(self.data, self.applied_blcorr)
+        for key, limit in (
+            ("wheel_cw", self.master_judge.get("slope_h")),
+            ("wheel_ccw", self.master_judge.get("slope_h")),
+            ("worm_cw", self.master_judge.get("slope_w")),
+            ("worm_ccw", self.master_judge.get("slope_w")),
+        ):
+            if limit and key in summary and abs(summary[key]["slope"]) > limit:
+                return False
+        return True
+
+    def auto_after_complete(self):
+        """測定完了時の自動測定の続き: 傾きOKなら終了、NGなら自動再測定"""
+        if not self.auto_mode:
+            return
+        if self.auto_judge_ok():
+            self.auto_mode = False
+            self.statusBar().showMessage("自動測定完了: 傾きOK")
+            return
+        max_retries = int(self.settings.get("auto_max_retries") or 0)
+        if self.auto_retries >= max_retries:
+            self.auto_mode = False
+            self.statusBar().showMessage(
+                f"自動測定終了: 傾きNGのまま再測定上限（{max_retries}回）に到達"
+            )
+            return
+        self.auto_retries += 1
+        self.statusBar().showMessage(
+            f"傾きNG → 自動再測定 {self.auto_retries}/{max_retries}"
+        )
+        self.start()
+        if self.seq is None:
+            self.auto_mode = False
+            return
+        self.auto_mode = True  # start()はauto_modeに触らないが明示
+        self.trigger_bot()
 
     def rebuild_curves(self):
         for plot in (self.plot_wheel, self.plot_worm):
@@ -1040,6 +1144,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.seq.done():
             self.guide.setText("測定完了 → セーブで保存")
             self.finish()
+            self.auto_after_complete()
         else:
             self.show_guide()
 

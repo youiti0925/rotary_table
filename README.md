@@ -210,6 +210,21 @@ Microsoft Print to PDFでPDF化も可）:
 管理者パスワード（settings.json の admin_password）を入れると測定値[°]列が
 編集可能になり、「編集を適用」でグラフ・結果が再計算される。
 
+## 自動測定（XR20監視ツールの移植・SwitchBot連携）
+
+app526リポジトリの xr20_tool（旧LabVIEWアプリを画面OCRで監視して自動再測定する
+ツール）の状態機械を移植した。新アプリはデータを直接持っているため画面読み取りは
+不要になり、本質部分だけを統合している:
+
+- **自動測定ボタン**: 取込開始 → SwitchBot Bot（物理ボタン押しロボット）で機械の
+  起動ボタンを押す → 測定完了 → **傾き判定**（マスタの傾きH/W規格）→
+  NGなら**自動で再取込＋再起動**（auto_max_retries回まで、既定2回）
+- SwitchBot Botは **クラウドAPI**（switchbot_token/secret/device）と
+  **BLE直結**（switchbot_use_ble=true + switchbot_ble_mac、ハブ不要、要 pip install bleak）
+  の両対応。押しパターン（1回押し/2回押し等）は switchbot_patterns で定義
+- SwitchBot未設定でも自動測定は動く（物理押下だけスキップ＝機械は手動起動）
+- 中止ボタンで自動測定も停止
+
 ## SwitchBot温湿度計から測定温度を取得
 
 測定温度欄の「取得」ボタンで、SwitchBot温湿度計の現在温度を自動入力できる。

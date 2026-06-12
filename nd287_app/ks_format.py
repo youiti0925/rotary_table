@@ -4,9 +4,10 @@
 実物（261166ITY.KS）から解読した構造:
     1行目  : 型式
     2行目  : 測定日,測定者
-    3行目  : 開始角度H, 開始角度W, 評価範囲1の開始角度[, 評価範囲2の開始角度]
-    4行目  : 終了角度H, 終了角度W, 評価範囲1の終了角度[, 評価範囲2の終了角度]
-              （0.0001°単位。範囲2の列は推測——範囲2入りの実物で要確認）
+    3行目  : 開始角度H, 開始角度W, 評価範囲1の開始角度（0.0001°単位）
+    4行目  : 終了角度H, 終了角度W, 評価範囲1の終了角度
+              ※範囲2の窓はファイルに保存されない（実物で確認。結果の6値と
+                MAX/MINの3つ目だけが8〜11行目に残る）
     5行目  : 間隔H, 間隔W
     6行目  : 正（CW）の 精度H, 精度W, 精度（=H+W）
     7行目  : 逆（CCW）の 精度H, 精度W, 精度
@@ -106,17 +107,13 @@ def format_ks(doc: dict, newline: str = "\r\n") -> str:
     def acc(values):
         return ",".join("" if v is None else f"{float(v):.1f}" for v in values)
 
-    # 範囲2が無いファイルは3列のまま（実物とのバイト一致のため）
-    starts = [doc["start_h"], doc["start_w"], doc["range1_start"]]
-    ends = [doc["end_h"], doc["end_w"], doc["range1_end"]]
-    if doc.get("range2_start") is not None or doc.get("range2_end") is not None:
-        starts.append(doc.get("range2_start"))
-        ends.append(doc.get("range2_end"))
+    # 3〜4行目は常に3列（実物確認: 範囲2を使っていても窓はファイルに保存されない。
+    # 保存されるのは範囲2の結果6値とMAX/MINの3つ目だけ）
     out = [
         doc["model"],
         f'{doc["date"]},{doc["operator"]}',
-        join(starts),
-        join(ends),
+        join([doc["start_h"], doc["start_w"], doc["range1_start"]]),
+        join([doc["end_h"], doc["end_w"], doc["range1_end"]]),
         join([doc["interval_h"], doc["interval_w"]]),
         acc(doc["acc_cw"]),
         acc(doc["acc_ccw"]),

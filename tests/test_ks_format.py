@@ -110,8 +110,12 @@ class TestKsSave(unittest.TestCase):
         self.assertEqual(doc["points_w"], 10)
         self.assertEqual(doc["range1_start"], 0)
         self.assertEqual(doc["range1_end"], 900000)
-        self.assertEqual(doc["range2_start"], -300000)
-        self.assertEqual(doc["range2_end"], 900000)
+
+    def test_header_lines_match_old_app(self):
+        # 3〜4行目は範囲2を使っていても3列のまま（実物確認）
+        lines = format_ks(self.rebuilt, newline="\n").splitlines()
+        self.assertEqual(lines[2], "-1800000,0,0")
+        self.assertEqual(lines[3], "1800000,50000,900000")
 
     def test_accuracy_lines_match_old_app(self):
         # 精度行は旧アプリのヘッダ値（全18値）と一致する
@@ -128,9 +132,10 @@ class TestKsSave(unittest.TestCase):
         self.assertEqual(regenerated, original)
 
     def test_reparse(self):
-        # 書いたものを読み戻せる
+        # 書いたものを読み戻せる（範囲2の窓は旧アプリ同様ファイルに残らない）
         doc2 = parse_ks(format_ks(self.rebuilt, newline="\n"))
-        self.assertEqual(doc2["range2_start"], -300000)
+        self.assertIsNone(doc2["range2_start"])
+        self.assertEqual(doc2["range_cw"], [7.0, 2.0, 9.0, 7.5, 2.0, 9.5])
         self.assertEqual(len(doc2["rows"]["wheel"]), 73)
         self.assertEqual(doc2["order"], [1, 3, 4, 2])
 

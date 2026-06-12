@@ -33,7 +33,12 @@
 （旧アプリは補正後の値のため、保存時はこちらの端点補正後の値を書く）。
 """
 
-from .analysis import detrended_pp, deviation_sec, pp
+from .analysis import (
+    composite_backlash_minmax,
+    detrended_pp,
+    deviation_sec,
+    pp,
+)
 from .bs_format import join_dms, split_dms
 
 SECTION_KEYS = ("HR", "WR", "WL", "HL")
@@ -208,28 +213,28 @@ def _detrend(values):
     return [v - (values[-1] - values[0]) * i / n for i, v in enumerate(values)]
 
 
-def backlash_minmax(data, range_=None, blcorr=0.0):
-    """ホイールの補正後バックラッシ（CCW偏差-CW偏差、各系列を端点補正）のMIN/MAX。
+def _round_tenth(value):
+    """旧アプリの表示丸め（0.1"刻み・四捨五入）。
 
-    .KSヘッダのMAX/MIN行用。旧アプリも補正後の値のため完全一致はしない場合がある。
+    浮動小数の境界（例 20.05が20.049999…になる）対策で先に0.01へ丸める。
     """
-    targets, cw_meas = data.get("wheel_cw", ([], []))
-    ccw_by_target = {round(t, 6): m
-                     for t, m in zip(*data.get("wheel_ccw", ([], [])))}
-    pairs = []
-    for t, m_cw in sorted(zip(targets, cw_meas)):
-        m_ccw = ccw_by_target.get(round(t, 6))
-        if m_ccw is None:
-            continue
-        if range_ is not None and not (range_[0] <= t <= range_[1]):
-            continue
-        pairs.append((t, m_cw, m_ccw))
-    if len(pairs) < 2:
+    import math
+
+    cents = round(float(value) * 100.0) / 100.0
+    sign = 1.0 if cents >= 0 else -1.0
+    return math.floor(abs(cents) * 10.0 + 0.5) / 10.0 * sign
+
+
+def backlash_minmax(data, range_=None, blcorr=0.0):
+    """総合バックラッシ（0°合わせ）のMIN/MAX。.KSヘッダのMAX/MIN行用。
+
+    261166ITY.KSの旧アプリ表示（全24.2/9.4・範囲1 20.1/9.4・範囲2 20.2/9.4）
+    と一致することを確認済み。
+    """
+    mm = composite_backlash_minmax(data, range_=range_)
+    if mm is None:
         return None
-    cw_dev = list(deviation_sec([p[0] for p in pairs], [p[1] for p in pairs]))
-    ccw_dev = list(deviation_sec([p[0] for p in pairs], [p[2] for p in pairs]))
-    bl = [c2 - c1 + blcorr for c1, c2 in zip(_detrend(cw_dev), _detrend(ccw_dev))]
-    return (min(bl), max(bl))
+    return (mm[0] + blcorr, mm[1] + blcorr)
 
 
 def data_to_doc(data, *, model, date, operator, range1=None, range2=None,
@@ -294,15 +299,13 @@ def data_to_doc(data, *, model, date, operator, range1=None, range2=None,
     doc["range_cw"] = range_cw
     doc["range_ccw"] = range_ccw
 
-    # MAX/MIN行 = バックラッシ（補正後）の最大/最小（全範囲・範囲1・範囲2）
+    # MAX/MIN行 = 総合バックラッシ（0°合わせ）の最大/最小（全範囲・範囲1・範囲2）
     max3, min3 = [], []
-    full_mm = backlash_minmax(data, blcorr=b_corr)
     for slot_range, used in ((None, True), (range1, range1 is not None),
                              (range2, range2 is not None)):
-        mm = (full_mm if slot_range is None
-              else backlash_minmax(data, range_=slot_range, blcorr=b_corr)) if used else None
-        max3.append(round(mm[1], 1) if mm else None)
-        min3.append(round(mm[0], 1) if mm else None)
+        mm = backlash_minmax(data, range_=slot_range, blcorr=b_corr) if used else None
+        max3.append(_round_tenth(mm[1]) if mm else None)
+        min3.append(_round_tenth(mm[0]) if mm else None)
     doc["max3"] = max3
     doc["min3"] = min3
     return doc

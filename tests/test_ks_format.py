@@ -89,6 +89,34 @@ class TestTiltAccuracyParity(unittest.TestCase):
         self.assertEqual(len(self.data["worm_cw"][0]), 11)
 
 
+class TestCompositeBacklash(unittest.TestCase):
+    """総合バックラッシ（0°合わせ）: 旧アプリのMAX/MIN表示と一致すること
+
+    ホイールBLを点間補間し、ウォームBL周期成分を乗せ、ウォーム0°位置の
+    状態をホイール0°位置の状態に合わせる（差ぶんシフト）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from nd287_app.analysis import composite_backlash_minmax
+        from nd287_app.ks_format import _round_tenth
+        cls.calc = staticmethod(composite_backlash_minmax)
+        cls.disp = staticmethod(_round_tenth)
+        cls.data = doc_to_data(parse_ks(FIXTURE.read_text(encoding="utf-8")))
+
+    def test_full_range(self):
+        mm = self.calc(self.data)
+        self.assertEqual((self.disp(mm[1]), self.disp(mm[0])), (24.2, 9.4))
+
+    def test_range1(self):
+        mm = self.calc(self.data, range_=(0.0, 90.0))
+        self.assertEqual((self.disp(mm[1]), self.disp(mm[0])), (20.1, 9.4))
+
+    def test_range2(self):
+        mm = self.calc(self.data, range_=(-30.0, 90.0))
+        self.assertEqual((self.disp(mm[1]), self.disp(mm[0])), (20.2, 9.4))
+
+
 class TestKsSave(unittest.TestCase):
     """アプリの測定データ → .KS 書き出し"""
 
@@ -124,6 +152,11 @@ class TestKsSave(unittest.TestCase):
         self.assertEqual(doc["acc_ccw"], [15.5, 4.5, 20.0])
         self.assertEqual(doc["range_cw"], [7.0, 2.0, 9.0, 7.5, 2.0, 9.5])
         self.assertEqual(doc["range_ccw"], [6.0, 4.5, 10.5, 7.0, 4.5, 11.5])
+
+    def test_minmax_lines_match_old_app(self):
+        # MAX/MIN行（総合バックラッシ）も旧アプリのヘッダ値と一致する
+        self.assertEqual(self.rebuilt["max3"], [24.2, 20.1, 20.2])
+        self.assertEqual(self.rebuilt["min3"], [9.4, 9.4, 9.4])
 
     def test_data_rows_roundtrip(self):
         # データ行は実物とバイト一致で再生成される

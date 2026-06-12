@@ -219,3 +219,76 @@ def repeatability_summary(points, data):
     return dict(
         blocks=blocks, cw=cw, ccw=ccw, overall=max(candidates) if candidates else None
     )
+
+
+def _paired_backlash(data, block):
+    """同一指令角度でペアにした (角度, バックラッシ[秒]) を角度昇順で返す"""
+    cw_targets, cw_meas = data.get(f"{block}_cw", ([], []))
+    ccw_by_target = {round(t, 6): m
+                     for t, m in zip(*data.get(f"{block}_ccw", ([], [])))}
+    pairs = []
+    for t, m_cw in sorted(zip(cw_targets, cw_meas)):
+        m_ccw = ccw_by_target.get(round(t, 6))
+        if m_ccw is None:
+            continue
+        bl = float(deviation_sec([t], [m_ccw])[0] - deviation_sec([t], [m_cw])[0])
+        pairs.append((float(t), bl))
+    return pairs
+
+
+def composite_backlash_minmax(data, range_=None):
+    """機械総合のバックラッシ（0°合わせ）のMIN/MAX[秒]。
+
+    ホイールの各点バックラッシ（CCW-CW）を点間で直線補間し、その上に
+    ウォームのバックラッシ周期成分（自身の始終差の直線を除去）を乗せる。
+    ウォーム0°位置の状態とホイール0°位置の状態の差を全体にシフトして合わせる。
+    261166ITY.KSの旧アプリ表示（全範囲24.2/9.4・範囲1 20.1/9.4・
+    範囲2 20.2/9.4）と一致することを確認済み。
+
+    range_: ホイール角度の評価範囲 (開始, 終了)。Noneなら全範囲。
+    返り値: (min, max) または計算不能のとき None。
+    """
+    wheel = _paired_backlash(data, "wheel")
+    worm = _paired_backlash(data, "worm")
+    if len(wheel) < 2 or len(worm) < 2:
+        return None
+    h_t = np.array([p[0] for p in wheel])
+    bl_h = np.array([p[1] for p in wheel])
+    w_t = np.array([p[0] for p in worm])
+    bl_w = np.array([p[1] for p in worm])
+    span = float(w_t[-1] - w_t[0])
+    if span <= 0:
+        return None
+    # ウォームの周期成分（始終差の直線をベースラインとして除去）
+    w_rel = bl_w - (bl_w[0] + (bl_w[-1] - bl_w[0]) * (w_t - w_t[0]) / span)
+    phis = (w_t - w_t[0])[:-1]  # 周期の終端は次の繰り返しの始点と同じ
+    w_rel = w_rel[:-1]
+    # 0°合わせ: ウォーム0°位置の状態とホイール0°位置の状態の差をシフト
+    zero_index = int(np.argmin(np.abs(h_t)))
+    shift = float(bl_w[0] - bl_h[zero_index])
+
+    def in_range(t):
+        return range_ is None or (range_[0] - 1e-9 <= t <= range_[1] + 1e-9)
+
+    values = []
+    for i in range(len(h_t) - 1):
+        seg = float(h_t[i + 1] - h_t[i])
+        if seg <= 0:
+            continue
+        offset = 0.0
+        while offset < seg - 1e-9:
+            for phi, rel in zip(phis, w_rel):
+                tp = offset + phi
+                if tp >= seg - 1e-9:
+                    break
+                t = h_t[i] + tp
+                if in_range(t):
+                    frac = tp / seg
+                    values.append(bl_h[i] * (1 - frac) + bl_h[i + 1] * frac
+                                  + rel + shift)
+            offset += span
+    if in_range(h_t[-1]):
+        values.append(float(bl_h[-1]) + float(w_rel[0]) + shift)
+    if not values:
+        return None
+    return (float(min(values)), float(max(values)))

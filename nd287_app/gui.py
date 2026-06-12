@@ -25,7 +25,13 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from .analysis import band_for_temp, deviation_sec, repeatability_summary, summarize
+from .analysis import (
+    band_for_temp,
+    composite_backlash_minmax,
+    deviation_sec,
+    repeatability_summary,
+    summarize,
+)
 from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
 from .ks_format import (
     data_to_doc as ks_data_to_doc,
@@ -1019,10 +1025,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 右表: バックラッシMIN/MAX・温度規格による合否・傾き判定・真の最大最小
         rows = misc_rows(summary, self.current_judgements(summary))
+        rows.extend(self.composite_backlash_rows())
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
         self.fill_misc_table(rows)
+
+    def composite_backlash_rows(self):
+        """総合バックラッシ（ウォームを0°位置でホイールに合わせた機械全体の値）"""
+        comp = composite_backlash_minmax(self.data)
+        if comp is None:
+            return []
+        comp_min = comp[0] + self.applied_blcorr
+        comp_max = comp[1] + self.applied_blcorr
+        rows = [
+            ("総合バックラッシ MIN（0°合わせ）", f'{comp_min:.2f}"'),
+            ("総合バックラッシ MAX（0°合わせ）", f'{comp_max:.2f}"'),
+        ]
+        if not self.is_tilt():
+            temp = self.parse_temp()
+            mm = formula_minmax(self.master_judge, temp)
+            if mm:
+                ok = mm[0] <= comp_min and comp_max <= mm[1]
+                rows.append((
+                    "総合バックラッシ 判定",
+                    f'{"OK" if ok else "NG"}'
+                    f'（規格 {mm[0]:.1f}〜{mm[1]:.1f}" @ {temp:g}°C）',
+                ))
+        return rows
 
     def tilt_accuracy_rows(self):
         """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""

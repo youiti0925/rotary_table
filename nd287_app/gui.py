@@ -329,6 +329,12 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_pre.setDecimals(3)
         self.e_pre.setValue(float(settings.get("fanuc_preswing", 10.0)))
         self.e_pre.setSuffix(" °")
+        self.e_reset_sw = QtWidgets.QDoubleSpinBox()
+        self.e_reset_sw.setRange(0.0, 360.0)
+        self.e_reset_sw.setDecimals(3)
+        self.e_reset_sw.setValue(float(settings.get(
+            "fanuc_reset_swing", settings.get("fanuc_preswing", 10.0))))
+        self.e_reset_sw.setSuffix(" °")
         self.e_dwell = QtWidgets.QDoubleSpinBox()
         self.e_dwell.setRange(0.0, 60.0)
         self.e_dwell.setDecimals(2)
@@ -355,7 +361,8 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 9001)))
 
         form.addRow("割出軸", self.e_axis)
-        form.addRow("前振り量（バックラッシュ消し）", self.e_pre)
+        form.addRow("前振り量（測定点のバックラッシュ消し）", self.e_pre)
+        form.addRow("リセット振り量（カウンター0設定用）", self.e_reset_sw)
         form.addRow("ドゥエル（位置決め後の待ち）", self.e_dwell)
         form.addRow("完了信号Mコード", self.e_mcode)
         form.addRow("メインO番号", self.e_main)
@@ -387,7 +394,7 @@ class ProgramDialog(QtWidgets.QDialog):
 
         for w in (self.e_axis, self.e_mcode):
             w.textChanged.connect(self.refresh)
-        for w in (self.e_pre, self.e_dwell):
+        for w in (self.e_pre, self.e_reset_sw, self.e_dwell):
             w.valueChanged.connect(self.refresh)
         for w in (self.e_main, self.e_sub):
             w.valueChanged.connect(self.refresh)
@@ -406,6 +413,7 @@ class ProgramDialog(QtWidgets.QDialog):
             rep_sub_number=self.e_sub.value(),
             return_to_start=self.c_return.isChecked(),
             counter_reset=self.c_reset.isChecked(),
+            reset_swing=self.e_reset_sw.value(),
         )
 
     def _generate(self):

@@ -137,7 +137,7 @@ class TestGenerate(unittest.TestCase):
 class TestCounterReset(unittest.TestCase):
     def test_reset_block_at_program_top(self):
         # 分割プログラムの先頭にカウンターリセット（+p,-p,-p,+p,M00）が入る
-        cfg = FanucConfig(counter_reset=True, preswing=10.0)
+        cfg = FanucConfig(counter_reset=True, preswing=10.0, reset_swing=10.0)
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
         lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
@@ -146,6 +146,19 @@ class TestCounterReset(unittest.TestCase):
                          ["G91 G00 X10.", "X-10.", "X-10.", "X10.", "M00"])
         # M00 は測定点（M80）に数えない＝信号数は不変
         self.assertEqual(expand_runtime_signals(text, cfg), 2 * 5 + 2 * 3)
+
+    def test_reset_swing_independent_from_preswing(self):
+        # リセット振り量(15°)と測定の前振り量(10°)を別々に設定できる
+        cfg = FanucConfig(counter_reset=True, preswing=10.0, reset_swing=15.0)
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
+        i = lines.index("G91 G00 X15.")  # リセットは15°
+        self.assertEqual(lines[i:i + 5],
+                         ["G91 G00 X15.", "X-15.", "X-15.", "X15.", "M00"])
+        # 測定の前振りは10°のまま（ホイールCW先頭）
+        self.assertIn("G00 X-10.", lines)
+        self.assertNotIn("G00 X-15.", lines[i + 5:])  # 以降に15°前振りは出ない
 
     def test_reset_disabled(self):
         cfg = FanucConfig(counter_reset=False)

@@ -35,6 +35,7 @@ class FanucConfig:
     rep_sub_number: int = 9001
     return_to_start: bool = True
     counter_reset: bool = True   # 先頭でバックラッシュ消し→M00（作業者がカウンターを0に）
+    reset_swing: float = 10.0    # カウンターリセットの振り量[°]（測定の前振りとは別）
 
     @classmethod
     def from_settings(cls, settings: dict) -> "FanucConfig":
@@ -49,6 +50,7 @@ class FanucConfig:
             rep_sub_number=int(s.get("fanuc_rep_sub_number", 9001)),
             return_to_start=bool(s.get("fanuc_return_to_start", True)),
             counter_reset=bool(s.get("fanuc_counter_reset", True)),
+            reset_swing=float(s.get("fanuc_reset_swing", s.get("fanuc_preswing", 10.0))),
         )
 
 
@@ -113,9 +115,9 @@ def _reset_block(cfg: FanucConfig) -> list:
     """カウンターリセット用: 0°でバックラッシュを消し M00 で停止（作業者が0設定）。
 
     現場の実物どおり: G91 G00 X+p / X-p / X-p / X+p / M00（正味移動0、0°のまま）。
-    完了信号(M80)は出さない＝測定点には数えない。
+    振り量はリセット専用（reset_swing）。完了信号(M80)は出さない＝測定点には数えない。
     """
-    p = cfg.preswing
+    p = cfg.reset_swing
     a = cfg.axis
     return [
         f"G91 G00 {a}{fmt_num(p)}",

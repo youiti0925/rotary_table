@@ -54,7 +54,8 @@ DEFAULTS = dict(
     admin_password="0925",
     # FANUC測定プログラム生成
     fanuc_axis="X",
-    fanuc_preswing=10.0,        # 前振り量[°]（バックラッシュ消し）
+    fanuc_preswing=10.0,        # 測定点の前振り量[°]（バックラッシュ消し）
+    fanuc_reset_swing=10.0,     # カウンターリセットの振り量[°]（前振りとは別に設定可）
     fanuc_dwell_sec=1.0,        # 位置決め後のドゥエル[秒]（G04 X…）
     fanuc_mcode="M80",          # 完了信号Mコード（カウンターへ送る）
     fanuc_use_subprogram=True,  # True: 再現をサブプロ / False: 1本に展開

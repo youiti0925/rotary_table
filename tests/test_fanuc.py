@@ -134,6 +134,65 @@ class TestGenerate(unittest.TestCase):
         self.assertNotIn("G04 X1 ", text)
 
 
+class TestCounterReset(unittest.TestCase):
+    def test_reset_block_at_program_top(self):
+        # 分割プログラムの先頭にカウンターリセット（+p,-p,-p,+p,M00）が入る
+        cfg = FanucConfig(counter_reset=True, preswing=10.0)
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
+        i = lines.index("G91 G00 X10.")
+        self.assertEqual(lines[i:i + 5],
+                         ["G91 G00 X10.", "X-10.", "X-10.", "X10.", "M00"])
+        # M00 は測定点（M80）に数えない＝信号数は不変
+        self.assertEqual(expand_runtime_signals(text, cfg), 2 * 5 + 2 * 3)
+
+    def test_reset_disabled(self):
+        cfg = FanucConfig(counter_reset=False)
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        self.assertNotIn("M00", text)
+
+    def test_repeat_only_has_no_reset(self):
+        # 再現のみ（分割なし）はリセットを入れない
+        cfg = FanucConfig(counter_reset=True)
+        text = generate(cfg, rotary=True, blocks=[0, 90, 180, 270], repeats=3,
+                        include_division=False, include_repeat=True)
+        self.assertNotIn("M00", text)
+
+
+class TestTiltPositioning(unittest.TestCase):
+    """傾斜合体: リセット@0 → 測定開始角へ移動 → … → 0へ戻る、の流れ"""
+
+    def test_tilt_goto_sequence(self):
+        cfg = FanucConfig(counter_reset=True, use_subprogram=True)
+        blocks = tilt_blocks(-30, 120, 3)  # [-30, 45, 120]
+        text = generate(cfg, rotary=False, wheel_pitch=30,
+                        wheel_start=-30, wheel_end=120,
+                        worm_pitch=1.0, worm_range=2.0, worm_start=0.0,
+                        blocks=blocks, repeats=2)
+        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
+        # リセット(0) → X-30(測定開始へ) → … → 途中で X30(0へ=ウォーム) → X-30(再現へ)
+        i = lines.index("G91 G00 X10.")
+        self.assertEqual(lines[i:i + 5],
+                         ["G91 G00 X10.", "X-10.", "X-10.", "X10.", "M00"])
+        # ウォーム前に 0° へ戻す G00 X30. がある（CCWが-30で終わるため）
+        self.assertIn("G00 X30.", lines)
+        # 再現開始で -30° へ G00 X-30.
+        self.assertIn("G00 X-30.", lines)
+        # 最後に 0° へ戻す（120から -120）
+        self.assertIn("G00 X-120.", lines)
+        # 信号数 = ホイール6×2 + ウォーム3×2 + 再現3ブロック×2回×2 = 30
+        self.assertEqual(expand_runtime_signals(text, cfg), 6 * 2 + 3 * 2 + 3 * 2 * 2)
+
+
+class TestRepeatBlockStartEnd(unittest.TestCase):
+    def test_start_end_count(self):
+        # 開始0・終了270・4箇所 → 0,90,180,270（両端含む等間隔）
+        self.assertEqual(tilt_blocks(0, 270, 4), [0.0, 90.0, 180.0, 270.0])
+        self.assertEqual(tilt_blocks(-30, 120, 3), [-30.0, 45.0, 120.0])
+
+
 class TestConsistencyWithSequence(unittest.TestCase):
     """生成プログラムの信号数 == アプリの合体シーケンスのステップ数（最重要）"""
 

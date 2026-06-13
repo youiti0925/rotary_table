@@ -104,6 +104,8 @@ META_KEYS = {
     "wheel_start": "開始角度[°]",
     "wheel_end": "終了角度[°]",
     "repeats": "回数",
+    "rep_start": "再現開始[°]",
+    "rep_end": "再現終了[°]",
     "date": "日付",
     "operator": "名前",
     "temperature": "測定温度[°C]",
@@ -336,7 +338,10 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_mcode.setMaximumWidth(80)
         self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする（外すと1本に展開）")
         self.c_sub.setChecked(bool(settings.get("fanuc_use_subprogram", True)))
-        self.c_return = QtWidgets.QCheckBox("測定後に開始位置へ戻す")
+        self.c_reset = QtWidgets.QCheckBox(
+            "先頭にカウンターリセット（バックラッシュ消し→M00）を入れる")
+        self.c_reset.setChecked(bool(settings.get("fanuc_counter_reset", True)))
+        self.c_return = QtWidgets.QCheckBox("測定後に0°（基準）へ戻す")
         self.c_return.setChecked(bool(settings.get("fanuc_return_to_start", True)))
         self.c_div = QtWidgets.QCheckBox("分割を含める")
         self.c_div.setChecked(params.get("include_division", True))
@@ -355,6 +360,7 @@ class ProgramDialog(QtWidgets.QDialog):
         form.addRow("完了信号Mコード", self.e_mcode)
         form.addRow("メインO番号", self.e_main)
         form.addRow("再現サブプロO番号", self.e_sub)
+        form.addRow(self.c_reset)
         form.addRow(self.c_sub)
         form.addRow(self.c_return)
         form.addRow(self.c_div)
@@ -385,7 +391,7 @@ class ProgramDialog(QtWidgets.QDialog):
             w.valueChanged.connect(self.refresh)
         for w in (self.e_main, self.e_sub):
             w.valueChanged.connect(self.refresh)
-        for w in (self.c_sub, self.c_return, self.c_div, self.c_rep):
+        for w in (self.c_sub, self.c_reset, self.c_return, self.c_div, self.c_rep):
             w.toggled.connect(self.refresh)
         self.refresh()
 
@@ -399,6 +405,7 @@ class ProgramDialog(QtWidgets.QDialog):
             main_number=self.e_main.value(),
             rep_sub_number=self.e_sub.value(),
             return_to_start=self.c_return.isChecked(),
+            counter_reset=self.c_reset.isChecked(),
         )
 
     def _generate(self):
@@ -496,6 +503,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_wheel.setValue(wheel_pitch)
         self.e_wheel.setSuffix(" °/pt")
         self.l_wheel = add_field("ホイール刻み", self.e_wheel)
+
+        self.e_rstart = QtWidgets.QDoubleSpinBox()
+        self.e_rstart.setRange(-360.0, 720.0)
+        self.e_rstart.setValue(0.0)
+        self.e_rstart.setSuffix(" °")
+        self.l_rstart = add_field("再現開始", self.e_rstart)
+        self.e_rend = QtWidgets.QDoubleSpinBox()
+        self.e_rend.setRange(-360.0, 720.0)
+        self.e_rend.setValue(270.0)
+        self.e_rend.setSuffix(" °")
+        self.l_rend = add_field("再現終了", self.e_rend)
 
         self.e_blocks = QtWidgets.QSpinBox()
         self.e_blocks.setRange(2, 360)
@@ -863,7 +881,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.l_wheel, self.e_wheel,
         ):
             w.setVisible(show_division)
-        for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats):
+        for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats,
+                  self.l_rstart, self.e_rstart, self.l_rend, self.e_rend):
             w.setVisible(show_repeat_params)
         for w in (self.l_blcorr, self.e_blcorr, self.b_corr,
                   self.l_evald, self.e_evald):
@@ -1260,11 +1279,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return missing
 
     def repeat_blocks(self):
-        """現在の設定での再現ブロック角度リスト"""
-        n = self.e_blocks.value()
-        if self.is_tilt():
-            return tilt_blocks(self.e_wstart.value(), self.e_wend.value(), n)
-        return rotary_blocks(n)  # 一周をn等分（例 4 → 0,90,180,270）
+        """現在の設定での再現ブロック角度リスト。
+
+        再現開始・再現終了・ブロック数で「両端を含む等間隔」を作る。
+        例: 開始0・終了270・4箇所 → 0,90,180,270
+        """
+        return tilt_blocks(self.e_rstart.value(), self.e_rend.value(),
+                           self.e_blocks.value())
 
     def build_division_sequence(self):
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
@@ -1685,6 +1706,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.is_repeat() or self.is_combined():
             meta[META_KEYS["blocks"]] = self.e_blocks.value()
             meta[META_KEYS["repeats"]] = self.e_repeats.value()
+            meta[META_KEYS["rep_start"]] = self.e_rstart.value()
+            meta[META_KEYS["rep_end"]] = self.e_rend.value()
         if not self.is_repeat():
             meta[META_KEYS["wheel_pitch"]] = self.e_wheel.value()
             meta[META_KEYS["worm_pitch"]] = self.e_worm.value()
@@ -1878,6 +1901,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.e_wstart, META_KEYS["wheel_start"]),
             (self.e_wend, META_KEYS["wheel_end"]),
             (self.e_repeats, META_KEYS["repeats"]),
+            (self.e_rstart, META_KEYS["rep_start"]),
+            (self.e_rend, META_KEYS["rep_end"]),
         ]:
             if key in meta:
                 try:

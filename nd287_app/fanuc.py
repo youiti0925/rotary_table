@@ -34,6 +34,7 @@ class FanucConfig:
     main_number: int = 100
     rep_sub_number: int = 9001
     return_to_start: bool = True
+    counter_reset: bool = True   # 先頭でバックラッシュ消し→M00（作業者がカウンターを0に）
 
     @classmethod
     def from_settings(cls, settings: dict) -> "FanucConfig":
@@ -47,6 +48,7 @@ class FanucConfig:
             main_number=int(s.get("fanuc_main_number", 100)),
             rep_sub_number=int(s.get("fanuc_rep_sub_number", 9001)),
             return_to_start=bool(s.get("fanuc_return_to_start", True)),
+            counter_reset=bool(s.get("fanuc_counter_reset", True)),
         )
 
 
@@ -107,6 +109,23 @@ def _goto(cfg: FanucConfig, delta: float) -> list:
     return [f"G00 {cfg.axis}{fmt_num(delta)}", _dwell(cfg)]
 
 
+def _reset_block(cfg: FanucConfig) -> list:
+    """カウンターリセット用: 0°でバックラッシュを消し M00 で停止（作業者が0設定）。
+
+    現場の実物どおり: G91 G00 X+p / X-p / X-p / X+p / M00（正味移動0、0°のまま）。
+    完了信号(M80)は出さない＝測定点には数えない。
+    """
+    p = cfg.preswing
+    a = cfg.axis
+    return [
+        f"G91 G00 {a}{fmt_num(p)}",
+        f"{a}{fmt_num(-p)}",
+        f"{a}{fmt_num(-p)}",
+        f"{a}{fmt_num(p)}",
+        "M00",
+    ]
+
+
 def _normalize_rotary(delta: float) -> float:
     """回転は ±180° に正規化（最短回りで開始位置へ戻す）。"""
     return ((delta + 180.0) % 360.0) - 180.0
@@ -133,11 +152,20 @@ def generate(cfg: FanucConfig, *, rotary=True, title="MEASURE",
     n_wheel = round((wheel_end - wheel_start) / wheel_pitch) + 1 if include_division else 0
     n_worm = round(worm_range / worm_pitch) + 1 if (include_division and worm_pitch) else 0
 
-    main = ["G91 (INCREMENTAL)"]
-    cur = wheel_start
+    # プログラムは 0°（カウンターの基準＝リセット位置）から始まる前提
+    main = []
+    cur = 0.0
+    if include_division and cfg.counter_reset:
+        main.append("(--- COUNTER RESET (set 0 at backlash-removed) ---)")
+        main += _reset_block(cfg)   # G91 を含む。0°のまま、M00で停止
+    else:
+        main.append("G91 (INCREMENTAL)")
 
     if include_division:
         main.append("(--- BUNKATSU ---)")
+        # 0°（リセット位置）から測定開始角度へ（回転は0なので移動なし、傾斜は例 X-30）
+        main += _goto(cfg, wheel_start - cur)
+        cur = wheel_start
         main.append("(WHEEL CW)")
         main += _division_pass(cfg, n_wheel, wheel_pitch, +1)
         cur = wheel_end
@@ -145,6 +173,7 @@ def generate(cfg: FanucConfig, *, rotary=True, title="MEASURE",
         main += _division_pass(cfg, n_wheel, wheel_pitch, -1)
         cur = wheel_start
         if n_worm:
+            # ウォームは0°（基準）で測定
             main += _goto(cfg, worm_start - cur)
             cur = worm_start
             main.append("(WORM CW)")
@@ -172,11 +201,12 @@ def generate(cfg: FanucConfig, *, rotary=True, title="MEASURE",
                     main += repeat_body(cfg)
 
     if cfg.return_to_start:
-        delta = wheel_start - cur
+        # 0°（カウンター基準）へ戻す
+        delta = 0.0 - cur
         if rotary:
             delta = _normalize_rotary(delta)
         main += _goto(cfg, delta)
-        cur = wheel_start
+        cur = 0.0
     main.append("M30")
 
     return _format_program(cfg, title, main, rep_sub_lines)

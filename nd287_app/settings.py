@@ -61,6 +61,7 @@ DEFAULTS = dict(
     fanuc_main_number=100,
     fanuc_rep_sub_number=9001,
     fanuc_return_to_start=True,
+    fanuc_counter_reset=True,   # 先頭にカウンターリセット（M00）を入れる
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

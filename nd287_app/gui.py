@@ -44,6 +44,7 @@ from .ks_format import (
     tilt_accuracy,
 )
 from .masters import condition_params, find_entry, formula_minmax, load_masters
+from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc
 from .export import (
     MODE_KEY,
@@ -64,6 +65,7 @@ from .switchbot import (
     press_bot,
 )
 from .sequence import (
+    CombinedSequence,
     IndexingSequence,
     RepeatabilitySequence,
     SERIES_LABELS,
@@ -77,7 +79,8 @@ from .settings import (
     save_settings,
 )
 
-MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性")
+MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
+         "回転分割+再現", "傾斜分割+再現")
 
 CURVE_STYLES = {
     "wheel_cw": dict(pen=pg.mkPen("#1f77b4", width=2), symbol="o", symbolSize=5),
@@ -305,6 +308,131 @@ class RawDataDialog(QtWidgets.QDialog):
         self.populate()
 
 
+class ProgramDialog(QtWidgets.QDialog):
+    """FANUC測定プログラム生成ダイアログ（設定→プレビュー→保存）"""
+
+    def __init__(self, parent, settings, params):
+        super().__init__(parent)
+        self.settings = settings
+        self.params = params  # 測定条件（rotary, wheel_pitch, blocks 等）
+        self.setWindowTitle("FANUC測定プログラム作成")
+        self.resize(720, 720)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+        self.e_axis = QtWidgets.QLineEdit(str(settings.get("fanuc_axis", "X")))
+        self.e_axis.setMaximumWidth(60)
+        self.e_pre = QtWidgets.QDoubleSpinBox()
+        self.e_pre.setRange(0.0, 360.0)
+        self.e_pre.setDecimals(3)
+        self.e_pre.setValue(float(settings.get("fanuc_preswing", 10.0)))
+        self.e_pre.setSuffix(" °")
+        self.e_dwell = QtWidgets.QDoubleSpinBox()
+        self.e_dwell.setRange(0.0, 60.0)
+        self.e_dwell.setDecimals(2)
+        self.e_dwell.setValue(float(settings.get("fanuc_dwell_sec", 1.0)))
+        self.e_dwell.setSuffix(" 秒")
+        self.e_mcode = QtWidgets.QLineEdit(str(settings.get("fanuc_mcode", "M80")))
+        self.e_mcode.setMaximumWidth(80)
+        self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする（外すと1本に展開）")
+        self.c_sub.setChecked(bool(settings.get("fanuc_use_subprogram", True)))
+        self.c_return = QtWidgets.QCheckBox("測定後に開始位置へ戻す")
+        self.c_return.setChecked(bool(settings.get("fanuc_return_to_start", True)))
+        self.c_div = QtWidgets.QCheckBox("分割を含める")
+        self.c_div.setChecked(params.get("include_division", True))
+        self.c_rep = QtWidgets.QCheckBox("再現を含める")
+        self.c_rep.setChecked(params.get("include_repeat", True))
+        self.e_main = QtWidgets.QSpinBox()
+        self.e_main.setRange(1, 9999)
+        self.e_main.setValue(int(settings.get("fanuc_main_number", 100)))
+        self.e_sub = QtWidgets.QSpinBox()
+        self.e_sub.setRange(1, 9999)
+        self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 9001)))
+
+        form.addRow("割出軸", self.e_axis)
+        form.addRow("前振り量（バックラッシュ消し）", self.e_pre)
+        form.addRow("ドゥエル（位置決め後の待ち）", self.e_dwell)
+        form.addRow("完了信号Mコード", self.e_mcode)
+        form.addRow("メインO番号", self.e_main)
+        form.addRow("再現サブプロO番号", self.e_sub)
+        form.addRow(self.c_sub)
+        form.addRow(self.c_return)
+        form.addRow(self.c_div)
+        form.addRow(self.c_rep)
+        layout.addLayout(form)
+
+        self.preview = QtWidgets.QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setStyleSheet("font-family: monospace; font-size: 12px;")
+        layout.addWidget(self.preview, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        b_refresh = QtWidgets.QPushButton("プレビュー更新")
+        b_save = QtWidgets.QPushButton("保存(.NC)")
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_refresh.clicked.connect(self.refresh)
+        b_save.clicked.connect(self.save)
+        b_close.clicked.connect(self.accept)
+        buttons.addWidget(b_refresh)
+        buttons.addStretch(1)
+        buttons.addWidget(b_save)
+        buttons.addWidget(b_close)
+        layout.addLayout(buttons)
+
+        for w in (self.e_axis, self.e_mcode):
+            w.textChanged.connect(self.refresh)
+        for w in (self.e_pre, self.e_dwell):
+            w.valueChanged.connect(self.refresh)
+        for w in (self.e_main, self.e_sub):
+            w.valueChanged.connect(self.refresh)
+        for w in (self.c_sub, self.c_return, self.c_div, self.c_rep):
+            w.toggled.connect(self.refresh)
+        self.refresh()
+
+    def _config(self):
+        return FanucConfig(
+            axis=self.e_axis.text().strip() or "X",
+            preswing=self.e_pre.value(),
+            dwell_sec=self.e_dwell.value(),
+            mcode=self.e_mcode.text().strip() or "M80",
+            use_subprogram=self.c_sub.isChecked(),
+            main_number=self.e_main.value(),
+            rep_sub_number=self.e_sub.value(),
+            return_to_start=self.c_return.isChecked(),
+        )
+
+    def _generate(self):
+        p = self.params
+        return generate_fanuc(
+            self._config(),
+            rotary=p["rotary"], title=p.get("title", "MEASURE"),
+            wheel_pitch=p["wheel_pitch"], wheel_start=p["wheel_start"],
+            wheel_end=p["wheel_end"], worm_pitch=p["worm_pitch"],
+            worm_range=p["worm_range"], worm_start=p["worm_start"],
+            blocks=p["blocks"], repeats=p["repeats"],
+            include_division=self.c_div.isChecked(),
+            include_repeat=self.c_rep.isChecked(),
+        )
+
+    def refresh(self):
+        try:
+            self.preview.setPlainText(self._generate())
+        except Exception as e:
+            self.preview.setPlainText(f"生成エラー: {e}")
+
+    def save(self):
+        text = self._generate()
+        default = f"{self.params.get('machine') or 'program'}.NC"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "測定プログラムを保存", default, "NCプログラム (*.NC *.txt)")
+        if not path:
+            return
+        # FANUCはASCII。CRLFで保存
+        with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
+            f.write(text)
+        QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -486,6 +614,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_print.setEnabled(False)
         self.b_raw = QtWidgets.QPushButton("生データ")
         self.b_raw.clicked.connect(self.show_raw_data)
+        self.b_program = QtWidgets.QPushButton("プログラム作成")
+        self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
+        self.b_program.clicked.connect(self.show_program_dialog)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         self.b_save.clicked.connect(self.save)
@@ -506,6 +637,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row2.addWidget(self.b_save)
         row2.addWidget(self.b_print)
         row2.addWidget(self.b_raw)
+        row2.addWidget(self.b_program)
         row2.addWidget(b_load)
         row2.addWidget(b_settings)
 
@@ -715,35 +847,45 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.current_mode().startswith("傾斜")
 
     def is_repeat(self):
-        return "再現性" in self.current_mode()
+        return self.current_mode() in ("回転再現性", "傾斜再現性")
+
+    def is_combined(self):
+        return "+再現" in self.current_mode()
 
     def on_mode_changed(self, mode):
-        is_tilt, is_repeat = self.is_tilt(), self.is_repeat()
+        is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
+        show_division = not is_repeat   # 分割系（単独 or 合体）で分割入力を出す
+        show_repeat_params = is_repeat or is_combined
         for w in (self.l_wstart, self.e_wstart, self.l_wend, self.e_wend):
             w.setVisible(is_tilt)
         for w in (
             self.l_worm, self.e_worm, self.l_range, self.e_range, self.l_start, self.e_start,
             self.l_wheel, self.e_wheel,
         ):
-            w.setVisible(not is_repeat)
+            w.setVisible(show_division)
         for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats):
-            w.setVisible(is_repeat)
+            w.setVisible(show_repeat_params)
         for w in (self.l_blcorr, self.e_blcorr, self.b_corr,
                   self.l_evald, self.e_evald):
-            w.setVisible(not is_repeat)
+            w.setVisible(show_division)
         for w in self.range_widgets:
-            w.setVisible(is_tilt and not is_repeat)
+            w.setVisible(is_tilt and show_division)
         self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
-        self.plot_worm.setVisible(not is_repeat)
-        self.plot_wheel.setTitle("再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
+        self.plot_worm.setVisible(show_division)
+        self.plot_wheel.setTitle(
+            "再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
         # モードを変えたら取込中の測定はキャンセル
-        self.view_kind = "repeat" if is_repeat else "indexing"
+        self.view_kind = "repeat" if is_repeat else ("combined" if is_combined else "indexing")
         self.discard_measurement()
 
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
         self.seq = None
         if self.view_kind == "repeat":
+            self.rep_points = None
+            self.rep_data = None
+        elif self.view_kind == "combined":
+            self.data = None
             self.rep_points = None
             self.rep_data = None
         else:
@@ -800,6 +942,10 @@ class MainWindow(QtWidgets.QMainWindow):
             results += self.slope_judgement_rows(summary)
             if self.is_tilt():
                 results += self.tilt_accuracy_rows()
+            if self.is_combined() and self.rep_data:
+                results.append(("― 再現性 ―", ""))
+                results += repeat_result_rows(
+                    repeatability_summary(self.rep_points, self.rep_data))
             return results
         except Exception:
             return []
@@ -1113,14 +1259,14 @@ class MainWindow(QtWidgets.QMainWindow):
             missing.append("測定温度")
         return missing
 
-    def build_sequence(self):
-        if self.is_repeat():
-            n = self.e_blocks.value()
-            if self.is_tilt():
-                points = tilt_blocks(self.e_wstart.value(), self.e_wend.value(), n)
-            else:
-                points = rotary_blocks(n)  # 一周をn等分（例 4 → 0,90,180,270）
-            return RepeatabilitySequence(points, self.e_repeats.value())
+    def repeat_blocks(self):
+        """現在の設定での再現ブロック角度リスト"""
+        n = self.e_blocks.value()
+        if self.is_tilt():
+            return tilt_blocks(self.e_wstart.value(), self.e_wend.value(), n)
+        return rotary_blocks(n)  # 一周をn等分（例 4 → 0,90,180,270）
+
+    def build_division_sequence(self):
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
         wheel_end = self.e_wend.value() if self.is_tilt() else 360.0
         # マスタの測定順（HR/WR/WL/HL）があれば従う
@@ -1137,6 +1283,17 @@ class MainWindow(QtWidgets.QMainWindow):
             wheel_end,
             order=order or None,
         )
+
+    def build_sequence(self):
+        if self.is_repeat():
+            return RepeatabilitySequence(self.repeat_blocks(), self.e_repeats.value())
+        if self.is_combined():
+            # 分割→再現（再現はCW/CCW1サイクルずつ交互＝FANUC合体プログラムと同順）
+            division = self.build_division_sequence()
+            repeat = RepeatabilitySequence(self.repeat_blocks(), self.e_repeats.value(),
+                                           interleave=True)
+            return CombinedSequence(division, repeat)
+        return self.build_division_sequence()
 
     def start(self):
         missing = self.missing_required_fields()
@@ -1156,6 +1313,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.is_repeat():
             self.rep_points = self.seq.points
             self.rep_data = self.seq.data
+        elif self.is_combined():
+            self.data = self.seq.data
+            self.rep_points = self.seq.rep_points
+            self.rep_data = self.seq.rep_data
         else:
             self.data = self.seq.data
         self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
@@ -1306,7 +1467,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh_results(self):
         """評価範囲の変更で結果表を再計算する（測定完了後のみ）"""
-        if self.view_kind == "indexing" and self.data and not self.b_take.isEnabled():
+        if (self.view_kind in ("indexing", "combined") and self.data
+                and not self.b_take.isEnabled()):
             if any(t for t, _ in self.data.values()):
                 self.finish_indexing()
 
@@ -1390,6 +1552,10 @@ class MainWindow(QtWidgets.QMainWindow):
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
+        if self.is_combined() and self.rep_data:
+            rows.append(("― 再現性 ―", ""))
+            rows.extend(repeat_result_rows(
+                repeatability_summary(self.rep_points, self.rep_data)))
         self.fill_misc_table(rows)
 
     def main_grid_rows(self):
@@ -1501,6 +1667,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return bool(self.rep_data)
         return bool(self.data) and any(t for t, _ in self.data.values())
 
+    def has_repeat_data(self):
+        return bool(self.rep_data)
+
     def build_meta(self):
         meta = {
             MODE_KEY: self.current_mode(),
@@ -1513,10 +1682,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.is_tilt():
             meta[META_KEYS["wheel_start"]] = self.e_wstart.value()
             meta[META_KEYS["wheel_end"]] = self.e_wend.value()
-        if self.is_repeat():
+        if self.is_repeat() or self.is_combined():
             meta[META_KEYS["blocks"]] = self.e_blocks.value()
             meta[META_KEYS["repeats"]] = self.e_repeats.value()
-        else:
+        if not self.is_repeat():
             meta[META_KEYS["wheel_pitch"]] = self.e_wheel.value()
             meta[META_KEYS["worm_pitch"]] = self.e_worm.value()
             meta[META_KEYS["worm_range"]] = self.e_range.value()
@@ -1558,11 +1727,16 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 summary, _ = summarize(self.data, self.applied_blcorr)
                 save_csv(path, self.data, summary, meta, self.current_judgements(summary))
+                # 合体測定は再現性も別CSV（機番_再現.csv）に保存
+                if self.view_kind == "combined" and self.has_repeat_data():
+                    rep_path = path.with_name(f"{path.stem}_再現{path.suffix}")
+                    rsum = repeatability_summary(self.rep_points, self.rep_data)
+                    save_repeat_csv(rep_path, self.rep_points, self.rep_data, rsum, meta)
             self.statusBar().showMessage(f"保存しました: {path}")
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
             return
-        if self.view_kind == "indexing":
+        if self.view_kind in ("indexing", "combined"):
             if self.is_tilt():
                 self.save_ks_file(machine_no)
             else:
@@ -1866,6 +2040,42 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         RawDataDialog(self).exec()
 
+    def show_program_dialog(self):
+        """現在の測定条件からFANUC測定プログラムを作成するダイアログを開く"""
+        if self.is_repeat():
+            rotary = not self.is_tilt()
+            wheel_start, wheel_end = (
+                (self.e_wstart.value(), self.e_wend.value()) if self.is_tilt()
+                else (0.0, 360.0))
+            params = dict(
+                rotary=rotary, include_division=False, include_repeat=True,
+                wheel_pitch=self.e_wheel.value() if self.e_wheel.value() else 10.0,
+                wheel_start=wheel_start, wheel_end=wheel_end,
+                worm_pitch=self.e_worm.value(), worm_range=self.e_range.value(),
+                worm_start=self.e_start.value(),
+                blocks=self.repeat_blocks(), repeats=self.e_repeats.value(),
+            )
+        else:
+            rotary = not self.is_tilt()
+            wheel_start, wheel_end = (
+                (self.e_wstart.value(), self.e_wend.value()) if self.is_tilt()
+                else (0.0, 360.0))
+            params = dict(
+                rotary=rotary,
+                include_division=True,
+                include_repeat=self.is_combined(),
+                wheel_pitch=self.e_wheel.value(),
+                wheel_start=wheel_start, wheel_end=wheel_end,
+                worm_pitch=self.e_worm.value(), worm_range=self.e_range.value(),
+                worm_start=self.e_start.value(),
+                blocks=self.repeat_blocks() if self.is_combined() else [],
+                repeats=self.e_repeats.value(),
+            )
+        model = self.e_model.text().strip() or "MEASURE"
+        params["title"] = f"{model} {self.current_mode()}"
+        params["machine"] = self.e_machine.text().strip()
+        ProgramDialog(self, self.settings, params).exec()
+
     def fetch_temp_from_switchbot(self):
         """SwitchBot温湿度計から測定温度を取得して入力欄に入れる"""
         token = str(self.settings.get("switchbot_token") or "")
@@ -1986,11 +2196,15 @@ class MainWindow(QtWidgets.QMainWindow):
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
+        if self.is_combined() and self.rep_data:
+            rows.append(("― 再現性 ―", ""))
+            rows.extend(repeat_result_rows(
+                repeatability_summary(self.rep_points, self.rep_data)))
         misc = "".join(
             "<tr>"
             f"<td style='border:1px solid #999; padding:1px 5px;'>{item}</td>"
             f"<td style='border:1px solid #999; padding:1px 5px;"
-            f"{' color:red;' if value.startswith('NG') else ''}'>{value}</td></tr>"
+            f"{' color:red;' if str(value).startswith('NG') else ''}'>{value}</td></tr>"
             for item, value in rows
         )
         misc_table = (f"<table style='font-size:7pt;' cellspacing='0'>{misc}</table>")
@@ -2038,7 +2252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         wheel_img = self._plot_image(self.plot_wheel)
         document.addResource(QtGui.QTextDocument.ImageResource,
                              QtCore.QUrl("wheel.png"), wheel_img)
-        has_worm = (self.view_kind == "indexing"
+        has_worm = (self.view_kind in ("indexing", "combined")
                     and bool(self.data.get("worm_cw", ([], []))[0]))
         if has_worm:
             worm_img = self._plot_image(self.plot_worm)

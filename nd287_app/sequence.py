@@ -139,15 +139,22 @@ class RepeatabilitySequence:
     data: {("cw"|"ccw", ブロック番号): [測定値, …]}
     """
 
-    def __init__(self, points, repeats):
+    def __init__(self, points, repeats, interleave=False):
         self.points = [float(p) for p in points]
         self.repeats = int(repeats)
+        self.interleave = interleave
         self.steps = []  # (方向キー, ブロック番号, 回数番号, 指令角度, 方向)
         for i, p in enumerate(self.points):
-            for r in range(self.repeats):
-                self.steps.append(("cw", i, r, p, +1))
-            for r in range(self.repeats):
-                self.steps.append(("ccw", i, r, p, -1))
+            if interleave:
+                # 1サイクルでCW読み→CCW読み（FANUCサブプロと同じ順序）
+                for r in range(self.repeats):
+                    self.steps.append(("cw", i, r, p, +1))
+                    self.steps.append(("ccw", i, r, p, -1))
+            else:
+                for r in range(self.repeats):
+                    self.steps.append(("cw", i, r, p, +1))
+                for r in range(self.repeats):
+                    self.steps.append(("ccw", i, r, p, -1))
         self.idx = 0
         self.data = {}
 
@@ -200,3 +207,74 @@ class RepeatabilitySequence:
 
     def __len__(self):
         return len(self.steps)
+
+
+class CombinedSequence:
+    """分割測定と再現性測定を1つの流れで測る（合体測定）。
+
+    受信順 = 分割（IndexingSequence.steps）→ 再現（RepeatabilitySequence.steps、
+    interleave=Trueで CW/CCW を1サイクルずつ交互）。FANUC合体プログラムの
+    完了信号(M80)の発火順と一致する。
+
+    division: IndexingSequence（ホイールCW/CCW・ウォームCW/CCW）
+    repeat:   RepeatabilitySequence（interleave=True 推奨）
+    """
+
+    def __init__(self, division: "IndexingSequence", repeat: "RepeatabilitySequence"):
+        self.division = division
+        self.repeat = repeat
+        self._div_len = len(division)
+
+    # --- 表示用データ（GUIは division.data / repeat.data をそのまま使える）---
+    @property
+    def data(self):
+        return self.division.data
+
+    @property
+    def rep_points(self):
+        return self.repeat.points
+
+    @property
+    def rep_data(self):
+        return self.repeat.data
+
+    @property
+    def idx(self):
+        return self.division.idx + self.repeat.idx
+
+    def current(self):
+        if not self.division.done():
+            return self.division.current()
+        return self.repeat.current()
+
+    def guide_text(self):
+        if not self.division.done():
+            text = self.division.guide_text()
+        else:
+            text = self.repeat.guide_text()
+        if text is None:
+            return None
+        return f"[合体 {self.idx + 1}/{len(self)}] " + text
+
+    def record(self, measured: float):
+        if not self.division.done():
+            self.division.record(measured)
+        else:
+            self.repeat.record(measured)
+
+    def undo(self):
+        if self.repeat.idx > 0:
+            return self.repeat.undo()
+        return self.division.undo()
+
+    def done(self):
+        return self.division.done() and self.repeat.done()
+
+    def counts(self):
+        rows = list(self.division.counts())
+        for label, cur, req in self.repeat.counts():
+            rows.append((f"再現 {label}", cur, req))
+        return rows
+
+    def __len__(self):
+        return self._div_len + len(self.repeat)

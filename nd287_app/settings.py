@@ -52,6 +52,15 @@ DEFAULTS = dict(
     auto_wait_before_press=1.0,  # 取込開始からSwitchBot押下までの待ち[秒]
     # 生データ編集（管理者モード）のパスワード
     admin_password="0925",
+    # FANUC測定プログラム生成
+    fanuc_axis="X",
+    fanuc_preswing=10.0,        # 前振り量[°]（バックラッシュ消し）
+    fanuc_dwell_sec=1.0,        # 位置決め後のドゥエル[秒]（G04 X…）
+    fanuc_mcode="M80",          # 完了信号Mコード（カウンターへ送る）
+    fanuc_use_subprogram=True,  # True: 再現をサブプロ / False: 1本に展開
+    fanuc_main_number=100,
+    fanuc_rep_sub_number=9001,
+    fanuc_return_to_start=True,
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

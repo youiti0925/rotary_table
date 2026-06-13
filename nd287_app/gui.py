@@ -44,6 +44,7 @@ from .ks_format import (
     tilt_accuracy,
 )
 from .masters import condition_params, find_entry, formula_minmax, load_masters
+from .firestore_sync import FirestoreSync, build_measurement_doc
 from .export import (
     MODE_KEY,
     build_save_path,
@@ -315,6 +316,8 @@ class MainWindow(QtWidgets.QMainWindow):
     _bot_msg = QtCore.Signal(str)
     # Webモニタからのコマンド（HTTPスレッド→GUIスレッド）
     _remote_cmd = QtCore.Signal(str)
+    # Webアプリ（Firestore）送信の完了通知
+    _sync_done = QtCore.Signal(str)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -616,6 +619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temp_done.connect(self.on_temp_done)
         self._bot_msg.connect(self.on_bot_msg)
         self._remote_cmd.connect(self.on_remote_command)
+        self._sync_done.connect(lambda m: self.statusBar().showMessage(m))
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -778,6 +782,28 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._web_lock:
             return self._web_png
 
+    def collect_result_rows(self):
+        """結果の (項目, 値) 一覧。Webモニタ・Webアプリ送信で共用"""
+        if not (self.has_view_data() and not self.b_take.isEnabled()):
+            return []
+        try:
+            if self.view_kind == "repeat":
+                rsum = repeatability_summary(self.rep_points, self.rep_data)
+                return repeat_result_rows(rsum)
+            # 系列＋バックラッシ・判定・総合・主点・傾き判定・任意誤差
+            from .export import series_rows
+            summary, _ = summarize(self.data, self.applied_blcorr)
+            results = series_rows(summary)
+            results += misc_rows(summary, self.current_judgements(summary))
+            results += self.composite_backlash_rows()
+            results += self.main_grid_rows()
+            results += self.slope_judgement_rows(summary)
+            if self.is_tilt():
+                results += self.tilt_accuracy_rows()
+            return results
+        except Exception:
+            return []
+
     def update_web_snapshot(self, with_png=False):
         """GUIスレッドで現在の状態をスナップショット化してWebモニタへ公開する"""
         if self.web is None:
@@ -790,25 +816,7 @@ class MainWindow(QtWidgets.QMainWindow):
             state = "測定完了"
         else:
             state = "待機中"
-        results = []
-        if self.has_view_data() and not self.b_take.isEnabled():
-            try:
-                if self.view_kind == "repeat":
-                    rsum = repeatability_summary(self.rep_points, self.rep_data)
-                    results = repeat_result_rows(rsum)
-                else:
-                    # 系列＋バックラッシ・判定・総合・主点・傾き判定・任意誤差
-                    from .export import series_rows
-                    summary, _ = summarize(self.data, self.applied_blcorr)
-                    results = series_rows(summary)
-                    results += misc_rows(summary, self.current_judgements(summary))
-                    results += self.composite_backlash_rows()
-                    results += self.main_grid_rows()
-                    results += self.slope_judgement_rows(summary)
-                    if self.is_tilt():
-                        results += self.tilt_accuracy_rows()
-            except Exception:
-                results = []
+        results = self.collect_result_rows()
         snapshot = dict(
             state=state,
             timestamp=QtCore.QDateTime.currentDateTime().toString("HH:mm:ss"),
@@ -1559,6 +1567,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.save_ks_file(machine_no)
             else:
                 self.save_bs_file(machine_no, summary)
+        self.sync_to_webapp(machine_no, saved_files=[str(path)])
+
+    def sync_to_webapp(self, machine_no, saved_files=None):
+        """product-inspection（Firestore）へ測定結果を送信する（セーブ時）"""
+        if not self.settings.get("webapp_sync_enabled"):
+            return
+        sync = FirestoreSync(
+            api_key=str(self.settings.get("webapp_api_key") or ""),
+            project_id=str(self.settings.get("webapp_project_id") or ""),
+            app_data_id=str(self.settings.get("webapp_data_id") or ""),
+            collection=str(self.settings.get("webapp_collection") or "rotaryMeasurements"),
+        )
+        if not sync.configured():
+            self.statusBar().showMessage("Web連携が未設定です（settings.jsonのwebapp_*）")
+            return
+        plot_png = None
+        if self.settings.get("webapp_send_png"):
+            image = self.plot_wheel.grab().toImage()
+            buffer = QtCore.QBuffer()
+            buffer.open(QtCore.QIODevice.WriteOnly)
+            image.save(buffer, "PNG")
+            plot_png = bytes(buffer.data())
+        document = build_measurement_doc(
+            model=self.e_model.text().strip(),
+            machine=machine_no,
+            operator=self.e_operator.text().strip(),
+            date=self.e_date.date().toString("yyyy-MM-dd"),
+            temperature=self.e_temp.text().strip(),
+            mode=self.current_mode(),
+            results=self.collect_result_rows(),
+            comment=self.e_comment.text().strip(),
+            plot_png=plot_png,
+            saved_files=saved_files,
+        )
+        doc_id = (f"{sanitize_filename(machine_no)}_"
+                  f"{QtCore.QDateTime.currentDateTime().toString('yyyyMMdd-HHmmss')}")
+
+        def work():
+            ok, message = sync.push_document(doc_id, document)
+            self._sync_done.emit(message)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def save_bs_file(self, machine_no, summary):
         """旧形式(.BS)を併せて保存する（検査表システム互換、分割測定のみ）"""

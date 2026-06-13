@@ -240,6 +240,15 @@ settings.json で `web_enabled: true` にすると、アプリ内にWebモニタ
 社内LAN内での利用前提。測定PCのWindowsファイアウォールで該当ポートの
 受信許可が必要になる場合がある。
 
+## product-inspection（Webアプリ）連携
+
+settings.json で `webapp_sync_enabled: true` にすると、**セーブ時に測定結果を
+product-inspection の Firebase（Firestore）へ自動送信**する。送信内容は
+型式・機番・測定者・温度・モード・全結果行・総合判定（NGが1つでもあればNG）・
+グラフ画像。Web側は同じFirestoreをリアルタイム購読するだけで一覧・詳細表示
+できる（貼るだけの閲覧コンポーネントを `docs/product-inspection連携.md` に同梱）。
+実機のFirebaseに対して書込→読出→削除のE2E検証済み。
+
 ## SwitchBot温湿度計から測定温度を取得
 
 測定温度欄の「取得」ボタンで、SwitchBot温湿度計の現在温度を自動入力できる。

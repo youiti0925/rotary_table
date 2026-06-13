@@ -56,6 +56,14 @@ DEFAULTS = dict(
     web_enabled=False,
     web_port=8765,
     web_token="",   # 設定すると ?token=… 付きアクセスのみ許可
+    # product-inspection（Firebase）連携: セーブ時に測定結果を
+    # rotaryMeasurements コレクションへ送信する
+    webapp_sync_enabled=False,
+    webapp_api_key="AIzaSyDiIS-TDH6MgXaLvG9T2VRioFDomQ_zQ9E",  # product-inspectionと同じ
+    webapp_project_id="inspection-time-c4fd3",
+    webapp_data_id="product-inspection-v1",
+    webapp_collection="rotaryMeasurements",
+    webapp_send_png=True,  # グラフ画像も送る（1通あたり約20〜30KB）
     # 温度別の合否規格 [秒]。ホイールが合金製のため熱膨張で、ホイール・
     # ウォーム・総合（真の最大最小）のいずれも温度で変わり、温度帯ごとに
     # 規格が異なる。規格が空の項目は判定しない。

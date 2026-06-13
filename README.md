@@ -280,6 +280,20 @@ product-inspection の Firebase（Firestore）へ自動送信**する。送信�
 できる（貼るだけの閲覧コンポーネントを `docs/product-inspection連携.md` に同梱）。
 実機のFirebaseに対して書込→読出→削除のE2E検証済み。
 
+## 時間取り連動（product-inspectionの作業計測と連動）
+
+product-inspection の時間取りと Firestore 経由で連動する（`webapp_commands_enabled`
+と `webapp_station` を設定）:
+
+- **準備タイマー開始** → アプリが前面化し、型式・機番・モードを自動セット
+  （マスタ自動適用）して取込待ちに
+- **測定タイマー開始** → 自動測定を開始（SwitchBot ON なら無人でNCスタート）
+- **測定完了** → 完了イベント（総合判定つき）をWebへ返し、測定タイマーを自動終了
+
+宛先は **ステーションID**（各PCに1個）で分離するので、7台あっても自分宛の指令
+だけ実行する。詳細・Web側の組込み手順は `docs/product-inspection連携.md`。
+実機Firebaseで 準備→測定→完了 の往復をE2E検証済み。
+
 ## SwitchBot温湿度計から測定温度を取得
 
 測定温度欄の「取得」ボタンで、SwitchBot温湿度計の現在温度を自動入力できる。

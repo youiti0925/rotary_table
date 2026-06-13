@@ -53,6 +53,31 @@ def to_firestore_fields(data: dict) -> dict:
     return {str(k): to_firestore_value(v) for k, v in data.items()}
 
 
+def from_firestore_value(value: dict):
+    if "nullValue" in value:
+        return None
+    if "booleanValue" in value:
+        return value["booleanValue"]
+    if "integerValue" in value:
+        return int(value["integerValue"])
+    if "doubleValue" in value:
+        return float(value["doubleValue"])
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "timestampValue" in value:
+        return value["timestampValue"]
+    if "arrayValue" in value:
+        return [from_firestore_value(v)
+                for v in value["arrayValue"].get("values", [])]
+    if "mapValue" in value:
+        return from_firestore_fields(value["mapValue"].get("fields", {}))
+    return None
+
+
+def from_firestore_fields(fields: dict) -> dict:
+    return {k: from_firestore_value(v) for k, v in (fields or {}).items()}
+
+
 # ──────────────────────────────────────────────
 #  匿名認証
 # ──────────────────────────────────────────────
@@ -146,6 +171,47 @@ class FirestoreSync:
             return False, f"送信失敗 HTTP {exc.code}: {detail}"
         except Exception as exc:
             return False, f"送信失敗: {exc}"
+
+    def _collection_url(self, collection: str = None) -> str:
+        col = collection or self.collection
+        return (f"{FIRESTORE_BASE}/projects/{self.project_id}/databases/(default)/"
+                f"documents/artifacts/{self.app_data_id}/public/data/"
+                f"{urllib.parse.quote(col)}")
+
+    def list_documents(self, collection: str = None, timeout: float = 20.0):
+        """コレクション内の全ドキュメントを [(doc_id, fields_dict), …] で返す。"""
+        if not self.configured():
+            return []
+        self._ensure_token()
+        url = self._collection_url(collection) + "?pageSize=300"
+        request = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {self._id_token}"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        out = []
+        for doc in payload.get("documents", []):
+            doc_id = doc["name"].rsplit("/", 1)[1]
+            out.append((doc_id, from_firestore_fields(doc.get("fields", {}))))
+        return out
+
+    def update_fields(self, doc_id: str, fields: dict, collection: str = None,
+                      timeout: float = 20.0):
+        """指定フィールドだけ更新する（updateMaskで部分更新）。(成功, メッセージ)"""
+        try:
+            self._ensure_token()
+            mask = "&".join(f"updateMask.fieldPaths={urllib.parse.quote(k)}"
+                            for k in fields)
+            url = self._document_url(doc_id, collection) + "?" + mask
+            body = json.dumps({"fields": to_firestore_fields(fields)}).encode("utf-8")
+            request = urllib.request.Request(
+                url, data=body, method="PATCH",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self._id_token}"})
+            with urllib.request.urlopen(request, timeout=timeout):
+                pass
+            return True, "更新OK"
+        except Exception as exc:
+            return False, f"更新失敗: {exc}"
 
     def delete_document(self, doc_id: str, collection: str = None,
                         timeout: float = 20.0):

@@ -45,7 +45,7 @@ from .ks_format import (
 )
 from .masters import condition_params, find_entry, formula_minmax, load_masters
 from .fanuc import FanucConfig, generate as generate_fanuc
-from .firestore_sync import FirestoreSync, build_measurement_doc
+from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
 from .export import (
     MODE_KEY,
     build_save_path,
@@ -461,6 +461,8 @@ class MainWindow(QtWidgets.QMainWindow):
     _remote_cmd = QtCore.Signal(str)
     # Webアプリ（Firestore）送信の完了通知
     _sync_done = QtCore.Signal(str)
+    # Webアプリ連動の指令（Firestoreポーリングスレッド→GUIスレッド）
+    _command_signal = QtCore.Signal(object)
 
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
@@ -778,6 +780,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bot_msg.connect(self.on_bot_msg)
         self._remote_cmd.connect(self.on_remote_command)
         self._sync_done.connect(lambda m: self.statusBar().showMessage(m))
+        self._command_signal.connect(self.on_command)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
 
@@ -819,6 +822,142 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.web = None
                 self.statusBar().showMessage(f"Webモニタ起動失敗: {e}")
         self.update_web_snapshot()
+
+        # Webアプリ連動（時間取り→測定→時間取り終了）の指令監視
+        self.active_work_id = None     # 現在処理中の作業ID（相関ID）
+        self.cmd_bus = None
+        self._handled_commands = set()
+        if (self.settings.get("webapp_commands_enabled")
+                and str(self.settings.get("webapp_station") or "").strip()):
+            self.cmd_bus = FirestoreSync(
+                api_key=str(self.settings.get("webapp_api_key") or ""),
+                project_id=str(self.settings.get("webapp_project_id") or ""),
+                app_data_id=str(self.settings.get("webapp_data_id") or ""),
+                collection=str(self.settings.get("webapp_command_collection")
+                               or "rotaryCommands"),
+            )
+            self.cmd_timer = QtCore.QTimer(self)
+            self.cmd_timer.timeout.connect(self.poll_commands)
+            interval = int(float(self.settings.get("webapp_command_poll_sec") or 3.0) * 1000)
+            self.cmd_timer.start(max(interval, 1000))
+            self.statusBar().showMessage(
+                f"Webアプリ連動 監視中（ステーション {self.settings.get('webapp_station')}）")
+
+    # ----- Webアプリ連動（指令の監視と実行） -----
+
+    def poll_commands(self):
+        """Firestoreの指令を監視し、自ステーション宛の未処理分を実行する"""
+        if self.cmd_bus is None or self._connecting:
+            return
+        station = str(self.settings.get("webapp_station") or "").strip()
+
+        def work():
+            try:
+                docs = self.cmd_bus.list_documents()
+            except Exception:
+                return
+            pending = []
+            for doc_id, fields in docs:
+                if (str(fields.get("station") or "") == station
+                        and str(fields.get("status") or "") == "pending"
+                        and doc_id not in self._handled_commands):
+                    pending.append((doc_id, fields))
+            for doc_id, fields in pending:
+                self._handled_commands.add(doc_id)
+                self._command_signal.emit({"id": doc_id, **fields})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_command(self, command):
+        """指令をGUIスレッドで実行する"""
+        ctype = command.get("type")
+        work_id = command.get("workId") or command.get("work_id")
+        if ctype == "prepare":
+            self.handle_prepare(command, work_id)
+        elif ctype == "start_capture":
+            self.handle_start_capture(command, work_id)
+        # 処理済みにする＋必要なイベントを返す
+        self._finish_command(command, work_id, ctype)
+
+    def handle_prepare(self, command, work_id):
+        """準備: 前面化＋型式・機番・モードをセットしてマスタ自動適用、取込待ち"""
+        self.active_work_id = work_id
+        mode = command.get("mode")
+        if mode in MODES:
+            self.mode_combo.setCurrentText(mode)
+        if command.get("model"):
+            self.e_model.setText(str(command["model"]))
+        if command.get("machine"):
+            self.e_machine.setText(str(command["machine"]))
+        self.on_model_entered()  # マスタ自動適用
+        self.raise_()
+        self.activateWindow()
+        self.statusBar().showMessage(
+            f"Webアプリ連動: 準備（{command.get('machine', '')} / {command.get('model', '')}）")
+
+    def handle_start_capture(self, command, work_id):
+        """測定開始: 自動測定を起動（SwitchBot ON ならNCスタートも）"""
+        self.active_work_id = work_id
+        missing = self.missing_required_fields()
+        if missing:
+            self.push_event(work_id, "error",
+                            message="必須項目不足: " + "、".join(missing))
+            self.statusBar().showMessage(
+                "Webアプリ連動: 測定開始できず（" + "、".join(missing) + "）")
+            return
+        self.auto_start()
+        self.push_event(work_id, "capturing")
+        self.statusBar().showMessage("Webアプリ連動: 測定開始（自動測定）")
+
+    def _finish_command(self, command, work_id, ctype):
+        bus = self.cmd_bus
+        if bus is None:
+            return
+        doc_id = command.get("id")
+        event_type = "ready" if ctype == "prepare" else None
+
+        def work():
+            try:
+                bus.update_fields(doc_id, {"status": "done"})
+            except Exception:
+                pass
+            if event_type:
+                self._write_event(work_id, event_type, {})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def push_event(self, work_id, event_type, **extra):
+        """アプリ→Webのイベントをバックグラウンドで送る"""
+        if self.cmd_bus is None or not work_id:
+            return
+        threading.Thread(
+            target=self._write_event, args=(work_id, event_type, extra), daemon=True
+        ).start()
+
+    def _write_event(self, work_id, event_type, extra):
+        import time as _t
+        bus = self.cmd_bus
+        if bus is None:
+            return
+        station = str(self.settings.get("webapp_station") or "")
+        doc = dict(workId=work_id, station=station, type=event_type,
+                   createdAtEpoch=int(_t.time() * 1000), **(extra or {}))
+        doc_id = f"{work_id}_{event_type}_{int(_t.time() * 1000)}"
+        try:
+            bus.push_document(doc_id, doc,
+                              collection=str(self.settings.get("webapp_event_collection")
+                                             or "rotaryEvents"))
+        except Exception:
+            pass
+
+    def notify_measurement_done(self):
+        """測定完了をWebへ通知（時間取り終了のトリガ）。active_work_idがある時だけ"""
+        if self.cmd_bus is None or not self.active_work_id:
+            return
+        judgement = overall_judgement(self.collect_result_rows())
+        self.push_event(self.active_work_id, "done", judgement=judgement,
+                        machine=self.e_machine.text().strip())
+        self.active_work_id = None
 
     # ----- 型式マスタ -----
 
@@ -1444,6 +1583,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.guide.setText("測定完了 → セーブで保存")
             self.finish()
             self.update_web_snapshot(with_png=True)
+            self.notify_measurement_done()
             self.auto_after_complete()
         else:
             self.show_guide()
@@ -2325,6 +2465,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self.rx_timer.stop()
+        if getattr(self, "cmd_timer", None) is not None:
+            self.cmd_timer.stop()
+        if getattr(self, "web", None) is not None:
+            self.web.stop()
         self.dev.close()
         super().closeEvent(event)
 

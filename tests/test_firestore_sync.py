@@ -5,6 +5,8 @@ import unittest
 from nd287_app.firestore_sync import (
     FirestoreSync,
     build_measurement_doc,
+    from_firestore_fields,
+    from_firestore_value,
     overall_judgement,
     to_firestore_fields,
     to_firestore_value,
@@ -37,6 +39,21 @@ class TestFirestoreEncoding(unittest.TestCase):
         self.assertEqual(item, {"stringValue": "精度PP"})
         self.assertEqual(fields["meta"]["mapValue"]["fields"]["machine"],
                          {"stringValue": "260976K"})
+
+
+class TestDecode(unittest.TestCase):
+    def test_roundtrip(self):
+        data = {"type": "prepare", "station": "PC-3", "n": 7, "ratio": 1.5,
+                "flag": True, "none": None,
+                "list": [1, "a"], "map": {"x": 2}}
+        decoded = from_firestore_fields(to_firestore_fields(data))
+        self.assertEqual(decoded, data)
+
+    def test_decode_scalars(self):
+        self.assertEqual(from_firestore_value({"integerValue": "5"}), 5)
+        self.assertEqual(from_firestore_value({"stringValue": "x"}), "x")
+        self.assertEqual(from_firestore_value({"booleanValue": False}), False)
+        self.assertIsNone(from_firestore_value({"nullValue": None}))
 
 
 class TestOverallJudgement(unittest.TestCase):

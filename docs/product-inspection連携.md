@@ -122,3 +122,80 @@ export default function RotaryMeasurementsPanel({ db }) {
   失敗しない（送信失敗はステータスバーに表示）
 - 将来「Webから再測定指示」までやる場合は、Webモニタ（README参照）を併用するか、
   Firestoreにコマンド用コレクションを足して分割測定アプリ側で購読する拡張が可能
+
+---
+
+# 時間取り連動（Web→アプリ→Web）
+
+product-inspection の **時間取り**と分割測定アプリを Firestore 経由で連動させる。
+準備タイマー開始でアプリに条件をセット、測定タイマー開始で自動測定（無人なら
+SwitchBotでNCスタート）、測定完了で測定タイマーを自動終了する。
+
+## Firestore のコレクション
+
+すべて `artifacts/product-inspection-v1/public/data/` 配下。
+
+- **rotaryCommands**（Web→アプリ）: ドキュメント例
+  ```
+  { type: "prepare"|"start_capture", station: "PC-3", workId: "<相関ID>",
+    model: "RWE-200", machine: "260976K", mode: "回転分割+再現",
+    status: "pending" }
+  ```
+  アプリは自分の `webapp_station` と一致し `status=="pending"` の指令だけ実行し、
+  実行後 `status` を `"done"` に更新する。
+- **rotaryEvents**（アプリ→Web）: `{ workId, station, type: "ready"|"capturing"|"done"|"error", judgement }`
+  Web は `type=="done"` を購読し、その `workId` の測定タイマーを終了する。
+
+## アプリ側の設定（各PC）
+
+```json
+"webapp_commands_enabled": true,
+"webapp_station": "PC-3",          // このPC（ステーション）のID
+"webapp_command_collection": "rotaryCommands",
+"webapp_event_collection": "rotaryEvents"
+```
+
+## product-inspection 側に足すもの
+
+1. テンプレートの「測定」工程に **測定連動フラグ** と **既定ステーション**（任意）
+2. 準備タイマー開始時に **ステーション選択**（プルダウン。既定＝その端末の所在
+   ステーション or 型式の常用機）。選んだ station と workId/model/machine を
+   rotaryCommands に `type:"prepare"` で書く
+3. 測定タイマー開始時に `type:"start_capture"` を書く（station は準備で確定済み）
+4. rotaryEvents を購読し、`type:"done"` を受けたら該当 workId の測定タイマーを終了
+
+```js
+// 指令を書く（準備）
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+const P = (col, id) => doc(db, 'artifacts', 'product-inspection-v1', 'public', 'data', col, id);
+async function startPrepare(workId, station, model, machine, mode) {
+  await setDoc(P('rotaryCommands', `${workId}_prepare`), {
+    type: 'prepare', station, workId, model, machine, mode, status: 'pending',
+    createdAt: serverTimestamp(),
+  });
+}
+async function startCapture(workId, station) {
+  await setDoc(P('rotaryCommands', `${workId}_start`), {
+    type: 'start_capture', station, workId, status: 'pending',
+    createdAt: serverTimestamp(),
+  });
+}
+// 完了イベントを購読して測定タイマーを止める
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+function watchDone(onDone) {
+  const q = query(
+    collection(db, 'artifacts', 'product-inspection-v1', 'public', 'data', 'rotaryEvents'),
+    where('type', '==', 'done'));
+  return onSnapshot(q, (snap) => snap.docChanges().forEach((c) => {
+    if (c.type === 'added') {
+      const e = c.doc.data();
+      onDone(e.workId, e.judgement);   // ここで該当 workId の測定タイマーを終了
+    }
+  }));
+}
+```
+
+## 安全（無人運転）
+
+準備（有人・ワーク段取り）→測定（無人・自動NCスタート）の区切りが安全窓。
+準備タイマーを終える＝人が機械から離れてOK、という運用ルールにする。

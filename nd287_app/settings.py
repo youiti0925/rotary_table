@@ -75,6 +75,12 @@ DEFAULTS = dict(
     webapp_data_id="product-inspection-v1",
     webapp_collection="rotaryMeasurements",
     webapp_send_png=True,  # グラフ画像も送る（1通あたり約20〜30KB）
+    # Webアプリ連動（時間取り→測定→時間取り終了）。Firestoreを指令バスにする
+    webapp_commands_enabled=False,   # 指令の監視を有効化
+    webapp_station="",               # このPCのステーションID（例 "PC-3" や機械名）
+    webapp_command_collection="rotaryCommands",  # Web→アプリの指令
+    webapp_event_collection="rotaryEvents",      # アプリ→Webのイベント
+    webapp_command_poll_sec=3.0,
     # 温度別の合否規格 [秒]。ホイールが合金製のため熱膨張で、ホイール・
     # ウォーム・総合（真の最大最小）のいずれも温度で変わり、温度帯ごとに
     # 規格が異なる。規格が空の項目は判定しない。

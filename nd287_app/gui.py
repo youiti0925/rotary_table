@@ -841,6 +841,30 @@ class AnalysisDialog(QtWidgets.QDialog):
         top.addWidget(b_refresh)
         v.addLayout(top)
 
+        # 2段目: グラフの横軸・集計・種類の切り替え
+        opt = QtWidgets.QHBoxLayout()
+        opt.addWidget(QtWidgets.QLabel("横軸"))
+        self.cmb_xaxis = QtWidgets.QComboBox()
+        for label in report.XAXIS_FIELDS:  # 機番 / 日付 / 型式
+            self.cmb_xaxis.addItem(label, label)
+        self.cmb_xaxis.currentIndexChanged.connect(self.update_compare_plot)
+        opt.addWidget(self.cmb_xaxis)
+        opt.addWidget(QtWidgets.QLabel("集計"))
+        self.cmb_agg = QtWidgets.QComboBox()
+        for label, key in (("個別", "none"), ("平均", "mean"),
+                           ("最大", "max"), ("最小", "min")):
+            self.cmb_agg.addItem(label, key)
+        self.cmb_agg.currentIndexChanged.connect(self.update_compare_plot)
+        opt.addWidget(self.cmb_agg)
+        opt.addWidget(QtWidgets.QLabel("グラフ"))
+        self.cmb_gtype = QtWidgets.QComboBox()
+        for label, key in (("棒", "bar"), ("折れ線", "line")):
+            self.cmb_gtype.addItem(label, key)
+        self.cmb_gtype.currentIndexChanged.connect(self.update_compare_plot)
+        opt.addWidget(self.cmb_gtype)
+        opt.addStretch(1)
+        v.addLayout(opt)
+
         self.cmp_table = QtWidgets.QTableWidget(0, 0)
         self.cmp_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
         self.cmp_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
@@ -890,29 +914,42 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.cmb_metric.blockSignals(False)
         self.update_compare_plot()
 
+    def _compare_options(self):
+        """グラフの選択状態 (指標, 横軸キー, 集計キー, グラフ種別) を返す"""
+        return (
+            self.cmb_metric.currentText(),
+            self.cmb_xaxis.currentData() or "機番",
+            self.cmb_agg.currentData() or "none",
+            self.cmb_gtype.currentData() or "bar",
+        )
+
     def _compare_series(self):
-        """選択中の指標について (機番ラベル, 値) を返す"""
-        metric = self.cmb_metric.currentText()
-        labels, values = [], []
+        """選択中の指標・横軸・集計で (指標, 横軸, グラフ種別, ラベル列, 値列)"""
+        metric, x_field, agg, gtype = self._compare_options()
+        labels, values = ([], [])
         if metric:
-            for r in self.records:
-                v = r["metrics"].get(metric)
-                if v is None:
-                    continue
-                labels.append(r.get("機番") or r.get("ファイル"))
-                values.append(float(v))
-        return metric, labels, values
+            labels, values = report.aggregate_series(
+                self.records, metric, x_field, agg)
+        return metric, x_field, gtype, labels, values
+
+    def _draw_compare(self, plot, metric, x_field, gtype, labels, values):
+        x = list(range(len(values)))
+        if gtype == "line":
+            plot.plot(x, values, pen=pg.mkPen("#1f77b4", width=2),
+                      symbol="o", symbolSize=6)
+        else:
+            plot.addItem(pg.BarGraphItem(x=x, height=values, width=0.6,
+                                         brush="#1f77b4"))
+        plot.getAxis("bottom").setTicks([list(zip(x, labels))])
+        plot.setLabel("bottom", x_field)
+        plot.setTitle(metric)
 
     def update_compare_plot(self, *args):
         self.cmp_plot.clear()
-        metric, labels, values = self._compare_series()
+        metric, x_field, gtype, labels, values = self._compare_series()
         if not values:
             return
-        x = list(range(len(values)))
-        self.cmp_plot.addItem(
-            pg.BarGraphItem(x=x, height=values, width=0.6, brush="#1f77b4"))
-        self.cmp_plot.getAxis("bottom").setTicks([list(zip(x, labels))])
-        self.cmp_plot.setTitle(metric)
+        self._draw_compare(self.cmp_plot, metric, x_field, gtype, labels, values)
 
     def export_compare_csv(self):
         if not self.rows:
@@ -943,32 +980,31 @@ class AnalysisDialog(QtWidgets.QDialog):
             "Excelブック (*.xlsx)")
         if not path:
             return
-        metric = self.cmb_metric.currentText()
-        chart = None
-        if metric in self.headers and "機番" in self.headers:
-            chart = dict(type="bar", title=metric,
-                         cat_col=self.headers.index("機番"),
-                         val_cols=[self.headers.index(metric)],
-                         x_title="機番", y_title="秒")
+        # 1枚目=全データ表、2枚目=選択中の横軸/集計/種類でのグラフ用データ＋ネイティブグラフ
+        sheets = [dict(name="横断比較", headers=self.headers, rows=self.rows)]
+        metric, x_field, gtype, labels, values = self._compare_series()
+        if labels:
+            grows = [[lab, f"{val:.2f}"] for lab, val in zip(labels, values)]
+            sheets.append(dict(
+                name="グラフ", headers=[x_field, metric], rows=grows,
+                chart=dict(type=gtype, title=metric, cat_col=0, val_cols=[1],
+                           x_title=x_field, y_title="秒")))
         try:
-            excel_export.write_xlsx(path, [dict(
-                name="横断比較", headers=self.headers, rows=self.rows, chart=chart)])
+            excel_export.write_xlsx(path, sheets)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Excel出力", f"失敗しました:\n{e}")
             return
         self.win.statusBar().showMessage(f"Excel出力: {path}")
 
     def _compare_plot_image(self):
-        metric, labels, values = self._compare_series()
+        metric, x_field, gtype, labels, values = self._compare_series()
         if not values:
             return None
         plot = pg.PlotWidget(title=metric)
         plot.resize(1000, 360)
         plot.showGrid(x=True, y=True, alpha=0.3)
         plot.getAxis("left").enableAutoSIPrefix(False)
-        x = list(range(len(values)))
-        plot.addItem(pg.BarGraphItem(x=x, height=values, width=0.6, brush="#1f77b4"))
-        plot.getAxis("bottom").setTicks([list(zip(x, labels))])
+        self._draw_compare(plot, metric, x_field, gtype, labels, values)
         image = plot.grab().toImage()
         plot.deleteLater()
         return image

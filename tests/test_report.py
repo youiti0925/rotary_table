@@ -99,6 +99,40 @@ class TestReport(unittest.TestCase):
         self.assertEqual(back[0], headers)
         self.assertEqual(len(back), len(rows) + 1)
 
+    def test_aggregate_individual(self):
+        recs = report.scan_measurements(self.root, model="RWE-200")
+        metric = "ホイール CW 精度PP"
+        labels, values = report.aggregate_series(recs, metric, "機番", "none")
+        self.assertEqual(len(labels), len(values))
+        # 個別なので測定数ぶん（指標値があるもの）。機番で昇順
+        self.assertEqual(labels, sorted(labels))
+        self.assertTrue(all(isinstance(v, float) for v in values))
+
+    def test_aggregate_mean_by_model(self):
+        recs = report.scan_measurements(self.root)  # 全型式
+        metric = "ホイール CW 精度PP"
+        labels, values = report.aggregate_series(recs, metric, "型式", "mean")
+        # 型式でまとめるので RB-250 と RWE-200 の2カテゴリ
+        self.assertEqual(labels, ["RB-250", "RWE-200"])
+        # RWE-200 の平均が個別2件の平均に一致（再現性測定はこの指標を持たない）
+        indiv = [r["metrics"][metric] for r in recs
+                 if r["型式"] == "RWE-200" and metric in r["metrics"]]
+        self.assertAlmostEqual(values[1], sum(indiv) / len(indiv))
+
+    def test_aggregate_max_min(self):
+        recs = report.scan_measurements(self.root, model="RWE-200")
+        metric = "ホイール CW 精度PP"
+        _, mx = report.aggregate_series(recs, metric, "型式", "max")
+        _, mn = report.aggregate_series(recs, metric, "型式", "min")
+        indiv = [r["metrics"][metric] for r in recs if metric in r["metrics"]]
+        self.assertAlmostEqual(mx[0], max(indiv))
+        self.assertAlmostEqual(mn[0], min(indiv))
+
+    def test_aggregate_missing_metric(self):
+        recs = report.scan_measurements(self.root)
+        labels, values = report.aggregate_series(recs, "存在しない指標", "機番", "none")
+        self.assertEqual((labels, values), ([], []))
+
     def test_deviation_table(self):
         series = {
             "wheel_cw": ([0.0, 30.0, 60.0], [1.0, 2.0, 3.0]),

@@ -171,6 +171,43 @@ def build_comparison_table(records, metric_columns=None):
     return headers, rows
 
 
+XAXIS_FIELDS = ("機番", "日付", "型式")
+AGG_FUNCS = {
+    "mean": lambda xs: sum(xs) / len(xs),
+    "max": max,
+    "min": min,
+}
+
+
+def aggregate_series(records, metric, x_field="機番", agg="none"):
+    """横断比較グラフ用の (ラベル列, 値列) を作る。
+
+    metric : 対象の指標名（available_metrics の値）
+    x_field: 横軸にする項目（"機番" / "日付" / "型式"）
+    agg    : 集計方法。
+             "none" … 各測定を1点ずつ（x_field で昇順）。推移・個別比較向き。
+             "mean"/"max"/"min" … x_field でまとめて集計（1カテゴリ1点）。
+    指標値が無い測定は除外する。
+    """
+    pairs = []
+    for r in records:
+        v = r["metrics"].get(metric)
+        if v is None:
+            continue
+        pairs.append((str(r.get(x_field, "") or ""), float(v)))
+    if not pairs:
+        return [], []
+    if agg == "none":
+        pairs.sort(key=lambda kv: kv[0])
+        return [k for k, _ in pairs], [v for _, v in pairs]
+    groups = {}
+    for k, v in pairs:
+        groups.setdefault(k, []).append(v)
+    func = AGG_FUNCS[agg]
+    labels = sorted(groups)
+    return labels, [float(func(groups[k])) for k in labels]
+
+
 def deviation_table(series_devs):
     """{key:(targets, devs)} を 指令角度×各系列偏差 の表にする。
 

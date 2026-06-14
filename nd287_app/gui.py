@@ -78,7 +78,6 @@ from .nd287 import ND287Device, deg_to_dms, scan_report
 from .switchbot import (
     DEFAULT_PATTERNS,
     bot_configured,
-    fetch_temperature,
     press_bot,
 )
 from .sequence import (
@@ -200,24 +199,12 @@ class SettingsDialog(QtWidgets.QDialog):
             "ユーザー傾斜条件CSVを選択",
         )
 
-        # SwitchBot（温度の自動取得＆自動測定の物理ボタン押し）
-        self.e_sb_token = QtWidgets.QLineEdit(str(settings.get("switchbot_token", "")))
-        self.e_sb_secret = QtWidgets.QLineEdit(str(settings.get("switchbot_secret", "")))
-        self.e_sb_secret.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.e_sb_device = QtWidgets.QLineEdit(str(settings.get("switchbot_device", "")))
-        self.e_sb_device.setToolTip("温度取得＝温湿度計のID。クラウドでBotを押す場合もここ")
-        self.b_sb_list = QtWidgets.QPushButton("デバイス一覧")
-        self.b_sb_list.setToolTip("トークン/シークレットからデバイスIDの一覧を取得する")
-        self.b_sb_list.clicked.connect(self.list_switchbot_devices)
-        dev_row = QtWidgets.QHBoxLayout()
-        dev_row.addWidget(self.e_sb_device)
-        dev_row.addWidget(self.b_sb_list)
-        self.c_sb_ble = QtWidgets.QCheckBox("Botを BLE で直接押す（ハブ不要・要bleak）")
-        self.c_sb_ble.setChecked(bool(settings.get("switchbot_use_ble", False)))
+        # SwitchBot Bot（BLE直結でNCの起動ボタンを物理押し）。クラウド/温度は使わない
         self.e_sb_mac = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_mac", "")))
-        self.e_sb_mac.setToolTip("Bot本体のBLE MACアドレス（BLE直結時）")
+        self.e_sb_mac.setToolTip("SwitchBot Bot本体のBLE MACアドレス（直結で押す相手）")
         self.e_sb_pw = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_password", "")))
         self.e_sb_pw.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.e_sb_pw.setToolTip("Botにパスワードを設定している場合のみ")
         self.cmb_sb_pattern = QtWidgets.QComboBox()
         patterns = list((settings.get("switchbot_patterns") or DEFAULT_PATTERNS).keys())
         self.cmb_sb_pattern.addItems(patterns)
@@ -237,15 +224,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_sb_wait.setSuffix(" 秒")
         self.sp_sb_wait.setToolTip("取込開始からSwitchBot押下までの待ち時間")
 
-        sb_group = QtWidgets.QGroupBox("自動測定・温度取得（SwitchBot）")
+        sb_group = QtWidgets.QGroupBox("自動測定（SwitchBot Bot・BLE直結）")
         sb_form = QtWidgets.QFormLayout(sb_group)
-        sb_form.addRow("トークン", self.e_sb_token)
-        sb_form.addRow("シークレット", self.e_sb_secret)
-        sb_form.addRow("温湿度計デバイスID", dev_row)
-        sb_form.addRow(self.c_sb_ble)
         sb_form.addRow("Bot BLE MAC", self.e_sb_mac)
         sb_form.addRow("BLEパスワード", self.e_sb_pw)
-        sb_form.addRow("押し方（自動測定）", self.cmb_sb_pattern)
+        sb_form.addRow("押し方（押し回数）", self.cmb_sb_pattern)
         sb_form.addRow("自動再測定の上限", self.sp_sb_retry)
         sb_form.addRow("押下までの待ち", self.sp_sb_wait)
 
@@ -300,26 +283,6 @@ class SettingsDialog(QtWidgets.QDialog):
         if path:
             edit.setText(path)
 
-    def list_switchbot_devices(self):
-        """入力中のトークン/シークレットでデバイスID一覧を取得して表示する。"""
-        from .switchbot import list_devices
-        token = self.e_sb_token.text().strip()
-        secret = self.e_sb_secret.text().strip()
-        if not (token and secret):
-            QtWidgets.QMessageBox.information(
-                self, "SwitchBot", "先にトークンとシークレットを入力してください")
-            return
-        try:
-            devices = list_devices(token, secret)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "SwitchBot", f"一覧取得に失敗:\n{e}")
-            return
-        lines = [f"{d.get('deviceName', '?')}  [{d.get('deviceType', '?')}]"
-                 f"  ID: {d.get('deviceId', '?')}" for d in devices]
-        QtWidgets.QMessageBox.information(
-            self, "SwitchBotデバイス一覧",
-            "\n".join(lines) or "デバイスが見つかりません")
-
     def browse_root(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(
             self, "保存先フォルダを選択", self.e_root.text()
@@ -353,10 +316,7 @@ class SettingsDialog(QtWidgets.QDialog):
             or r"マスタ/ユーザー回転条件.csv",
             user_tilt_csv=self.e_user_tilt.text().strip()
             or r"マスタ/ユーザー傾斜条件.csv",
-            switchbot_token=self.e_sb_token.text().strip(),
-            switchbot_secret=self.e_sb_secret.text().strip(),
-            switchbot_device=self.e_sb_device.text().strip(),
-            switchbot_use_ble=self.c_sb_ble.isChecked(),
+            switchbot_use_ble=True,  # BLE直結のみ（クラウドは使わない）
             switchbot_ble_mac=self.e_sb_mac.text().strip(),
             switchbot_ble_password=self.e_sb_pw.text(),
             switchbot_pattern_name=self.cmb_sb_pattern.currentText(),
@@ -1392,8 +1352,6 @@ class MainWindow(QtWidgets.QMainWindow):
     _conn_done = QtCore.Signal(bool, str)
     # 通信診断スレッド完了通知（レポート文字列）
     _diag_done = QtCore.Signal(str)
-    # SwitchBot温度取得完了通知（成功か, メッセージ, 温度）
-    _temp_done = QtCore.Signal(bool, str, float)
     # SwitchBot Bot押下の経過通知
     _bot_msg = QtCore.Signal(str)
     # Webモニタからのコマンド（HTTPスレッド→GUIスレッド）
@@ -1450,11 +1408,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_temp = QtWidgets.QLineEdit()
         self.e_temp.setPlaceholderText("23.5")
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
-        self.b_temp = QtWidgets.QPushButton("取得")
-        self.b_temp.setMaximumWidth(46)
-        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得する"
-                               "（設定画面のSwitchBot欄で接続を設定）")
-        self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
         # 入力欄は短く（枠が無駄に伸びないように上限を付ける）
         self.e_model.setMaximumWidth(120)
         self.e_machine.setMaximumWidth(120)
@@ -1477,14 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         info_grid.addWidget(QtWidgets.QLabel("名前"), 3, 0)
         info_grid.addWidget(self.e_operator, 3, 1)
         info_grid.addWidget(QtWidgets.QLabel("温度℃"), 3, 2)
-        temp_cell = QtWidgets.QWidget()
-        temp_h = QtWidgets.QHBoxLayout(temp_cell)
-        temp_h.setContentsMargins(0, 0, 0, 0)
-        temp_h.setSpacing(4)
-        temp_h.addWidget(self.e_temp)
-        temp_h.addWidget(self.b_temp)
-        temp_h.addStretch(1)
-        info_grid.addWidget(temp_cell, 3, 3)
+        info_grid.addWidget(self.e_temp, 3, 3)
         info_grid.setColumnStretch(4, 1)  # 右に余白を作って左へ寄せる
 
         # ===== 測定条件グループ =====
@@ -1845,7 +1791,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.b_conn)
         self._conn_done.connect(self.on_connect_done)
         self._diag_done.connect(self.on_diagnostics_done)
-        self._temp_done.connect(self.on_temp_done)
         self._bot_msg.connect(self.on_bot_msg)
         self._remote_cmd.connect(self.on_remote_command)
         self._sync_done.connect(lambda m: self.statusBar().showMessage(m))
@@ -3600,37 +3545,6 @@ class MainWindow(QtWidgets.QMainWindow):
         params["title"] = f"{model} {self.current_mode()}"
         params["machine"] = self.e_machine.text().strip()
         ProgramDialog(self, self.settings, params).exec()
-
-    def fetch_temp_from_switchbot(self):
-        """SwitchBot温湿度計から測定温度を取得して入力欄に入れる"""
-        token = str(self.settings.get("switchbot_token") or "")
-        secret = str(self.settings.get("switchbot_secret") or "")
-        device = str(self.settings.get("switchbot_device") or "")
-        if not (token and secret and device):
-            QtWidgets.QMessageBox.information(
-                self, "温度取得",
-                "SwitchBotが未設定です。「設定」→「自動測定・温度取得（SwitchBot）」で\n"
-                "トークン / シークレット / 温湿度計デバイスID を設定してください\n"
-                "（値はSwitchBotアプリの開発者向けオプションで取得）",
-            )
-            return
-        self.b_temp.setEnabled(False)
-        self.statusBar().showMessage("SwitchBotから温度を取得中...")
-
-        def work():
-            try:
-                temperature = fetch_temperature(token, secret, device)
-                self._temp_done.emit(True, f"温度を取得: {temperature:g}°C", temperature)
-            except Exception as e:
-                self._temp_done.emit(False, f"温度取得に失敗: {e}", 0.0)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def on_temp_done(self, ok, message, temperature):
-        self.b_temp.setEnabled(True)
-        self.statusBar().showMessage(message)
-        if ok:
-            self.e_temp.setText(f"{temperature:g}")
 
     # ----- 印刷 -----
 

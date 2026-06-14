@@ -64,7 +64,13 @@ from .export import (
     save_repeat_csv,
 )
 from . import excel_export, report
-from .themes import DEFAULT_THEME, THEME_NAMES, apply_theme
+from .themes import (
+    DEFAULT_FONT_PT,
+    DEFAULT_THEME,
+    THEME_NAMES,
+    apply_font,
+    apply_theme,
+)
 from .nd287 import ND287Device, deg_to_dms, scan_report
 from .switchbot import (
     DEFAULT_PATTERNS,
@@ -147,6 +153,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.e_theme.addItems(THEME_NAMES)
         self.e_theme.setCurrentText(str(settings.get("ui_theme", DEFAULT_THEME)))
         self.e_theme.setToolTip("画面の見た目。OKですぐ反映される")
+        self.e_font = QtWidgets.QSpinBox()
+        self.e_font.setRange(7, 22)
+        self.e_font.setSuffix(" pt")
+        self.e_font.setValue(int(settings.get("ui_font_pt", DEFAULT_FONT_PT)))
+        self.e_font.setToolTip("画面全体の文字サイズ。OKですぐ反映される")
 
         root_row = QtWidgets.QHBoxLayout()
         self.e_root = QtWidgets.QLineEdit(str(settings.get("save_root", "測定データ")))
@@ -185,6 +196,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
         form.addRow("画面テーマ", self.e_theme)
+        form.addRow("文字サイズ", self.e_font)
         form.addRow("測定データ保存先", root_row)
         form.addRow(".BS/.KS保存先（旧形式）", bs_row)
         form.addRow("測定条件CSV", self.e_conditions.row)
@@ -254,6 +266,7 @@ class SettingsDialog(QtWidgets.QDialog):
             baudrate=baud,
             parity=self.e_parity.currentText(),
             ui_theme=self.e_theme.currentText(),
+            ui_font_pt=self.e_font.value(),
             save_root=self.e_root.text().strip() or "測定データ",
             bs_save_root=self.e_bs_root.text().strip(),
             conditions_csv=self.e_conditions.text().strip() or r"マスタ/測定条件.csv",
@@ -1210,110 +1223,138 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rep_data = None    # 再現性測定の表示対象データ
         self.view_kind = "indexing"  # 現在表示中のデータ種別
 
-        # --- 1段目: モード・測定条件と取込操作 ---
-        row1 = QtWidgets.QHBoxLayout()
+        # ラベル＋入力をひと組の小箱にして、モードに応じて箱ごと出し入れする
+        # （横一列に詰め込まず、左サイドの「測定条件」グループに縦並びにする）
+        def field_box(label_text, *widgets, label_width=104):
+            box = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lbl = QtWidgets.QLabel(label_text)
+            lbl.setMinimumWidth(label_width)
+            h.addWidget(lbl)
+            for w in widgets:
+                h.addWidget(w)
+            h.addStretch(1)
+            return box, lbl
+
+        # ===== 測定情報グループ（取込開始の必須項目）=====
+        self.e_model = QtWidgets.QLineEdit()
+        self.e_model.setPlaceholderText("例: RWE-200")
+        self.e_machine = QtWidgets.QLineEdit()
+        self.e_machine.setPlaceholderText("例: 12345")
+        self.e_date = QtWidgets.QDateEdit(QtCore.QDate.currentDate())
+        self.e_date.setDisplayFormat("yyyy-MM-dd")
+        self.e_date.setCalendarPopup(True)
+        self.e_operator = QtWidgets.QLineEdit()
+        self.e_operator.setPlaceholderText("測定者")
+        self.e_temp = QtWidgets.QLineEdit()
+        self.e_temp.setPlaceholderText("例: 23.5")
+        self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
+        self.b_temp = QtWidgets.QPushButton("取得")
+        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得"
+                               "（settings.jsonのswitchbot_token等を設定）")
+        self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
+        temp_row = QtWidgets.QHBoxLayout()
+        temp_row.setContentsMargins(0, 0, 0, 0)
+        temp_row.addWidget(self.e_temp, 1)
+        temp_row.addWidget(self.b_temp)
+
+        info_group = QtWidgets.QGroupBox("測定情報")
+        info_form = QtWidgets.QFormLayout(info_group)
+        info_form.setLabelAlignment(QtCore.Qt.AlignRight)
+        info_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        info_form.addRow("型式", self.e_model)
+        info_form.addRow("機番", self.e_machine)
+        info_form.addRow("日付", self.e_date)
+        info_form.addRow("名前", self.e_operator)
+        info_form.addRow("測定温度[°C]", temp_row)
+
+        # ===== 測定条件グループ =====
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(MODES)
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
-        row1.addWidget(QtWidgets.QLabel("モード"))
-        row1.addWidget(self.mode_combo)
-
-        def add_field(label_text, widget):
-            label = QtWidgets.QLabel(label_text)
-            row1.addWidget(label)
-            row1.addWidget(widget)
-            return label
 
         self.e_wstart = QtWidgets.QDoubleSpinBox()
         self.e_wstart.setRange(-360.0, 360.0)
         self.e_wstart.setValue(-30.0)
         self.e_wstart.setSuffix(" °")
-        self.l_wstart = add_field("開始角度", self.e_wstart)
+        self.box_wstart, self.l_wstart = field_box("開始角度", self.e_wstart)
         self.e_wend = QtWidgets.QDoubleSpinBox()
         self.e_wend.setRange(-360.0, 720.0)
         self.e_wend.setValue(110.0)
         self.e_wend.setSuffix(" °")
-        self.l_wend = add_field("終了角度", self.e_wend)
+        self.box_wend, self.l_wend = field_box("終了角度", self.e_wend)
 
         self.e_wheel = QtWidgets.QDoubleSpinBox()
         self.e_wheel.setRange(0.001, 180.0)
         self.e_wheel.setValue(wheel_pitch)
         self.e_wheel.setSuffix(" °/pt")
-        self.l_wheel = add_field("ホイール刻み", self.e_wheel)
-
-        self.e_rstart = QtWidgets.QDoubleSpinBox()
-        self.e_rstart.setRange(-360.0, 720.0)
-        self.e_rstart.setValue(0.0)
-        self.e_rstart.setSuffix(" °")
-        self.l_rstart = add_field("再現開始", self.e_rstart)
-        self.e_rend = QtWidgets.QDoubleSpinBox()
-        self.e_rend.setRange(-360.0, 720.0)
-        self.e_rend.setValue(270.0)
-        self.e_rend.setSuffix(" °")
-        self.l_rend = add_field("再現終了", self.e_rend)
-
-        self.e_blocks = QtWidgets.QSpinBox()
-        self.e_blocks.setRange(2, 360)
-        self.e_blocks.setValue(4)
-        self.e_blocks.setSuffix(" 箇所")
-        self.l_blocks = add_field("ブロック数", self.e_blocks)
-
-        self.e_repeats = QtWidgets.QSpinBox()
-        self.e_repeats.setRange(2, 99)
-        self.e_repeats.setValue(7)
-        self.e_repeats.setSuffix(" 回")
-        self.l_repeats = add_field("回数", self.e_repeats)
+        self.box_wheel, self.l_wheel = field_box("ホイール刻み", self.e_wheel)
 
         self.e_worm = QtWidgets.QDoubleSpinBox()
         self.e_worm.setDecimals(4)
         self.e_worm.setRange(0.0001, 90.0)
         self.e_worm.setValue(worm_pitch)
         self.e_worm.setSuffix(" °/pt")
-        self.l_worm = add_field("ウォーム刻み", self.e_worm)
+        self.box_worm, self.l_worm = field_box("ウォーム刻み", self.e_worm)
         self.e_range = QtWidgets.QDoubleSpinBox()
         self.e_range.setDecimals(4)
         self.e_range.setRange(0.001, 360.0)
         self.e_range.setValue(worm_range)
         self.e_range.setSuffix(" °")
-        self.l_range = add_field("ウォーム範囲", self.e_range)
+        self.box_range, self.l_range = field_box("ウォーム範囲", self.e_range)
         self.e_start = QtWidgets.QDoubleSpinBox()
         self.e_start.setDecimals(4)
         self.e_start.setRange(0.0, 360.0)
         self.e_start.setValue(worm_start)
         self.e_start.setSuffix(" °")
-        self.l_start = add_field("ウォーム開始", self.e_start)
+        self.box_start, self.l_start = field_box("ウォーム開始", self.e_start)
 
-        row1.addStretch(1)
+        self.e_blocks = QtWidgets.QSpinBox()
+        self.e_blocks.setRange(2, 360)
+        self.e_blocks.setValue(4)
+        self.e_blocks.setSuffix(" 箇所")
+        self.box_blocks, self.l_blocks = field_box("ブロック数", self.e_blocks)
+        self.e_repeats = QtWidgets.QSpinBox()
+        self.e_repeats.setRange(2, 99)
+        self.e_repeats.setValue(7)
+        self.e_repeats.setSuffix(" 回")
+        self.box_repeats, self.l_repeats = field_box("回数", self.e_repeats)
+        self.e_rstart = QtWidgets.QDoubleSpinBox()
+        self.e_rstart.setRange(-360.0, 720.0)
+        self.e_rstart.setValue(0.0)
+        self.e_rstart.setSuffix(" °")
+        self.box_rstart, self.l_rstart = field_box("再現開始", self.e_rstart)
+        self.e_rend = QtWidgets.QDoubleSpinBox()
+        self.e_rend.setRange(-360.0, 720.0)
+        self.e_rend.setValue(270.0)
+        self.e_rend.setSuffix(" °")
+        self.box_rend, self.l_rend = field_box("再現終了", self.e_rend)
 
-        # --- 操作ボタン段（条件欄と分けて、欄が増えてもボタンが隠れないようにする） ---
-        row_ops = QtWidgets.QHBoxLayout()
-        b_start = QtWidgets.QPushButton("取込開始")
-        b_start.setStyleSheet("font-size:16px; padding:4px 18px;")
-        self.b_auto = QtWidgets.QPushButton("自動測定")
-        self.b_auto.setStyleSheet("font-size:16px; padding:4px 18px;")
-        self.b_auto.setToolTip(
-            "取込開始→SwitchBotで機械を起動→完了後に傾き判定→NGなら自動で再測定"
+        # 主点評価・バックラッシ手動補正（分割系のみ）
+        self.e_evald = QtWidgets.QSpinBox()
+        self.e_evald.setRange(0, 720)
+        self.e_evald.setSpecialValueText("なし")
+        self.e_evald.setSuffix(" 等分")
+        self.e_evald.valueChanged.connect(self.refresh_results)
+        self.box_evald, self.l_evald = field_box("主点評価", self.e_evald)
+        self.e_blcorr = QtWidgets.QDoubleSpinBox()
+        self.e_blcorr.setRange(-999.0, 999.0)
+        self.e_blcorr.setDecimals(2)
+        self.e_blcorr.setSuffix(' "')
+        self.e_blcorr.setToolTip(
+            "実際のメカ的な隙間が測定結果と差がある場合の補正値。\n"
+            "測定結果に対して何秒多いか（+）少ないか（−）を入力して補正適用"
         )
-        self.b_cancel = QtWidgets.QPushButton("中止")
-        self.b_cancel.setEnabled(False)
-        self.b_take = QtWidgets.QPushButton("手動取込")
-        self.b_take.setEnabled(False)
-        self.b_undo = QtWidgets.QPushButton("1点戻る")
-        self.b_undo.setEnabled(False)
-        b_start.clicked.connect(self.start)
-        self.b_auto.clicked.connect(self.auto_start)
-        self.b_cancel.clicked.connect(self.cancel)
-        self.b_take.clicked.connect(self.take_manual)
-        self.b_undo.clicked.connect(self.undo)
-        row_ops.addStretch(1)
-        row_ops.addWidget(b_start)
-        row_ops.addWidget(self.b_auto)
-        row_ops.addWidget(self.b_cancel)
-        row_ops.addWidget(self.b_take)
-        row_ops.addWidget(self.b_undo)
+        self.b_corr = QtWidgets.QPushButton("補正適用")
+        self.b_corr.setEnabled(False)
+        self.b_corr.clicked.connect(self.apply_correction)
+        self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
+        self.box_blcorr, self.l_blcorr = field_box(
+            "バックラッシ補正", self.e_blcorr, self.b_corr)
 
-        # --- 評価範囲（傾斜分割のみ。客先要求の部分抜き出し評価）---
-        row_ranges = QtWidgets.QHBoxLayout()
+        # 評価範囲1/2（傾斜分割のみ。客先要求の部分抜き出し評価）
         self.c_r1 = QtWidgets.QCheckBox("評価範囲1")
         self.e_r1s = QtWidgets.QDoubleSpinBox()
         self.e_r1e = QtWidgets.QDoubleSpinBox()
@@ -1327,42 +1368,83 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_r1e.setValue(90.0)
         self.e_r2s.setValue(-90.0)
         self.e_r2e.setValue(0.0)
-        self.range_widgets = []
-        for w in (self.c_r1, QtWidgets.QLabel("開始"), self.e_r1s,
-                  QtWidgets.QLabel("終了"), self.e_r1e,
-                  self.c_r2, QtWidgets.QLabel("開始"), self.e_r2s,
-                  QtWidgets.QLabel("終了"), self.e_r2e):
-            row_ranges.addWidget(w)
-            self.range_widgets.append(w)
-        row_ranges.addStretch(1)
+        self.box_ranges = QtWidgets.QWidget()
+        ranges_grid = QtWidgets.QGridLayout(self.box_ranges)
+        ranges_grid.setContentsMargins(0, 0, 0, 0)
+        ranges_grid.addWidget(self.c_r1, 0, 0)
+        ranges_grid.addWidget(QtWidgets.QLabel("開始"), 0, 1)
+        ranges_grid.addWidget(self.e_r1s, 0, 2)
+        ranges_grid.addWidget(QtWidgets.QLabel("終了"), 0, 3)
+        ranges_grid.addWidget(self.e_r1e, 0, 4)
+        ranges_grid.addWidget(self.c_r2, 1, 0)
+        ranges_grid.addWidget(QtWidgets.QLabel("開始"), 1, 1)
+        ranges_grid.addWidget(self.e_r2s, 1, 2)
+        ranges_grid.addWidget(QtWidgets.QLabel("終了"), 1, 3)
+        ranges_grid.addWidget(self.e_r2e, 1, 4)
+        self.range_widgets = [self.box_ranges]  # 後方互換（未使用）
         for check in (self.c_r1, self.c_r2):
             check.toggled.connect(self.refresh_results)
         for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
             spin.valueChanged.connect(self.refresh_results)
 
-        # --- 2段目: 測定情報（取込開始の必須項目）とファイル操作 ---
-        row2 = QtWidgets.QHBoxLayout()
-        self.e_model = QtWidgets.QLineEdit()
-        self.e_model.setPlaceholderText("例: RWE-200")
-        self.e_model.setMaximumWidth(130)
-        self.e_machine = QtWidgets.QLineEdit()
-        self.e_machine.setPlaceholderText("例: 12345")
-        self.e_machine.setMaximumWidth(110)
-        self.e_date = QtWidgets.QDateEdit(QtCore.QDate.currentDate())
-        self.e_date.setDisplayFormat("yyyy-MM-dd")
-        self.e_date.setCalendarPopup(True)
-        self.e_operator = QtWidgets.QLineEdit()
-        self.e_operator.setPlaceholderText("測定者")
-        self.e_operator.setMaximumWidth(110)
-        self.e_temp = QtWidgets.QLineEdit()
-        self.e_temp.setPlaceholderText("例: 23.5")
-        self.e_temp.setMaximumWidth(70)
-        self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
-        self.b_temp = QtWidgets.QPushButton("取得")
-        self.b_temp.setMaximumWidth(44)
-        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得"
-                               "（settings.jsonのswitchbot_token等を設定）")
-        self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
+        self.e_comment = QtWidgets.QLineEdit()
+        self.e_comment.setPlaceholderText("コメント（任意。セーブ時に保存される）")
+
+        cond_group = QtWidgets.QGroupBox("測定条件")
+        cond_v = QtWidgets.QVBoxLayout(cond_group)
+        cond_v.setSpacing(5)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        lbl_mode = QtWidgets.QLabel("モード")
+        lbl_mode.setMinimumWidth(104)
+        mode_row.addWidget(lbl_mode)
+        mode_row.addWidget(self.mode_combo, 1)
+        cond_v.addLayout(mode_row)
+        for box in (self.box_wstart, self.box_wend, self.box_wheel,
+                    self.box_worm, self.box_range, self.box_start,
+                    self.box_blocks, self.box_repeats, self.box_rstart,
+                    self.box_rend, self.box_evald, self.box_blcorr,
+                    self.box_ranges):
+            cond_v.addWidget(box)
+        comment_row = QtWidgets.QHBoxLayout()
+        comment_row.setContentsMargins(0, 0, 0, 0)
+        lbl_comment = QtWidgets.QLabel("コメント")
+        lbl_comment.setMinimumWidth(104)
+        comment_row.addWidget(lbl_comment)
+        comment_row.addWidget(self.e_comment, 1)
+        cond_v.addLayout(comment_row)
+
+        # ===== 操作グループ（取込のメイン操作）=====
+        self.b_start = QtWidgets.QPushButton("取込開始")
+        self.b_start.setObjectName("primary")
+        self.b_auto = QtWidgets.QPushButton("自動測定")
+        self.b_auto.setObjectName("primary")
+        self.b_auto.setToolTip(
+            "取込開始→SwitchBotで機械を起動→完了後に傾き判定→NGなら自動で再測定"
+        )
+        self.b_cancel = QtWidgets.QPushButton("中止")
+        self.b_cancel.setEnabled(False)
+        self.b_take = QtWidgets.QPushButton("手動取込")
+        self.b_take.setEnabled(False)
+        self.b_undo = QtWidgets.QPushButton("1点戻る")
+        self.b_undo.setEnabled(False)
+        self.b_start.clicked.connect(self.start)
+        self.b_auto.clicked.connect(self.auto_start)
+        self.b_cancel.clicked.connect(self.cancel)
+        self.b_take.clicked.connect(self.take_manual)
+        self.b_undo.clicked.connect(self.undo)
+        ops_group = QtWidgets.QGroupBox("操作")
+        ops_v = QtWidgets.QVBoxLayout(ops_group)
+        primary_row = QtWidgets.QHBoxLayout()
+        primary_row.addWidget(self.b_start, 1)
+        primary_row.addWidget(self.b_auto, 1)
+        ops_v.addLayout(primary_row)
+        sub_row = QtWidgets.QHBoxLayout()
+        for b in (self.b_cancel, self.b_take, self.b_undo):
+            sub_row.addWidget(b, 1)
+        ops_v.addLayout(sub_row)
+
+        # ===== 上部ツールバー（ファイル/データ操作）=====
         self.b_save = QtWidgets.QPushButton("セーブ")
         self.b_save.setEnabled(False)
         self.b_print = QtWidgets.QPushButton("印刷")
@@ -1385,72 +1467,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_print.clicked.connect(self.print_report)
         b_load.clicked.connect(self.load)
         b_settings.clicked.connect(self.open_settings)
-        for widget, label in [
-            (self.e_model, "型式"),
-            (self.e_machine, "機番"),
-            (self.e_date, "日付"),
-            (self.e_operator, "名前"),
-            (self.e_temp, "測定温度[°C]"),
-        ]:
-            row2.addWidget(QtWidgets.QLabel(label))
-            row2.addWidget(widget)
-        row2.addWidget(self.b_temp)
-        row2.addStretch(1)
-        row2.addWidget(self.b_save)
-        row2.addWidget(self.b_print)
-        row2.addWidget(self.b_raw)
-        row2.addWidget(self.b_past)
-        row2.addWidget(self.b_analyze)
-        row2.addWidget(self.b_cond)
-        row2.addWidget(self.b_program)
-        row2.addWidget(b_load)
-        row2.addWidget(b_settings)
+        toolbar = QtWidgets.QToolBar("操作")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
+        for b in (self.b_save, self.b_print, b_load):
+            toolbar.addWidget(b)
+        toolbar.addSeparator()
+        for b in (self.b_raw, self.b_past, self.b_analyze):
+            toolbar.addWidget(b)
+        toolbar.addSeparator()
+        for b in (self.b_cond, self.b_program):
+            toolbar.addWidget(b)
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                             QtWidgets.QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+        toolbar.addWidget(b_settings)
 
-        # --- 3段目: コメントとバックラッシ手動補正 ---
-        row3 = QtWidgets.QHBoxLayout()
-        self.e_comment = QtWidgets.QLineEdit()
-        self.e_comment.setPlaceholderText("コメント（任意。セーブ時に保存される）")
-        self.e_blcorr = QtWidgets.QDoubleSpinBox()
-        self.e_blcorr.setRange(-999.0, 999.0)
-        self.e_blcorr.setDecimals(2)
-        self.e_blcorr.setSuffix(' "')
-        self.e_blcorr.setToolTip(
-            "実際のメカ的な隙間が測定結果と差がある場合の補正値。\n"
-            "測定結果に対して何秒多いか（+）少ないか（−）を入力して補正適用"
-        )
-        self.b_corr = QtWidgets.QPushButton("補正適用")
-        self.b_corr.setEnabled(False)
-        self.b_corr.clicked.connect(self.apply_correction)
-        self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
-        self.l_blcorr = QtWidgets.QLabel("バックラッシ補正")
-        # 主点評価: 測定の等分数より粗い格子で精度を評価し直す（例 72等分測定→12等分評価）
-        self.e_evald = QtWidgets.QSpinBox()
-        self.e_evald.setRange(0, 720)
-        self.e_evald.setSpecialValueText("なし")
-        self.e_evald.setSuffix(" 等分")
-        self.e_evald.valueChanged.connect(self.refresh_results)
-        self.l_evald = QtWidgets.QLabel("主点評価")
-        row3.addWidget(QtWidgets.QLabel("コメント"))
-        row3.addWidget(self.e_comment, 1)
-        row3.addWidget(self.l_evald)
-        row3.addWidget(self.e_evald)
-        row3.addWidget(self.l_blcorr)
-        row3.addWidget(self.e_blcorr)
-        row3.addWidget(self.b_corr)
-
-        # --- ガイドと受信値・データ数 ---
+        # ===== ガイドと受信値・データ数 =====
         self.guide = QtWidgets.QLabel("―")
-        self.guide.setStyleSheet("font-size:22px; font-family:monospace; padding:4px;")
+        self.guide.setObjectName("guide")
+        self.guide.setAlignment(QtCore.Qt.AlignCenter)
+        self.guide.setStyleSheet("padding:6px;")
         self.live = QtWidgets.QLabel("")
-        self.live.setStyleSheet("font-size:15px; color:#666; padding:2px;")
+        self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = QtWidgets.QLabel("")
-        self.counts.setStyleSheet("font-size:15px; color:#444; padding:2px;")
+        self.counts.setStyleSheet("color:#475569; padding:2px;")
         live_row = QtWidgets.QHBoxLayout()
         live_row.addWidget(self.live)
         live_row.addStretch(1)
         live_row.addWidget(self.counts)
 
-        # --- グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ） ---
+        # ===== グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ）=====
         self.plot_wheel = pg.PlotWidget(title="ホイール")
         self.plot_worm = pg.PlotWidget(title="ウォーム")
         for plot in (self.plot_wheel, self.plot_worm):
@@ -1463,37 +1512,59 @@ class MainWindow(QtWidgets.QMainWindow):
             for axis_name in ("left", "bottom"):
                 plot.getAxis(axis_name).enableAutoSIPrefix(False)
         self.curves = {}
-        plots = QtWidgets.QHBoxLayout()
+        plots_widget = QtWidgets.QWidget()
+        plots = QtWidgets.QHBoxLayout(plots_widget)
+        plots.setContentsMargins(0, 0, 0, 0)
         plots.addWidget(self.plot_wheel, 7)
         plots.addWidget(self.plot_worm, 3)
 
-        # --- 結果表（左: 系列/ブロックごとの指標 / 右: バックラッシ・判定など） ---
+        # ===== 結果表（左: 系列/ブロックごとの指標 / 右: バックラッシ・判定など）=====
         self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
         self.table_series.horizontalHeader().setStretchLastSection(True)
         self.table_series.verticalHeader().setVisible(False)
-        self.table_series.setMaximumHeight(190)
+        self.table_series.setMaximumHeight(210)
         self.table_misc = QtWidgets.QTableWidget(0, 2)
         self.table_misc.setHorizontalHeaderLabels(["項目", "値"])
         self.table_misc.horizontalHeader().setStretchLastSection(True)
         self.table_misc.verticalHeader().setVisible(False)
-        self.table_misc.setMaximumHeight(190)
-        tables = QtWidgets.QHBoxLayout()
+        self.table_misc.setMaximumHeight(210)
+        tables_widget = QtWidgets.QWidget()
+        tables = QtWidgets.QHBoxLayout(tables_widget)
+        tables.setContentsMargins(0, 0, 0, 0)
         tables.addWidget(self.table_series, 5)
         tables.addWidget(self.table_misc, 4)
 
+        # ===== 全体レイアウト: 左サイド（入力）＋右メイン（グラフ・結果）=====
+        side = QtWidgets.QWidget()
+        side_v = QtWidgets.QVBoxLayout(side)
+        side_v.setContentsMargins(0, 0, 0, 0)
+        side_v.addWidget(info_group)
+        side_v.addWidget(cond_group)
+        side_v.addWidget(ops_group)
+        side_v.addStretch(1)
+        side_scroll = QtWidgets.QScrollArea()
+        side_scroll.setWidget(side)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        side_scroll.setMinimumWidth(330)
+        side_scroll.setMaximumWidth(380)
+
+        right = QtWidgets.QWidget()
+        right_v = QtWidgets.QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.addWidget(self.guide)
+        right_v.addWidget(plots_widget, 1)
+        right_v.addLayout(live_row)
+        right_v.addWidget(tables_widget)
+
         container = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(container)
-        v.addLayout(row1)
-        v.addLayout(row_ranges)
-        v.addLayout(row2)
-        v.addLayout(row3)
-        v.addLayout(row_ops)
-        v.addWidget(self.guide)
-        v.addLayout(live_row)
-        v.addLayout(plots, 1)
-        v.addLayout(tables)
+        root = QtWidgets.QHBoxLayout(container)
+        root.addWidget(side_scroll)
+        root.addWidget(right, 1)
         self.setCentralWidget(container)
+        self.apply_ui_fonts()
 
         # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
         self.profile_combo = QtWidgets.QComboBox()
@@ -1715,6 +1786,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_analysis(self):
         AnalysisDialog(self).exec()
 
+    def apply_ui_fonts(self):
+        """基準フォントサイズに合わせて、強調表示（ガイド・主要ボタン等）を拡大する。
+
+        QSSではなくアプリのフォント(pt)を基準にするので、設定の文字サイズに追従する。
+        """
+        app = QtWidgets.QApplication.instance()
+        base = app.font().pointSize() if app else DEFAULT_FONT_PT
+        if base <= 0:
+            base = DEFAULT_FONT_PT
+        guide_font = QtGui.QFont("monospace")
+        guide_font.setPointSize(base + 12)
+        guide_font.setBold(True)
+        self.guide.setFont(guide_font)
+        for button in (self.b_start, self.b_auto):
+            bf = button.font()
+            bf.setPointSize(base + 3)
+            bf.setBold(True)
+            button.setFont(bf)
+        for label in (self.live, self.counts):
+            lf = label.font()
+            lf.setPointSize(max(base - 1, 8))
+            label.setFont(lf)
+
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う完全版）。
 
@@ -1857,21 +1951,15 @@ class MainWindow(QtWidgets.QMainWindow):
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
         show_division = not is_repeat   # 分割系（単独 or 合体）で分割入力を出す
         show_repeat_params = is_repeat or is_combined
-        for w in (self.l_wstart, self.e_wstart, self.l_wend, self.e_wend):
+        for w in (self.box_wstart, self.box_wend):
             w.setVisible(is_tilt)
-        for w in (
-            self.l_worm, self.e_worm, self.l_range, self.e_range, self.l_start, self.e_start,
-            self.l_wheel, self.e_wheel,
-        ):
+        for w in (self.box_worm, self.box_range, self.box_start, self.box_wheel):
             w.setVisible(show_division)
-        for w in (self.l_blocks, self.e_blocks, self.l_repeats, self.e_repeats,
-                  self.l_rstart, self.e_rstart, self.l_rend, self.e_rend):
+        for w in (self.box_blocks, self.box_repeats, self.box_rstart, self.box_rend):
             w.setVisible(show_repeat_params)
-        for w in (self.l_blcorr, self.e_blcorr, self.b_corr,
-                  self.l_evald, self.e_evald):
+        for w in (self.box_blcorr, self.box_evald):
             w.setVisible(show_division)
-        for w in self.range_widgets:
-            w.setVisible(is_tilt and show_division)
+        self.box_ranges.setVisible(is_tilt and show_division)
         self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
         self.plot_worm.setVisible(show_division)
         self.plot_wheel.setTitle(
@@ -2234,8 +2322,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # 条件CSVの場所が変わった可能性があるので読み直す
         self.reload_masters()
-        # テーマを即時反映
-        apply_theme(QtWidgets.QApplication.instance(), self.settings.get("ui_theme"))
+        # テーマ・文字サイズを即時反映
+        app = QtWidgets.QApplication.instance()
+        apply_font(app, self.settings.get("ui_font_pt"))
+        apply_theme(app, self.settings.get("ui_theme"))
+        self.apply_ui_fonts()
         if not self.dev.dummy:
             self.dev.close()
             self.dev = ND287Device(
@@ -3321,6 +3412,7 @@ def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     import sys
 
     app = QtWidgets.QApplication(sys.argv)
+    apply_font(app, settings.get("ui_font_pt", DEFAULT_FONT_PT))
     apply_theme(app, settings.get("ui_theme", DEFAULT_THEME))
     win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)
     win.show()

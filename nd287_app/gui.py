@@ -53,10 +53,12 @@ from .export import (
     load_measurement,
     misc_rows,
     repeat_result_rows,
+    result_rows,
     sanitize_filename,
     save_csv,
     save_repeat_csv,
 )
+from . import excel_export, report
 from .nd287 import ND287Device, deg_to_dms, scan_report
 from .switchbot import (
     DEFAULT_PATTERNS,
@@ -640,16 +642,44 @@ class PastDataDialog(QtWidgets.QDialog):
         layout.addWidget(self.table, 1)
 
         buttons = QtWidgets.QHBoxLayout()
+        b_csv = QtWidgets.QPushButton("CSV出力")
+        b_csv.setToolTip("一覧表をCSV(Excelで開ける)で保存する")
         b_load = QtWidgets.QPushButton("選択をロード")
         b_close = QtWidgets.QPushButton("閉じる")
+        b_csv.clicked.connect(self.export_csv)
         b_load.clicked.connect(self.load_selected)
         b_close.clicked.connect(self.accept)
+        buttons.addWidget(b_csv)
         buttons.addStretch(1)
         buttons.addWidget(b_load)
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
         self._paths = []
         self.reload()
+
+    def export_csv(self):
+        if self.table.rowCount() == 0:
+            self.win.statusBar().showMessage("出力するデータがありません")
+            return
+        from datetime import datetime
+        default = str(resolve_save_root(self.win.settings)
+                      / f"過去データ一覧_{datetime.now():%Y%m%d_%H%M}.csv")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "CSVに保存", default, "CSVファイル (*.csv)")
+        if not path:
+            return
+        rows = []
+        for i in range(self.table.rowCount()):
+            rows.append([
+                (self.table.item(i, j).text() if self.table.item(i, j) else "")
+                for j in range(self.table.columnCount())
+            ])
+        try:
+            report.write_table_csv(path, list(self.COLUMNS), rows)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "CSV出力", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"CSV出力: {path}")
 
     def reload(self):
         from .export import MODE_KEY, load_measurement
@@ -717,6 +747,383 @@ class PastDataDialog(QtWidgets.QDialog):
             return
         self.win.load_path(str(self._paths[row]))
         self.accept()
+
+
+class AnalysisDialog(QtWidgets.QDialog):
+    """分析画面。
+
+    「横断比較」タブ … 保存先の過去データを型式/件数で絞り、各精度PP・
+        バックラッシ等を一覧表＋棒グラフで比較する。
+    「1件詳細」タブ … 現在表示中の測定を大きいグラフ＋全指標で見る。
+    どちらも CSV / Excel(.xlsx・グラフ入り) で出力でき、印刷もできる。
+    """
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("分析")
+        self.resize(1040, 720)
+        self.records = []
+        self.headers = []
+        self.rows = []
+        self.metric_cols = []
+        self.single_result_rows = []
+        self.single_series = None
+        self._models_loaded = False
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._build_compare_tab(), "横断比較")
+        tabs.addTab(self._build_single_tab(), "1件詳細")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(tabs)
+
+        self.reload_compare()
+        self.load_single()
+
+    # ----- 共通 -----
+
+    def _default_name(self, kind, ext):
+        from datetime import datetime
+        root = resolve_save_root(self.win.settings)
+        return str(Path(root) / f"{kind}_{datetime.now():%Y%m%d_%H%M}.{ext}")
+
+    @staticmethod
+    def _fill_table(table, headers, rows):
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            for j, text in enumerate(row):
+                item = QtWidgets.QTableWidgetItem(str(text))
+                if headers[j] == "判定" and str(text).startswith("NG"):
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                table.setItem(i, j, item)
+        table.resizeColumnsToContents()
+
+    @staticmethod
+    def _fill_kv_table(table, rows):
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["項目", "値"])
+        table.setRowCount(len(rows))
+        for i, (item, value) in enumerate(rows):
+            table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(item)))
+            cell = QtWidgets.QTableWidgetItem(str(value))
+            if str(value).startswith("NG"):
+                cell.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+            table.setItem(i, 1, cell)
+        table.resizeColumnsToContents()
+
+    # ----- 横断比較タブ -----
+
+    def _build_compare_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("型式"))
+        self.cmb_model = QtWidgets.QComboBox()
+        self.cmb_model.addItem("（すべて）", "")
+        self.cmb_model.currentIndexChanged.connect(self.reload_compare)
+        top.addWidget(self.cmb_model)
+        top.addWidget(QtWidgets.QLabel("直近"))
+        self.sp_count = QtWidgets.QSpinBox()
+        self.sp_count.setRange(1, 1000)
+        self.sp_count.setValue(int(self.win.settings.get("recent_count") or 10))
+        self.sp_count.setSuffix(" 件")
+        self.sp_count.valueChanged.connect(self.reload_compare)
+        top.addWidget(self.sp_count)
+        top.addWidget(QtWidgets.QLabel("グラフ指標"))
+        self.cmb_metric = QtWidgets.QComboBox()
+        self.cmb_metric.currentIndexChanged.connect(self.update_compare_plot)
+        top.addWidget(self.cmb_metric, 1)
+        b_refresh = QtWidgets.QPushButton("更新")
+        b_refresh.clicked.connect(self.reload_compare)
+        top.addWidget(b_refresh)
+        v.addLayout(top)
+
+        self.cmp_table = QtWidgets.QTableWidget(0, 0)
+        self.cmp_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self.cmp_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        v.addWidget(self.cmp_table, 3)
+
+        self.cmp_plot = pg.PlotWidget()
+        self.cmp_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.cmp_plot.setLabel("left", "値", units='"')
+        self.cmp_plot.getAxis("left").enableAutoSIPrefix(False)
+        v.addWidget(self.cmp_plot, 2)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        for label, slot in (("CSV出力", self.export_compare_csv),
+                            ("Excel出力", self.export_compare_xlsx),
+                            ("印刷", self.print_compare)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        v.addLayout(btns)
+        return w
+
+    def reload_compare(self, *args):
+        root = resolve_save_root(self.win.settings)
+        recent = self.sp_count.value()
+        if not self._models_loaded:
+            # 型式プルダウンを一度だけ作る（保存先の全データから型式を集める）
+            self._models_loaded = True
+            allrecs = report.scan_measurements(root, recent=max(recent, 300))
+            self.cmb_model.blockSignals(True)
+            for m in report.distinct_models(allrecs):
+                self.cmb_model.addItem(m, m)
+            self.cmb_model.blockSignals(False)
+        model = self.cmb_model.currentData() or None
+        self.records = report.scan_measurements(root, recent=recent, model=model)
+        self.metric_cols = report.available_metrics(self.records)
+        self.headers, self.rows = report.build_comparison_table(
+            self.records, self.metric_cols)
+        self._fill_table(self.cmp_table, self.headers, self.rows)
+        cur = self.cmb_metric.currentText()
+        self.cmb_metric.blockSignals(True)
+        self.cmb_metric.clear()
+        self.cmb_metric.addItems(self.metric_cols)
+        idx = self.cmb_metric.findText(cur)
+        if idx >= 0:
+            self.cmb_metric.setCurrentIndex(idx)
+        self.cmb_metric.blockSignals(False)
+        self.update_compare_plot()
+
+    def _compare_series(self):
+        """選択中の指標について (機番ラベル, 値) を返す"""
+        metric = self.cmb_metric.currentText()
+        labels, values = [], []
+        if metric:
+            for r in self.records:
+                v = r["metrics"].get(metric)
+                if v is None:
+                    continue
+                labels.append(r.get("機番") or r.get("ファイル"))
+                values.append(float(v))
+        return metric, labels, values
+
+    def update_compare_plot(self, *args):
+        self.cmp_plot.clear()
+        metric, labels, values = self._compare_series()
+        if not values:
+            return
+        x = list(range(len(values)))
+        self.cmp_plot.addItem(
+            pg.BarGraphItem(x=x, height=values, width=0.6, brush="#1f77b4"))
+        self.cmp_plot.getAxis("bottom").setTicks([list(zip(x, labels))])
+        self.cmp_plot.setTitle(metric)
+
+    def export_compare_csv(self):
+        if not self.rows:
+            self.win.statusBar().showMessage("出力するデータがありません")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "CSVに保存", self._default_name("横断比較", "csv"),
+            "CSVファイル (*.csv)")
+        if not path:
+            return
+        try:
+            report.write_table_csv(path, self.headers, self.rows)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "CSV出力", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"CSV出力: {path}")
+
+    def export_compare_xlsx(self):
+        if not self.rows:
+            self.win.statusBar().showMessage("出力するデータがありません")
+            return
+        if not excel_export.HAVE_OPENPYXL:
+            QtWidgets.QMessageBox.warning(
+                self, "Excel出力", "openpyxl が見つかりません（pip install openpyxl）")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Excelに保存", self._default_name("横断比較", "xlsx"),
+            "Excelブック (*.xlsx)")
+        if not path:
+            return
+        metric = self.cmb_metric.currentText()
+        chart = None
+        if metric in self.headers and "機番" in self.headers:
+            chart = dict(type="bar", title=metric,
+                         cat_col=self.headers.index("機番"),
+                         val_cols=[self.headers.index(metric)],
+                         x_title="機番", y_title="秒")
+        try:
+            excel_export.write_xlsx(path, [dict(
+                name="横断比較", headers=self.headers, rows=self.rows, chart=chart)])
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Excel出力", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"Excel出力: {path}")
+
+    def _compare_plot_image(self):
+        metric, labels, values = self._compare_series()
+        if not values:
+            return None
+        plot = pg.PlotWidget(title=metric)
+        plot.resize(1000, 360)
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        plot.getAxis("left").enableAutoSIPrefix(False)
+        x = list(range(len(values)))
+        plot.addItem(pg.BarGraphItem(x=x, height=values, width=0.6, brush="#1f77b4"))
+        plot.getAxis("bottom").setTicks([list(zip(x, labels))])
+        image = plot.grab().toImage()
+        plot.deleteLater()
+        return image
+
+    def _compare_html(self, with_image):
+        head = "".join(
+            f"<th style='border:1px solid #999;padding:1px 4px;'>{h}</th>"
+            for h in self.headers)
+        body = ""
+        for row in self.rows:
+            body += "<tr>" + "".join(
+                f"<td style='border:1px solid #999;padding:1px 4px;'>{c}</td>"
+                for c in row) + "</tr>"
+        img = "<p><img src='cmp.png' width='1000'></p>" if with_image else ""
+        title = self.cmb_model.currentText()
+        return (f"<h3>過去データ横断比較（{title}）</h3>{img}"
+                f"<table style='font-size:7pt;' cellspacing='0'>"
+                f"<tr>{head}</tr>{body}</table>")
+
+    def print_compare(self):
+        if not self.rows:
+            self.win.statusBar().showMessage("印刷するデータがありません")
+            return
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageOrientation(QtGui.QPageLayout.Landscape)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("横断比較の印刷")
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        document = QtGui.QTextDocument()
+        image = self._compare_plot_image()
+        if image is not None:
+            document.addResource(QtGui.QTextDocument.ImageResource,
+                                 QtCore.QUrl("cmp.png"), image)
+        document.setHtml(self._compare_html(image is not None))
+        document.print_(printer)
+        self.win.statusBar().showMessage("印刷しました")
+
+    # ----- 1件詳細タブ -----
+
+    def _build_single_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        self.single_meta = QtWidgets.QLabel("")
+        self.single_meta.setStyleSheet("font-weight:bold;")
+        self.single_meta.setWordWrap(True)
+        v.addWidget(self.single_meta)
+        self.single_plot = pg.PlotWidget()
+        self.single_plot.addLegend(offset=(10, 10))
+        self.single_plot.setLabel("bottom", "指令角度", units="°")
+        self.single_plot.setLabel("left", "偏差", units='"')
+        self.single_plot.showGrid(x=True, y=True, alpha=0.3)
+        for axis in ("left", "bottom"):
+            self.single_plot.getAxis(axis).enableAutoSIPrefix(False)
+        v.addWidget(self.single_plot, 3)
+        self.single_table = QtWidgets.QTableWidget(0, 2)
+        self.single_table.setHorizontalHeaderLabels(["項目", "値"])
+        self.single_table.horizontalHeader().setStretchLastSection(True)
+        self.single_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        v.addWidget(self.single_table, 2)
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        for label, slot in (("CSV出力", self.export_single_csv),
+                            ("Excel出力", self.export_single_xlsx),
+                            ("印刷", self.print_single)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        v.addLayout(btns)
+        return w
+
+    def load_single(self):
+        win = self.win
+        self.single_plot.clear()
+        self.single_result_rows = []
+        self.single_series = None
+        if not win.has_view_data():
+            self.single_meta.setText(
+                "表示中の測定データがありません（取込またはロード後に開いてください）")
+            self.single_table.setRowCount(0)
+            return
+        meta = [
+            ("型式", win.e_model.text()), ("機番", win.e_machine.text()),
+            ("日付", win.e_date.date().toString("yyyy/MM/dd")),
+            ("測定者", win.e_operator.text()),
+            ("測定温度", f"{win.e_temp.text()} °C"),
+            ("モード", win.current_mode()),
+        ]
+        self.single_meta.setText("　".join(f"{k}: {v}" for k, v in meta))
+        self.single_result_rows = win.current_result_rows()
+        self._fill_kv_table(self.single_table, self.single_result_rows)
+        series = win.current_series_devs()
+        self.single_series = series
+        if series:
+            for key, style in CURVE_STYLES.items():
+                ser = series.get(key)
+                if ser and ser[0]:
+                    self.single_plot.plot(
+                        ser[0], ser[1], name=SERIES_LABELS.get(key, key), **style)
+            self.single_plot.setTitle("偏差")
+        else:
+            self.single_plot.setTitle("再現性（数値は下表を参照）")
+
+    def export_single_csv(self):
+        if not self.single_result_rows:
+            self.win.statusBar().showMessage("出力するデータがありません")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "CSVに保存", self._default_name("1件詳細", "csv"),
+            "CSVファイル (*.csv)")
+        if not path:
+            return
+        try:
+            report.write_table_csv(path, ["項目", "値"], self.single_result_rows)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "CSV出力", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"CSV出力: {path}")
+
+    def export_single_xlsx(self):
+        if not self.single_result_rows:
+            self.win.statusBar().showMessage("出力するデータがありません")
+            return
+        if not excel_export.HAVE_OPENPYXL:
+            QtWidgets.QMessageBox.warning(
+                self, "Excel出力", "openpyxl が見つかりません（pip install openpyxl）")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Excelに保存", self._default_name("1件詳細", "xlsx"),
+            "Excelブック (*.xlsx)")
+        if not path:
+            return
+        sheets = [dict(name="指標", headers=["項目", "値"],
+                       rows=self.single_result_rows)]
+        if self.single_series:
+            h, r, val_cols = report.deviation_table(self.single_series)
+            if r:
+                sheets.append(dict(
+                    name="偏差", headers=h, rows=r,
+                    chart=dict(type="line", title="偏差", cat_col=0,
+                               val_cols=val_cols, x_title="指令角度[°]",
+                               y_title="秒")))
+        try:
+            excel_export.write_xlsx(path, sheets)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Excel出力", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"Excel出力: {path}")
+
+    def print_single(self):
+        if not self.win.has_view_data():
+            self.win.statusBar().showMessage("印刷するデータがありません")
+            return
+        self.win.print_report()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -915,6 +1322,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_raw.clicked.connect(self.show_raw_data)
         self.b_past = QtWidgets.QPushButton("過去データ")
         self.b_past.clicked.connect(self.show_past_data)
+        self.b_analyze = QtWidgets.QPushButton("分析")
+        self.b_analyze.setToolTip("過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷")
+        self.b_analyze.clicked.connect(self.show_analysis)
         self.b_cond = QtWidgets.QPushButton("条件編集")
         self.b_cond.clicked.connect(self.show_condition_editor)
         self.b_program = QtWidgets.QPushButton("プログラム作成")
@@ -941,6 +1351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row2.addWidget(self.b_print)
         row2.addWidget(self.b_raw)
         row2.addWidget(self.b_past)
+        row2.addWidget(self.b_analyze)
         row2.addWidget(self.b_cond)
         row2.addWidget(self.b_program)
         row2.addWidget(b_load)
@@ -1251,6 +1662,43 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_past_data(self):
         PastDataDialog(self).exec()
+
+    def show_analysis(self):
+        AnalysisDialog(self).exec()
+
+    def current_result_rows(self):
+        """表示中データの (項目, 値) 行（印刷・分析で使う完全版）。
+
+        分割系は系列指標＋バックラッシ＋温度規格判定＋真の最大最小＋
+        （複合なら）再現性。再現性単独は各ブロックの範囲。
+        """
+        if not self.has_view_data():
+            return []
+        if self.view_kind == "repeat":
+            rsum = repeatability_summary(self.rep_points, self.rep_data)
+            return list(repeat_result_rows(rsum))
+        summary, _ = summarize(self.data, self.applied_blcorr)
+        rows = list(result_rows(summary, self.current_judgements(summary)))
+        rows.extend(self.composite_backlash_rows())
+        rows.extend(self.main_grid_rows())
+        rows.extend(self.slope_judgement_rows(summary))
+        if self.is_tilt():
+            rows.extend(self.tilt_accuracy_rows())
+        if self.is_combined() and self.rep_data:
+            rows.append(("― 再現性 ―", ""))
+            rows.extend(repeat_result_rows(
+                repeatability_summary(self.rep_points, self.rep_data)))
+        return rows
+
+    def current_series_devs(self):
+        """表示中(分割)データの {系列: (指令角度list, 偏差list)}。
+
+        再現性モードやデータ無しのときは None。
+        """
+        if not self.has_view_data() or self.view_kind == "repeat":
+            return None
+        _, devs = summarize(self.data, self.applied_blcorr)
+        return {k: (t.tolist(), d.tolist()) for k, (t, d) in devs.items()}
 
     def refresh_master_refs(self):
         """型式に対応するマスタ参照だけ更新する（入力欄は書き換えない。ロード用）。

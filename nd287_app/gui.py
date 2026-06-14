@@ -26,6 +26,11 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+# グラフは白背景・濃い軸にする。黒背景だと印刷で黒インクを大量に消費するため。
+pg.setConfigOption("background", "w")
+pg.setConfigOption("foreground", "#222222")
+pg.setConfigOption("antialias", True)
+
 from .analysis import (
     band_for_temp,
     composite_backlash_minmax,
@@ -59,6 +64,7 @@ from .export import (
     save_repeat_csv,
 )
 from . import excel_export, report
+from .themes import DEFAULT_THEME, THEME_NAMES, apply_theme
 from .nd287 import ND287Device, deg_to_dms, scan_report
 from .switchbot import (
     DEFAULT_PATTERNS,
@@ -137,6 +143,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.e_parity.addItems(["E", "N", "O"])
         self.e_parity.setCurrentText(str(settings.get("parity", "E")))
 
+        self.e_theme = QtWidgets.QComboBox()
+        self.e_theme.addItems(THEME_NAMES)
+        self.e_theme.setCurrentText(str(settings.get("ui_theme", DEFAULT_THEME)))
+        self.e_theme.setToolTip("画面の見た目。OKですぐ反映される")
+
         root_row = QtWidgets.QHBoxLayout()
         self.e_root = QtWidgets.QLineEdit(str(settings.get("save_root", "測定データ")))
         b_browse = QtWidgets.QPushButton("参照...")
@@ -173,6 +184,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
+        form.addRow("画面テーマ", self.e_theme)
         form.addRow("測定データ保存先", root_row)
         form.addRow(".BS/.KS保存先（旧形式）", bs_row)
         form.addRow("測定条件CSV", self.e_conditions.row)
@@ -241,6 +253,7 @@ class SettingsDialog(QtWidgets.QDialog):
             port=self.e_port.text().strip() or "auto",
             baudrate=baud,
             parity=self.e_parity.currentText(),
+            ui_theme=self.e_theme.currentText(),
             save_root=self.e_root.text().strip() or "測定データ",
             bs_save_root=self.e_bs_root.text().strip(),
             conditions_csv=self.e_conditions.text().strip() or r"マスタ/測定条件.csv",
@@ -2221,6 +2234,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # 条件CSVの場所が変わった可能性があるので読み直す
         self.reload_masters()
+        # テーマを即時反映
+        apply_theme(QtWidgets.QApplication.instance(), self.settings.get("ui_theme"))
         if not self.dev.dummy:
             self.dev.close()
             self.dev = ND287Device(
@@ -3306,6 +3321,7 @@ def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     import sys
 
     app = QtWidgets.QApplication(sys.argv)
+    apply_theme(app, settings.get("ui_theme", DEFAULT_THEME))
     win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)
     win.show()
     sys.exit(app.exec())

@@ -32,6 +32,8 @@ DEFAULTS = dict(
     user_tilt_csv=r"マスタ/ユーザー傾斜条件.csv",
     # 過去データ閲覧の既定件数
     recent_count=10,
+    # 画面のテーマ（見た目）。themes.THEME_NAMES の名前。"システム"=OS既定
+    ui_theme="システム",
     # P補正（ピッチエラー補正表）の既定値
     p_interval=100000,   # 補正間隔（0.0001°単位。100000=10°）
     p_unit=0.001,        # 補正単位[°]

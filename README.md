@@ -315,11 +315,15 @@ app526リポジトリの xr20_tool（旧LabVIEWアプリを画面OCRで監視し
 - **自動測定ボタン**: 取込開始 → SwitchBot Bot（物理ボタン押しロボット）で機械の
   起動ボタンを押す → 測定完了 → **傾き判定**（マスタの傾きH/W規格）→
   NGなら**自動で再取込＋再起動**（auto_max_retries回まで、既定2回）
-- SwitchBot Botは **クラウドAPI**（switchbot_token/secret/device）と
-  **BLE直結**（switchbot_use_ble=true + switchbot_ble_mac、ハブ不要、要 pip install bleak）
-  の両対応。押しパターン（1回押し/2回押し等）は switchbot_patterns で定義
+- SwitchBot Botは **クラウドAPI**（トークン/シークレット/デバイスID）と
+  **BLE直結**（BLE使用 + BLE MAC、ハブ不要、要 pip install bleak）の両対応。
+  押し方（1回押し/2回押し（5秒/3秒間隔）/3回押し）も選べる
 - SwitchBot未設定でも自動測定は動く（物理押下だけスキップ＝機械は手動起動）
 - 中止ボタンで自動測定も停止
+
+**設定は「設定」画面の「自動測定・温度取得（SwitchBot）」欄**で行う：トークン・
+シークレット・温湿度計デバイスID（「デバイス一覧」ボタンでID確認可）・BLE直結の
+ON/BLE MAC/BLEパスワード・押し方・自動再測定の上限・押下までの待ち。
 
 ## Webモニタ（離れたPCから閲覧・再測定指示）
 
@@ -363,7 +367,8 @@ product-inspection の時間取りと Firestore 経由で連動する（`webapp_
 
 測定温度欄の「取得」ボタンで、SwitchBot温湿度計の現在温度を自動入力できる。
 SwitchBotアプリの開発者向けオプションでトークンとシークレットを取得し、
-settings.json に switchbot_token / switchbot_secret / switchbot_device を設定する。
+**「設定」画面の「自動測定・温度取得（SwitchBot）」欄**でトークン／シークレット／
+温湿度計デバイスIDを設定する（「デバイス一覧」ボタンでIDを確認できる）。
 
 ## 設定画面（ボーレート等）
 
@@ -376,6 +381,7 @@ settings.json に switchbot_token / switchbot_secret / switchbot_device を設�
 | パリティ | E | N / E / O |
 | 画面テーマ | ネイビー・コーポレート | 見た目の配色（ライト・ブルー/ネイビー・コーポレート/ティール・フラット/ダーク・スレート/システム）。OKで即反映 |
 | 文字サイズ | 13 pt | 画面全体の基準文字サイズ（7〜22pt）。OKで即反映 |
+| 自動測定・温度取得（SwitchBot） | — | トークン/シークレット/温湿度計ID・BLE直結(MAC/PW)・押し方(1〜3回押し)・自動再測定上限・押下までの待ち |
 | 測定データ保存先 | 測定データ | セーブ先ルート（相対ならアプリフォルダ基準） |
 | .BS/.KS保存先 | （検査表システムのフォルダ） | 旧形式の保存先。空にすると書かない |
 | 測定条件CSV | マスタ/測定条件.csv | 型式マスタ（回転分割の各条件） |

@@ -200,6 +200,55 @@ class SettingsDialog(QtWidgets.QDialog):
             "ユーザー傾斜条件CSVを選択",
         )
 
+        # SwitchBot（温度の自動取得＆自動測定の物理ボタン押し）
+        self.e_sb_token = QtWidgets.QLineEdit(str(settings.get("switchbot_token", "")))
+        self.e_sb_secret = QtWidgets.QLineEdit(str(settings.get("switchbot_secret", "")))
+        self.e_sb_secret.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.e_sb_device = QtWidgets.QLineEdit(str(settings.get("switchbot_device", "")))
+        self.e_sb_device.setToolTip("温度取得＝温湿度計のID。クラウドでBotを押す場合もここ")
+        self.b_sb_list = QtWidgets.QPushButton("デバイス一覧")
+        self.b_sb_list.setToolTip("トークン/シークレットからデバイスIDの一覧を取得する")
+        self.b_sb_list.clicked.connect(self.list_switchbot_devices)
+        dev_row = QtWidgets.QHBoxLayout()
+        dev_row.addWidget(self.e_sb_device)
+        dev_row.addWidget(self.b_sb_list)
+        self.c_sb_ble = QtWidgets.QCheckBox("Botを BLE で直接押す（ハブ不要・要bleak）")
+        self.c_sb_ble.setChecked(bool(settings.get("switchbot_use_ble", False)))
+        self.e_sb_mac = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_mac", "")))
+        self.e_sb_mac.setToolTip("Bot本体のBLE MACアドレス（BLE直結時）")
+        self.e_sb_pw = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_password", "")))
+        self.e_sb_pw.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.cmb_sb_pattern = QtWidgets.QComboBox()
+        patterns = list((settings.get("switchbot_patterns") or DEFAULT_PATTERNS).keys())
+        self.cmb_sb_pattern.addItems(patterns)
+        cur_pat = str(settings.get("switchbot_pattern_name") or "1回押し")
+        if cur_pat in patterns:
+            self.cmb_sb_pattern.setCurrentText(cur_pat)
+        self.cmb_sb_pattern.setToolTip("自動測定で機械を起動するときの押し回数・間隔")
+        self.sp_sb_retry = QtWidgets.QSpinBox()
+        self.sp_sb_retry.setRange(0, 9)
+        self.sp_sb_retry.setValue(int(settings.get("auto_max_retries", 2)))
+        self.sp_sb_retry.setSuffix(" 回")
+        self.sp_sb_retry.setToolTip("自動測定で傾きNGのとき自動で測り直す上限回数")
+        self.sp_sb_wait = QtWidgets.QDoubleSpinBox()
+        self.sp_sb_wait.setRange(0.0, 60.0)
+        self.sp_sb_wait.setDecimals(1)
+        self.sp_sb_wait.setValue(float(settings.get("auto_wait_before_press", 1.0)))
+        self.sp_sb_wait.setSuffix(" 秒")
+        self.sp_sb_wait.setToolTip("取込開始からSwitchBot押下までの待ち時間")
+
+        sb_group = QtWidgets.QGroupBox("自動測定・温度取得（SwitchBot）")
+        sb_form = QtWidgets.QFormLayout(sb_group)
+        sb_form.addRow("トークン", self.e_sb_token)
+        sb_form.addRow("シークレット", self.e_sb_secret)
+        sb_form.addRow("温湿度計デバイスID", dev_row)
+        sb_form.addRow(self.c_sb_ble)
+        sb_form.addRow("Bot BLE MAC", self.e_sb_mac)
+        sb_form.addRow("BLEパスワード", self.e_sb_pw)
+        sb_form.addRow("押し方（自動測定）", self.cmb_sb_pattern)
+        sb_form.addRow("自動再測定の上限", self.sp_sb_retry)
+        sb_form.addRow("押下までの待ち", self.sp_sb_wait)
+
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
@@ -211,6 +260,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("合否判定CSV", self.e_judgement.row)
         form.addRow("ユーザー回転条件CSV", self.e_user_rotary.row)
         form.addRow("ユーザー傾斜条件CSV", self.e_user_tilt.row)
+        form.addRow(sb_group)
 
         note = QtWidgets.QLabel(
             "相対パスはアプリフォルダ基準。温度別の合否規格（ホイール/ウォーム/総合）は"
@@ -250,6 +300,26 @@ class SettingsDialog(QtWidgets.QDialog):
         if path:
             edit.setText(path)
 
+    def list_switchbot_devices(self):
+        """入力中のトークン/シークレットでデバイスID一覧を取得して表示する。"""
+        from .switchbot import list_devices
+        token = self.e_sb_token.text().strip()
+        secret = self.e_sb_secret.text().strip()
+        if not (token and secret):
+            QtWidgets.QMessageBox.information(
+                self, "SwitchBot", "先にトークンとシークレットを入力してください")
+            return
+        try:
+            devices = list_devices(token, secret)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "SwitchBot", f"一覧取得に失敗:\n{e}")
+            return
+        lines = [f"{d.get('deviceName', '?')}  [{d.get('deviceType', '?')}]"
+                 f"  ID: {d.get('deviceId', '?')}" for d in devices]
+        QtWidgets.QMessageBox.information(
+            self, "SwitchBotデバイス一覧",
+            "\n".join(lines) or "デバイスが見つかりません")
+
     def browse_root(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(
             self, "保存先フォルダを選択", self.e_root.text()
@@ -283,6 +353,15 @@ class SettingsDialog(QtWidgets.QDialog):
             or r"マスタ/ユーザー回転条件.csv",
             user_tilt_csv=self.e_user_tilt.text().strip()
             or r"マスタ/ユーザー傾斜条件.csv",
+            switchbot_token=self.e_sb_token.text().strip(),
+            switchbot_secret=self.e_sb_secret.text().strip(),
+            switchbot_device=self.e_sb_device.text().strip(),
+            switchbot_use_ble=self.c_sb_ble.isChecked(),
+            switchbot_ble_mac=self.e_sb_mac.text().strip(),
+            switchbot_ble_password=self.e_sb_pw.text(),
+            switchbot_pattern_name=self.cmb_sb_pattern.currentText(),
+            auto_max_retries=self.sp_sb_retry.value(),
+            auto_wait_before_press=self.sp_sb_wait.value(),
         )
 
 
@@ -1373,13 +1452,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
         self.b_temp = QtWidgets.QPushButton("取得")
         self.b_temp.setMaximumWidth(46)
-        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を自動取得する"
-                               "（SwitchBot未設定のときは非表示）")
+        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得する"
+                               "（設定画面のSwitchBot欄で接続を設定）")
         self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
-        # 温度の自動取得はSwitchBotを設定したときだけ出す
-        self.b_temp.setVisible(bool(
-            str(self.settings.get("switchbot_token") or "").strip()
-            and str(self.settings.get("switchbot_device") or "").strip()))
         # 入力欄は短く（枠が無駄に伸びないように上限を付ける）
         self.e_model.setMaximumWidth(120)
         self.e_machine.setMaximumWidth(120)
@@ -3534,9 +3609,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not (token and secret and device):
             QtWidgets.QMessageBox.information(
                 self, "温度取得",
-                "SwitchBotが未設定です。settings.json に\n"
-                "switchbot_token / switchbot_secret / switchbot_device\n"
-                "を設定してください（SwitchBotアプリの開発者向けオプションで取得）",
+                "SwitchBotが未設定です。「設定」→「自動測定・温度取得（SwitchBot）」で\n"
+                "トークン / シークレット / 温湿度計デバイスID を設定してください\n"
+                "（値はSwitchBotアプリの開発者向けオプションで取得）",
             )
             return
         self.b_temp.setEnabled(False)

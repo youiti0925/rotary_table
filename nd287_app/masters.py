@@ -121,6 +121,12 @@ def load_masters(settings) -> dict:
     return dict(
         conditions=load_conditions(resolve("conditions_csv", "マスタ/測定条件.csv")),
         judgement=load_judgement(resolve("judgement_csv", "マスタ/合否判定.csv")),
+        user_rotary=load_user_conditions(
+            resolve("user_rotary_csv", "マスタ/ユーザー回転条件.csv"),
+            ROTARY_USER_FIELDS),
+        user_tilt=load_user_conditions(
+            resolve("user_tilt_csv", "マスタ/ユーザー傾斜条件.csv"),
+            TILT_USER_FIELDS),
     )
 
 
@@ -158,3 +164,89 @@ def formula_minmax(judge: dict, temp_c: float):
     spec_min = (judge.get("min_a") or 0.0) * temp_c + (judge.get("min_b") or 0.0)
     spec_max = (judge.get("max_a") or 0.0) * temp_c + judge["max_b"]
     return (spec_min, spec_max)
+
+
+# ──────────────────────────────────────────────
+#  ユーザー登録条件（提供CSVとは別。アプリから登録/編集する）
+#  回転と傾斜を別ファイルに分離 → 傾斜で回転の条件を誤用しない
+# ──────────────────────────────────────────────
+
+import csv as _csv
+
+ROTARY_USER_FIELDS = ["型式", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始"]
+TILT_USER_FIELDS = ["型式", "開始角度", "終了角度", "刻み",
+                    "ウォーム刻み", "ウォーム範囲", "ウォーム開始"]
+
+
+def _user_path(settings, key, default):
+    path = Path(str((settings or {}).get(key) or default))
+    if not path.is_absolute():
+        path = app_dir() / path
+    return path
+
+
+def load_user_conditions(path, fields) -> dict:
+    """ユーザー条件CSV → {型式(大文字): {列名: 値}}。無ければ空。"""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    rows = list(_csv.reader(io.StringIO(_read_text(path))))
+    if not rows:
+        return {}
+    header = [h.strip() for h in rows[0]]
+    out = {}
+    for row in rows[1:]:
+        if not row or not row[0].strip():
+            continue
+        rec = {}
+        for i, col in enumerate(header):
+            rec[col] = row[i].strip() if i < len(row) else ""
+        out[rec["型式"].upper()] = rec
+    return out
+
+
+def save_user_conditions(path, fields, records: dict):
+    """records（{型式大文字: {列: 値}}）をCSVに書き出す（utf-8-sig, Excel可）。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = _csv.writer(f)
+        w.writerow(fields)
+        for rec in sorted(records.values(), key=lambda r: r.get("型式", "")):
+            w.writerow([rec.get(col, "") for col in fields])
+
+
+def upsert_user_condition(path, fields, record: dict):
+    """1型式の条件を登録/更新する。"""
+    records = load_user_conditions(path, fields)
+    records[str(record["型式"]).upper()] = {col: str(record.get(col, "")) for col in fields}
+    save_user_conditions(path, fields, records)
+
+
+def delete_user_condition(path, fields, model: str):
+    records = load_user_conditions(path, fields)
+    if str(model).upper() in records:
+        del records[str(model).upper()]
+        save_user_conditions(path, fields, records)
+        return True
+    return False
+
+
+def user_condition_params(rec: dict, tilt: bool) -> dict:
+    """ユーザー条件レコード → アプリ設定値（数値）。"""
+    def num(key, default=0.0):
+        try:
+            return float(rec.get(key, "") or default)
+        except ValueError:
+            return default
+
+    params = {
+        "wheel_pitch": num("刻み" if tilt else "ホイール刻み", 10.0),
+        "worm_pitch": num("ウォーム刻み", 0.5),
+        "worm_range": num("ウォーム範囲", 5.0),
+        "worm_start": num("ウォーム開始", 0.0),
+    }
+    if tilt:
+        params["wheel_start"] = num("開始角度", -30.0)
+        params["wheel_end"] = num("終了角度", 110.0)
+    return params

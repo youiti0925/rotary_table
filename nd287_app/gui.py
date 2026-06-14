@@ -448,6 +448,226 @@ class ProgramDialog(QtWidgets.QDialog):
         QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
 
 
+class ConditionRegistryDialog(QtWidgets.QDialog):
+    """測定条件の登録/編集（回転・傾斜を別ファイルで管理）。
+
+    傾斜は傾斜専用ファイルに保存するので、回転の条件と混ざらない。
+    """
+
+    def __init__(self, win, tilt: bool):
+        super().__init__(win)
+        self.win = win
+        self.tilt = tilt
+        from .masters import (ROTARY_USER_FIELDS, TILT_USER_FIELDS)
+        self.fields = TILT_USER_FIELDS if tilt else ROTARY_USER_FIELDS
+        self.setWindowTitle("傾斜の条件登録/編集" if tilt else "回転の条件登録/編集")
+        self.resize(640, 460)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(
+            ("傾斜分割の測定条件を型式ごとに登録します（回転とは別ファイル）。"
+             if tilt else
+             "回転分割の測定条件を型式ごとに登録します（提供CSVより優先されます）。")))
+        self.table = QtWidgets.QTableWidget(0, len(self.fields))
+        self.table.setHorizontalHeaderLabels(self.fields)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        self.table.cellDoubleClicked.connect(self.load_selected_to_screen)
+        layout.addWidget(self.table)
+
+        buttons = QtWidgets.QHBoxLayout()
+        b_reg = QtWidgets.QPushButton("現在の画面条件で登録/更新")
+        b_del = QtWidgets.QPushButton("選択を削除")
+        b_load = QtWidgets.QPushButton("選択を画面へ")
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_reg.clicked.connect(self.register_current)
+        b_del.clicked.connect(self.delete_selected)
+        b_load.clicked.connect(self.load_selected_to_screen)
+        b_close.clicked.connect(self.accept)
+        buttons.addWidget(b_reg)
+        buttons.addWidget(b_del)
+        buttons.addWidget(b_load)
+        buttons.addStretch(1)
+        buttons.addWidget(b_close)
+        layout.addLayout(buttons)
+        self.reload()
+
+    def _path(self):
+        from .masters import _user_path
+        key = "user_tilt_csv" if self.tilt else "user_rotary_csv"
+        default = ("マスタ/ユーザー傾斜条件.csv" if self.tilt
+                   else "マスタ/ユーザー回転条件.csv")
+        return _user_path(self.win.settings, key, default)
+
+    def reload(self):
+        from .masters import load_user_conditions
+        records = load_user_conditions(self._path(), self.fields)
+        rows = sorted(records.values(), key=lambda r: r.get("型式", ""))
+        self.table.setRowCount(len(rows))
+        for i, rec in enumerate(rows):
+            for j, col in enumerate(self.fields):
+                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(str(rec.get(col, ""))))
+        self.table.resizeColumnsToContents()
+
+    def _current_record(self):
+        w = self.win
+        model = w.e_model.text().strip()
+        if not model:
+            return None
+        if self.tilt:
+            return {
+                "型式": model,
+                "開始角度": f"{w.e_wstart.value():g}", "終了角度": f"{w.e_wend.value():g}",
+                "刻み": f"{w.e_wheel.value():g}", "ウォーム刻み": f"{w.e_worm.value():g}",
+                "ウォーム範囲": f"{w.e_range.value():g}", "ウォーム開始": f"{w.e_start.value():g}",
+            }
+        return {
+            "型式": model, "ホイール刻み": f"{w.e_wheel.value():g}",
+            "ウォーム刻み": f"{w.e_worm.value():g}", "ウォーム範囲": f"{w.e_range.value():g}",
+            "ウォーム開始": f"{w.e_start.value():g}",
+        }
+
+    def register_current(self):
+        from .masters import upsert_user_condition
+        rec = self._current_record()
+        if not rec:
+            QtWidgets.QMessageBox.warning(self, "登録", "型式を入力してください")
+            return
+        upsert_user_condition(self._path(), self.fields, rec)
+        self.win.reload_masters()
+        self.reload()
+        self.win.statusBar().showMessage(f"{rec['型式']} の条件を登録しました")
+
+    def delete_selected(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        model = self.table.item(row, 0).text()
+        from .masters import delete_user_condition
+        if delete_user_condition(self._path(), self.fields, model):
+            self.win.reload_masters()
+            self.reload()
+            self.win.statusBar().showMessage(f"{model} の条件を削除しました")
+
+    def load_selected_to_screen(self, *args):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        self.win.e_model.setText(self.table.item(row, 0).text())
+        self.win.on_model_entered()
+
+
+class PastDataDialog(QtWidgets.QDialog):
+    """過去データの一覧（直近N件）。クリックでロードできる。"""
+
+    COLUMNS = ["日付", "型式", "機番", "名前", "モード", "主要条件", "判定", "ファイル"]
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("過去データ")
+        self.resize(900, 520)
+        layout = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("直近"))
+        self.e_count = QtWidgets.QSpinBox()
+        self.e_count.setRange(1, 500)
+        self.e_count.setValue(int(win.settings.get("recent_count") or 10))
+        self.e_count.setSuffix(" 件")
+        self.e_count.valueChanged.connect(self.reload)
+        top.addWidget(self.e_count)
+        b_refresh = QtWidgets.QPushButton("更新")
+        b_refresh.clicked.connect(self.reload)
+        top.addWidget(b_refresh)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        self.table = QtWidgets.QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        self.table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self.table.cellDoubleClicked.connect(self.load_selected)
+        layout.addWidget(self.table, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        b_load = QtWidgets.QPushButton("選択をロード")
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_load.clicked.connect(self.load_selected)
+        b_close.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(b_load)
+        buttons.addWidget(b_close)
+        layout.addLayout(buttons)
+        self._paths = []
+        self.reload()
+
+    def reload(self):
+        from .export import MODE_KEY, load_measurement
+        from .masters import _read_text  # noqa: F401 (未使用だが将来用)
+        root = resolve_save_root(self.win.settings)
+        files = []
+        try:
+            for p in Path(root).rglob("*.csv"):
+                if p.name.endswith("_再現.csv"):
+                    continue
+                files.append(p)
+        except Exception:
+            files = []
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        files = files[: self.e_count.value()]
+        self._paths = files
+        self.table.setRowCount(len(files))
+        for i, p in enumerate(files):
+            meta = {}
+            try:
+                meta, _kind, _payload = load_measurement(str(p))
+            except Exception:
+                pass
+            cond = self._condition_summary(meta)
+            cells = [
+                meta.get("日付", ""), meta.get("型式", ""), meta.get("機番", p.stem),
+                meta.get("名前", ""), meta.get(MODE_KEY, ""), cond,
+                self._judgement(p), p.name,
+            ]
+            for j, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(str(text))
+                if j == 6 and str(text).startswith("NG"):
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                self.table.setItem(i, j, item)
+        self.table.resizeColumnsToContents()
+
+    @staticmethod
+    def _condition_summary(meta):
+        parts = []
+        if meta.get("ホイール刻み[°]"):
+            parts.append(f"H{meta['ホイール刻み[°]']}°")
+        if meta.get("開始角度[°]"):
+            parts.append(f"{meta.get('開始角度[°]')}〜{meta.get('終了角度[°]', '')}°")
+        if meta.get("ウォーム刻み[°]"):
+            parts.append(f"W{meta['ウォーム刻み[°]']}×{meta.get('ウォーム範囲[°]', '')}°")
+        if meta.get("ブロック数"):
+            parts.append(f"{meta['ブロック数']}箇所×{meta.get('回数', '')}回")
+        return " ".join(parts)
+
+    def _judgement(self, path):
+        """保存CSVの結果サマリから判定（NGが1つでもあればNG）を拾う"""
+        try:
+            text = path.read_text(encoding="cp932", errors="ignore")
+        except Exception:
+            return ""
+        if "NG（" in text or "NG(" in text:
+            return "NG"
+        if "OK（" in text or "OK(" in text:
+            return "OK"
+        return ""
+
+    def load_selected(self, *args):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._paths):
+            return
+        self.win.load_path(str(self._paths[row]))
+        self.accept()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -642,6 +862,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_print.setEnabled(False)
         self.b_raw = QtWidgets.QPushButton("生データ")
         self.b_raw.clicked.connect(self.show_raw_data)
+        self.b_past = QtWidgets.QPushButton("過去データ")
+        self.b_past.clicked.connect(self.show_past_data)
+        self.b_cond = QtWidgets.QPushButton("条件編集")
+        self.b_cond.clicked.connect(self.show_condition_editor)
         self.b_program = QtWidgets.QPushButton("プログラム作成")
         self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
         self.b_program.clicked.connect(self.show_program_dialog)
@@ -665,6 +889,8 @@ class MainWindow(QtWidgets.QMainWindow):
         row2.addWidget(self.b_save)
         row2.addWidget(self.b_print)
         row2.addWidget(self.b_raw)
+        row2.addWidget(self.b_past)
+        row2.addWidget(self.b_cond)
         row2.addWidget(self.b_program)
         row2.addWidget(b_load)
         row2.addWidget(b_settings)
@@ -961,19 +1187,81 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 型式マスタ -----
 
+    def reload_masters(self):
+        """マスタCSV（提供＋ユーザー登録）を読み直す"""
+        try:
+            self.masters = load_masters(self.settings)
+        except Exception as e:
+            self.statusBar().showMessage(f"マスタ再読込に失敗: {e}")
+
+    def show_condition_editor(self):
+        """現在のモードに応じた条件登録/編集ダイアログを開く（回転/傾斜を分離）"""
+        ConditionRegistryDialog(self, tilt=self.is_tilt()).exec()
+
+    def show_past_data(self):
+        PastDataDialog(self).exec()
+
     def refresh_master_refs(self):
-        """型式に対応するマスタ参照だけ更新する（入力欄は書き換えない。ロード用）"""
+        """型式に対応するマスタ参照だけ更新する（入力欄は書き換えない。ロード用）。
+
+        傾斜系は回転マスタを参照しない（判定・測定順の誤用防止）。
+        """
         text = self.e_model.text().strip()
         if not self.masters:
+            return
+        if self.is_tilt():
+            self.master_cond = None
+            self.master_judge = None
             return
         self.master_cond = find_entry(self.masters["conditions"], text)
         self.master_judge = find_entry(self.masters["judgement"], text)
 
     def on_model_entered(self):
-        """型式が入力されたら測定条件・合否判定マスタを自動適用する"""
+        """型式が入力されたら測定条件・合否判定を自動適用する（モード別に厳密に分離）。
+
+        傾斜系モードは傾斜専用マスタのみを参照し、回転分割用の条件・温度規格は
+        一切使わない（誤用防止）。回転系・合体は ユーザー回転条件 → 提供測定条件 の順。
+        """
+        from .masters import user_condition_params
         text = self.e_model.text().strip()
         if not self.masters or not text:
             return
+        key = text.upper()
+
+        if self.is_tilt():
+            # ★傾斜：回転の測定条件・規格は絶対に使わない
+            self.master_cond = None
+            self.master_judge = None
+            rec = self.masters.get("user_tilt", {}).get(key)
+            if rec:
+                p = user_condition_params(rec, tilt=True)
+                self.e_wstart.setValue(p["wheel_start"])
+                self.e_wend.setValue(p["wheel_end"])
+                self.e_wheel.setValue(p["wheel_pitch"])
+                self.e_worm.setValue(p["worm_pitch"])
+                self.e_range.setValue(p["worm_range"])
+                self.e_start.setValue(p["worm_start"])
+                self.statusBar().showMessage(
+                    f"{text} 傾斜条件を適用: {p['wheel_start']:g}〜{p['wheel_end']:g}°"
+                    f"・刻み{p['wheel_pitch']:g}°")
+            else:
+                self.statusBar().showMessage(
+                    f"型式 {text} は傾斜条件マスタに未登録（手入力。「条件編集」で登録できます）")
+            return
+
+        # 回転系・合体：ユーザー回転条件を優先、無ければ提供の測定条件CSV
+        user = self.masters.get("user_rotary", {}).get(key)
+        if user:
+            p = user_condition_params(user, tilt=False)
+            self.e_wheel.setValue(p["wheel_pitch"])
+            self.e_worm.setValue(p["worm_pitch"])
+            self.e_range.setValue(p["worm_range"])
+            self.e_start.setValue(p["worm_start"])
+            self.master_cond = None  # ユーザー登録は測定順なし＝既定順
+            self.master_judge = find_entry(self.masters["judgement"], text)
+            self.statusBar().showMessage(f"{text} ユーザー回転条件を適用")
+            return
+
         cond = find_entry(self.masters["conditions"], text)
         judge = find_entry(self.masters["judgement"], text)
         self.master_cond = cond
@@ -2001,6 +2289,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
+        self.load_path(path)
+
+    def load_path(self, path):
+        """拡張子で判別して測定データを読み込む（過去データ閲覧などから呼ぶ）"""
         if path.lower().endswith(".bs"):
             self.load_bs_file(path)
             return

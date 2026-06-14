@@ -27,6 +27,11 @@ DEFAULTS = dict(
     # 型式マスタ（相対ならアプリフォルダ基準）
     conditions_csv=r"マスタ/測定条件.csv",
     judgement_csv=r"マスタ/合否判定.csv",
+    # ユーザー登録の測定条件（アプリから登録/編集。回転と傾斜を別ファイルに分離）
+    user_rotary_csv=r"マスタ/ユーザー回転条件.csv",
+    user_tilt_csv=r"マスタ/ユーザー傾斜条件.csv",
+    # 過去データ閲覧の既定件数
+    recent_count=10,
     # P補正（ピッチエラー補正表）の既定値
     p_interval=100000,   # 補正間隔（0.0001°単位。100000=10°）
     p_unit=0.001,        # 補正単位[°]

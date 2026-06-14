@@ -119,5 +119,35 @@ class TestJudgementMaster(unittest.TestCase):
         self.assertEqual(judge["teeth"], 36.0)
 
 
+
+class TestUserConditions(unittest.TestCase):
+    def test_rotary_roundtrip(self):
+        import os, tempfile
+        from nd287_app.masters import (ROTARY_USER_FIELDS, load_user_conditions,
+                                       upsert_user_condition, user_condition_params,
+                                       delete_user_condition)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ur.csv")
+            upsert_user_condition(path, ROTARY_USER_FIELDS, {
+                "型式": "RX-100", "ホイール刻み": "10", "ウォーム刻み": "0.5",
+                "ウォーム範囲": "5", "ウォーム開始": "0"})
+            recs = load_user_conditions(path, ROTARY_USER_FIELDS)
+            self.assertIn("RX-100", recs)
+            p = user_condition_params(recs["RX-100"], tilt=False)
+            self.assertAlmostEqual(p["wheel_pitch"], 10.0)
+            self.assertAlmostEqual(p["worm_range"], 5.0)
+            self.assertTrue(delete_user_condition(path, ROTARY_USER_FIELDS, "RX-100"))
+            self.assertEqual(load_user_conditions(path, ROTARY_USER_FIELDS), {})
+
+    def test_tilt_params(self):
+        from nd287_app.masters import TILT_USER_FIELDS, user_condition_params
+        rec = {"型式": "TX-1", "開始角度": "-30", "終了角度": "120", "刻み": "10",
+               "ウォーム刻み": "0.5", "ウォーム範囲": "5", "ウォーム開始": "0"}
+        p = user_condition_params(rec, tilt=True)
+        self.assertAlmostEqual(p["wheel_start"], -30.0)
+        self.assertAlmostEqual(p["wheel_end"], 120.0)
+        self.assertAlmostEqual(p["wheel_pitch"], 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()

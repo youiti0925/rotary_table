@@ -1347,6 +1347,201 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.win.print_report()
 
 
+class PitchCorrectionDialog(QtWidgets.QDialog):
+    """ピッチエラー補正（提出用）。補正表＋補正前後グラフを表示し、CSV保存/印刷する。
+
+    補正間隔・補正単位はその場で変更でき、「既定にする」で settings.json にも保存できる。
+    """
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("ピッチエラー補正（提出用）")
+        self.resize(920, 720)
+        self._rows = []
+        layout = QtWidgets.QVBoxLayout(self)
+
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("補正間隔"))
+        self.sp_interval = QtWidgets.QDoubleSpinBox()
+        self.sp_interval.setRange(0.001, 360.0)
+        self.sp_interval.setDecimals(4)
+        self.sp_interval.setSuffix(" °")
+        self.sp_interval.setValue(float(win.settings.get("p_interval") or 100000) * 1e-4)
+        top.addWidget(self.sp_interval)
+        top.addWidget(QtWidgets.QLabel("補正単位"))
+        self.sp_unit = QtWidgets.QDoubleSpinBox()
+        self.sp_unit.setRange(0.0001, 1.0)
+        self.sp_unit.setDecimals(4)
+        self.sp_unit.setSuffix(" °")
+        self.sp_unit.setValue(float(win.settings.get("p_unit") or 0.001))
+        top.addWidget(self.sp_unit)
+        self.c_default = QtWidgets.QCheckBox("この間隔/単位を既定にする")
+        top.addWidget(self.c_default)
+        top.addStretch(1)
+        layout.addLayout(top)
+        self.sp_interval.valueChanged.connect(self.recompute)
+        self.sp_unit.valueChanged.connect(self.recompute)
+
+        self.plot = pg.PlotWidget(title="ホイール偏差（補正前＝破線／補正後＝実線）")
+        self.plot.addLegend(offset=(10, 10))
+        self.plot.setLabel("bottom", "指令角度", units="°")
+        self.plot.setLabel("left", "偏差", units='"')
+        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        for axis in ("left", "bottom"):
+            self.plot.getAxis(axis).enableAutoSIPrefix(False)
+        layout.addWidget(self.plot, 2)
+
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        layout.addWidget(self.table, 3)
+
+        btns = QtWidgets.QHBoxLayout()
+        b_csv = QtWidgets.QPushButton("CSV保存")
+        b_print = QtWidgets.QPushButton("印刷")
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_csv.clicked.connect(self.export_csv)
+        b_print.clicked.connect(self.print_table)
+        b_close.clicked.connect(self._close)
+        btns.addStretch(1)
+        btns.addWidget(b_csv)
+        btns.addWidget(b_print)
+        btns.addWidget(b_close)
+        layout.addLayout(btns)
+
+        self.recompute()
+
+    def _unit_header(self):
+        return f'補正値[{self.sp_unit.value():g}°]'
+
+    def recompute(self, *args):
+        interval = self.sp_interval.value()
+        unit = self.sp_unit.value()
+        self._rows = compensation_table(self.win.data or {}, interval, unit)
+        self._fill_table()
+        self._draw()
+
+    def _fill_table(self):
+        headers = ["No", "角度[°]", "CW偏差[\"]", "CCW偏差[\"]", "平均[\"]", self._unit_header()]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(self._rows))
+        for i, row in enumerate(self._rows):
+            ccw = "—" if row["ccw"] is None else f'{row["ccw"]:.2f}'
+            cells = [row["no"], f'{row["angle"]:g}', f'{row["cw"]:.2f}', ccw,
+                     f'{row["mean"]:.2f}', row["units"]]
+            for j, text in enumerate(cells):
+                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(str(text)))
+        self.table.resizeColumnsToContents()
+
+    def _draw(self):
+        self.plot.clear()
+        data = self.win.data or {}
+        for key, color in (("wheel_cw", "#1f77b4"), ("wheel_ccw", "#d62728")):
+            t, m = data.get(key, ([], []))
+            if t:
+                self.plot.plot(
+                    np.asarray(t, dtype=float), deviation_sec(t, m),
+                    pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine),
+                    name=f"{SERIES_LABELS[key]}（前）")
+        for key, color in (("wheel_cw", "#1f77b4"), ("wheel_ccw", "#d62728")):
+            corrected = apply_compensation(data, self._rows)
+            if key in corrected:
+                t, d = corrected[key]
+                self.plot.plot(t, d, pen=pg.mkPen(color, width=2),
+                               symbol="o", symbolSize=4,
+                               name=f"{SERIES_LABELS[key]}（後）")
+
+    def _export_rows(self):
+        rows = []
+        for row in self._rows:
+            ccw = "" if row["ccw"] is None else f'{row["ccw"]:.2f}'
+            rows.append([row["no"], f'{row["angle"]:g}', f'{row["cw"]:.2f}', ccw,
+                         f'{row["mean"]:.2f}', row["units"]])
+        return rows
+
+    def export_csv(self):
+        if not self._rows:
+            self.win.statusBar().showMessage("補正表がありません（分割データが必要）")
+            return
+        from datetime import datetime
+        machine = self.win.e_machine.text().strip() or "pcorr"
+        default = str(resolve_save_root(self.win.settings)
+                      / f"{machine}_ピッチエラー補正_{datetime.now():%Y%m%d_%H%M}.csv")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "CSVに保存", default, "CSVファイル (*.csv)")
+        if not path:
+            return
+        headers = ["No", "角度[°]", "CW偏差[\"]", "CCW偏差[\"]", "平均[\"]", self._unit_header()]
+        meta = [
+            ["ピッチエラー補正表"],
+            ["型式", self.win.e_model.text().strip()],
+            ["機番", machine],
+            ["補正間隔[°]", f"{self.sp_interval.value():g}"],
+            ["補正単位[°]", f"{self.sp_unit.value():g}"],
+            [],
+            headers,
+        ]
+        try:
+            report.write_table_csv(path, None, meta + self._export_rows())
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "CSV保存", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"CSV保存: {path}")
+
+    def _html(self, with_image):
+        head = "".join(
+            f"<th style='border:1px solid #999;padding:1px 6px;'>{h}</th>"
+            for h in ["No", "角度[°]", "CW偏差[\"]", "CCW偏差[\"]", "平均[\"]", self._unit_header()])
+        body = ""
+        for row in self._rows:
+            ccw = "—" if row["ccw"] is None else f'{row["ccw"]:.2f}'
+            cells = [row["no"], f'{row["angle"]:g}', f'{row["cw"]:.2f}', ccw,
+                     f'{row["mean"]:.2f}', row["units"]]
+            body += "<tr>" + "".join(
+                f"<td style='border:1px solid #999;padding:1px 6px;text-align:right;'>{c}</td>"
+                for c in cells) + "</tr>"
+        img = "<p><img src='pc.png' width='950'></p>" if with_image else ""
+        meta = (f"型式 {self.win.e_model.text().strip()}／機番 "
+                f"{self.win.e_machine.text().strip()}／補正間隔 {self.sp_interval.value():g}°"
+                f"／補正単位 {self.sp_unit.value():g}°")
+        return (f"<h3>ピッチエラー補正表（提出用）</h3><p>{meta}</p>{img}"
+                f"<table style='font-size:8pt;' cellspacing='0'><tr>{head}</tr>{body}</table>")
+
+    def print_table(self):
+        if not self._rows:
+            self.win.statusBar().showMessage("補正表がありません（分割データが必要）")
+            return
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageOrientation(QtGui.QPageLayout.Landscape)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("ピッチエラー補正の印刷")
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        document = QtGui.QTextDocument()
+        corrected = apply_compensation(self.win.data or {}, self._rows)
+        image = self.win._render_series_plot(
+            corrected, "ピッチエラー補正後（シミュレーション）")
+        document.addResource(QtGui.QTextDocument.ImageResource,
+                             QtCore.QUrl("pc.png"), image)
+        document.setHtml(self._html(True))
+        document.print_(printer)
+        self.win.statusBar().showMessage("印刷しました")
+
+    def _close(self):
+        if self.c_default.isChecked():
+            self.win.settings["p_interval"] = int(round(self.sp_interval.value() * 1e4))
+            self.win.settings["p_unit"] = self.sp_unit.value()
+            try:
+                save_settings(self.win.settings)
+                self.win.statusBar().showMessage("補正間隔/単位を既定として保存しました")
+            except Exception:
+                pass
+        self.accept()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -1639,6 +1834,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_program = QtWidgets.QPushButton("プログラム作成")
         self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
         self.b_program.clicked.connect(self.show_program_dialog)
+        self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
+        self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
+        self.b_pcorr.clicked.connect(self.show_pitch_correction)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         self.b_save.clicked.connect(self.save)
@@ -1659,7 +1857,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.b_raw, self.b_past, self.b_analyze):
             toolbar.addWidget(b)
         toolbar.addSeparator()
-        for b in (self.b_cond, self.b_program):
+        for b in (self.b_cond, self.b_program, self.b_pcorr):
             toolbar.addWidget(b)
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
@@ -3509,6 +3707,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("表示する生データがありません")
             return
         RawDataDialog(self).exec()
+
+    def show_pitch_correction(self):
+        """ピッチエラー補正（提出用）ダイアログを開く（分割のホイールデータが必要）"""
+        if self.view_kind not in ("indexing", "combined") or not (
+                self.data and self.data.get("wheel_cw", ([], []))[0]):
+            self.statusBar().showMessage(
+                "ピッチエラー補正には回転/傾斜分割のホイール測定データが必要です")
+            return
+        PitchCorrectionDialog(self).exec()
 
     def show_program_dialog(self):
         """現在の測定条件からFANUC測定プログラムを作成するダイアログを開く"""

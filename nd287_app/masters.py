@@ -127,6 +127,12 @@ def load_masters(settings) -> dict:
         user_tilt=load_user_conditions(
             resolve("user_tilt_csv", "マスタ/ユーザー傾斜条件.csv"),
             TILT_USER_FIELDS),
+        user_rotary_repeat=load_user_conditions(
+            resolve("user_rotary_repeat_csv", "マスタ/ユーザー回転再現条件.csv"),
+            REPEAT_USER_FIELDS),
+        user_tilt_repeat=load_user_conditions(
+            resolve("user_tilt_repeat_csv", "マスタ/ユーザー傾斜再現条件.csv"),
+            REPEAT_USER_FIELDS),
     )
 
 
@@ -176,6 +182,8 @@ import csv as _csv
 ROTARY_USER_FIELDS = ["型式", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始"]
 TILT_USER_FIELDS = ["型式", "開始角度", "終了角度", "刻み",
                     "ウォーム刻み", "ウォーム範囲", "ウォーム開始"]
+# 再現性の条件（回転・傾斜とも同じ項目。ファイルは分けて保存する）
+REPEAT_USER_FIELDS = ["型式", "ブロック数", "回数", "再現開始", "再現終了"]
 
 
 def _user_path(settings, key, default):

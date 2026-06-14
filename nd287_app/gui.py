@@ -468,12 +468,18 @@ class ProgramDialog(QtWidgets.QDialog):
 
         buttons = QtWidgets.QHBoxLayout()
         b_refresh = QtWidgets.QPushButton("プレビュー更新")
+        self.b_edit = QtWidgets.QPushButton("編集")
+        self.b_edit.setCheckable(True)
+        self.b_edit.setToolTip("プレビューを手で編集できるようにする"
+                               "（編集中は設定変更で上書きしない。保存は編集後の内容）")
         b_save = QtWidgets.QPushButton("保存(.NC)")
         b_close = QtWidgets.QPushButton("閉じる")
-        b_refresh.clicked.connect(self.refresh)
+        b_refresh.clicked.connect(self.regenerate)
+        self.b_edit.toggled.connect(self.toggle_edit)
         b_save.clicked.connect(self.save)
         b_close.clicked.connect(self.accept)
         buttons.addWidget(b_refresh)
+        buttons.addWidget(self.b_edit)
         buttons.addStretch(1)
         buttons.addWidget(b_save)
         buttons.addWidget(b_close)
@@ -517,13 +523,32 @@ class ProgramDialog(QtWidgets.QDialog):
         )
 
     def refresh(self):
+        # 手編集中は設定変更でプレビューを上書きしない
+        if self.b_edit.isChecked():
+            return
         try:
             self.preview.setPlainText(self._generate())
         except Exception as e:
             self.preview.setPlainText(f"生成エラー: {e}")
 
+    def regenerate(self):
+        """設定から作り直す（手編集は破棄）。「プレビュー更新」用。"""
+        self.b_edit.setChecked(False)
+        self.preview.setReadOnly(True)
+        try:
+            self.preview.setPlainText(self._generate())
+        except Exception as e:
+            self.preview.setPlainText(f"生成エラー: {e}")
+
+    def toggle_edit(self, on):
+        self.preview.setReadOnly(not on)
+        self.b_edit.setText("編集中…" if on else "編集")
+        if on:
+            self.preview.setFocus()
+
     def save(self):
-        text = self._generate()
+        # 画面のプレビュー（手編集していればその内容）をそのまま保存する
+        text = self.preview.toPlainText()
         default = f"{self.params.get('machine') or 'program'}.NC"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "測定プログラムを保存", default, "NCプログラム (*.NC *.txt)")
@@ -536,26 +561,52 @@ class ProgramDialog(QtWidgets.QDialog):
 
 
 class ConditionRegistryDialog(QtWidgets.QDialog):
-    """測定条件の登録/編集（回転・傾斜を別ファイルで管理）。
+    """測定条件の登録/編集（回転分割・傾斜分割・回転再現・傾斜再現を上の「対象」で切替）。
 
-    傾斜は傾斜専用ファイルに保存するので、回転の条件と混ざらない。
+    回転と傾斜、分割と再現をそれぞれ別ファイルで管理するので条件が混ざらない。
     """
 
-    def __init__(self, win, tilt: bool):
+    def __init__(self, win, target="回転分割"):
         super().__init__(win)
         self.win = win
-        self.tilt = tilt
-        from .masters import (ROTARY_USER_FIELDS, TILT_USER_FIELDS)
-        self.fields = TILT_USER_FIELDS if tilt else ROTARY_USER_FIELDS
-        self.setWindowTitle("傾斜の条件登録/編集" if tilt else "回転の条件登録/編集")
-        self.resize(640, 460)
+        from .masters import (ROTARY_USER_FIELDS, TILT_USER_FIELDS, REPEAT_USER_FIELDS)
+        self.TARGETS = {
+            "回転分割": dict(key="user_rotary_csv", default="マスタ/ユーザー回転条件.csv",
+                             fields=ROTARY_USER_FIELDS, tilt=False, repeat=False,
+                             note="回転分割の測定条件を型式ごとに登録（提供CSVより優先）。"),
+            "傾斜分割": dict(key="user_tilt_csv", default="マスタ/ユーザー傾斜条件.csv",
+                             fields=TILT_USER_FIELDS, tilt=True, repeat=False,
+                             note="傾斜分割の測定条件を型式ごとに登録（回転とは別ファイル）。"),
+            "回転再現": dict(key="user_rotary_repeat_csv",
+                             default="マスタ/ユーザー回転再現条件.csv",
+                             fields=REPEAT_USER_FIELDS, tilt=False, repeat=True,
+                             note="回転再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
+            "傾斜再現": dict(key="user_tilt_repeat_csv",
+                             default="マスタ/ユーザー傾斜再現条件.csv",
+                             fields=REPEAT_USER_FIELDS, tilt=True, repeat=True,
+                             note="傾斜再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
+        }
+        self.setWindowTitle("測定条件の登録/編集")
+        self.resize(660, 480)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(QtWidgets.QLabel(
-            ("傾斜分割の測定条件を型式ごとに登録します（回転とは別ファイル）。"
-             if tilt else
-             "回転分割の測定条件を型式ごとに登録します（提供CSVより優先されます）。")))
-        self.table = QtWidgets.QTableWidget(0, len(self.fields))
-        self.table.setHorizontalHeaderLabels(self.fields)
+
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("対象"))
+        self.cmb_target = QtWidgets.QComboBox()
+        self.cmb_target.addItems(list(self.TARGETS.keys()))
+        if target in self.TARGETS:
+            self.cmb_target.setCurrentText(target)
+        self.cmb_target.currentTextChanged.connect(self.on_target_changed)
+        top.addWidget(self.cmb_target)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        self.note = QtWidgets.QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color:#666;")
+        layout.addWidget(self.note)
+
+        self.table = QtWidgets.QTableWidget(0, 0)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
         self.table.cellDoubleClicked.connect(self.load_selected_to_screen)
@@ -576,14 +627,25 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         buttons.addStretch(1)
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
+        self.on_target_changed()
+
+    @property
+    def spec(self):
+        return self.TARGETS[self.cmb_target.currentText()]
+
+    @property
+    def fields(self):
+        return self.spec["fields"]
+
+    def on_target_changed(self, *args):
+        self.note.setText(self.spec["note"])
+        self.table.setColumnCount(len(self.fields))
+        self.table.setHorizontalHeaderLabels(self.fields)
         self.reload()
 
     def _path(self):
         from .masters import _user_path
-        key = "user_tilt_csv" if self.tilt else "user_rotary_csv"
-        default = ("マスタ/ユーザー傾斜条件.csv" if self.tilt
-                   else "マスタ/ユーザー回転条件.csv")
-        return _user_path(self.win.settings, key, default)
+        return _user_path(self.win.settings, self.spec["key"], self.spec["default"])
 
     def reload(self):
         from .masters import load_user_conditions
@@ -600,7 +662,13 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         model = w.e_model.text().strip()
         if not model:
             return None
-        if self.tilt:
+        spec = self.spec
+        if spec["repeat"]:
+            return {"型式": model, "ブロック数": f"{w.e_blocks.value():g}",
+                    "回数": f"{w.e_repeats.value():g}",
+                    "再現開始": f"{w.e_rstart.value():g}",
+                    "再現終了": f"{w.e_rend.value():g}"}
+        if spec["tilt"]:
             return {
                 "型式": model,
                 "開始角度": f"{w.e_wstart.value():g}", "終了角度": f"{w.e_wend.value():g}",
@@ -622,7 +690,8 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         upsert_user_condition(self._path(), self.fields, rec)
         self.win.reload_masters()
         self.reload()
-        self.win.statusBar().showMessage(f"{rec['型式']} の条件を登録しました")
+        self.win.statusBar().showMessage(
+            f"{rec['型式']} の{self.cmb_target.currentText()}条件を登録しました")
 
     def delete_selected(self):
         row = self.table.currentRow()
@@ -639,8 +708,24 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         row = self.table.currentRow()
         if row < 0:
             return
-        self.win.e_model.setText(self.table.item(row, 0).text())
-        self.win.on_model_entered()
+        rec = {self.fields[j]: (self.table.item(row, j).text()
+                                if self.table.item(row, j) else "")
+               for j in range(len(self.fields))}
+        w = self.win
+        w.e_model.setText(rec.get("型式", ""))
+        if self.spec["repeat"]:
+            def num(field, default):
+                try:
+                    return float(rec.get(field, "") or default)
+                except ValueError:
+                    return default
+            w.e_blocks.setValue(int(num("ブロック数", w.e_blocks.value())))
+            w.e_repeats.setValue(int(num("回数", w.e_repeats.value())))
+            w.e_rstart.setValue(num("再現開始", w.e_rstart.value()))
+            w.e_rend.setValue(num("再現終了", w.e_rend.value()))
+            w.statusBar().showMessage(f"{rec.get('型式', '')} の再現条件を画面へ反映しました")
+        else:
+            w.on_model_entered()
 
 
 class PastDataDialog(QtWidgets.QDialog):
@@ -1398,19 +1483,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_r1e.setValue(90.0)
         self.e_r2s.setValue(-90.0)
         self.e_r2e.setValue(0.0)
+        for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
+            spin.setMaximumWidth(74)
+        # 狭いサイドに収まるよう、チェック行→開始/終了行 で2段に折り返す
         self.box_ranges = QtWidgets.QWidget()
-        ranges_grid = QtWidgets.QGridLayout(self.box_ranges)
-        ranges_grid.setContentsMargins(0, 0, 0, 0)
-        ranges_grid.addWidget(self.c_r1, 0, 0)
-        ranges_grid.addWidget(QtWidgets.QLabel("開始"), 0, 1)
-        ranges_grid.addWidget(self.e_r1s, 0, 2)
-        ranges_grid.addWidget(QtWidgets.QLabel("終了"), 0, 3)
-        ranges_grid.addWidget(self.e_r1e, 0, 4)
-        ranges_grid.addWidget(self.c_r2, 1, 0)
-        ranges_grid.addWidget(QtWidgets.QLabel("開始"), 1, 1)
-        ranges_grid.addWidget(self.e_r2s, 1, 2)
-        ranges_grid.addWidget(QtWidgets.QLabel("終了"), 1, 3)
-        ranges_grid.addWidget(self.e_r2e, 1, 4)
+        ranges_v = QtWidgets.QVBoxLayout(self.box_ranges)
+        ranges_v.setContentsMargins(0, 0, 0, 0)
+        ranges_v.setSpacing(2)
+
+        def range_row(check, e_start, e_end):
+            ranges_v.addWidget(check)
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(12, 0, 0, 0)
+            row.setSpacing(4)
+            row.addWidget(QtWidgets.QLabel("開始"))
+            row.addWidget(e_start)
+            row.addWidget(QtWidgets.QLabel("終了"))
+            row.addWidget(e_end)
+            row.addStretch(1)
+            ranges_v.addLayout(row)
+
+        range_row(self.c_r1, self.e_r1s, self.e_r1e)
+        range_row(self.c_r2, self.e_r2s, self.e_r2e)
         self.range_widgets = [self.box_ranges]  # 後方互換（未使用）
         for check in (self.c_r1, self.c_r2):
             check.toggled.connect(self.refresh_results)
@@ -1470,12 +1564,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_cancel.clicked.connect(self.cancel)
         self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
-        ops_group = QtWidgets.QGroupBox("操作")
+        # 取込開始・自動測定は上部ツールバー（セーブの横）へ。
+        # ここには取込中の操作（中止・手動取込・1点戻る）だけ置く。
+        ops_group = QtWidgets.QGroupBox("取込中の操作")
         ops_v = QtWidgets.QVBoxLayout(ops_group)
-        primary_row = QtWidgets.QHBoxLayout()
-        primary_row.addWidget(self.b_start, 1)
-        primary_row.addWidget(self.b_auto, 1)
-        ops_v.addLayout(primary_row)
+        ops_v.setContentsMargins(6, 4, 6, 4)
         sub_row = QtWidgets.QHBoxLayout()
         for b in (self.b_cancel, self.b_take, self.b_undo):
             sub_row.addWidget(b, 1)
@@ -1508,6 +1601,10 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
+        # 取込開始・自動測定を左上（セーブの横）に置く
+        toolbar.addWidget(self.b_start)
+        toolbar.addWidget(self.b_auto)
+        toolbar.addSeparator()
         for b in (self.b_save, self.b_print, b_load):
             toolbar.addWidget(b)
         toolbar.addSeparator()
@@ -1839,8 +1936,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"マスタ再読込に失敗: {e}")
 
     def show_condition_editor(self):
-        """現在のモードに応じた条件登録/編集ダイアログを開く（回転/傾斜を分離）"""
-        ConditionRegistryDialog(self, tilt=self.is_tilt()).exec()
+        """条件登録/編集ダイアログを開く（現在のモードに合った対象を初期選択）"""
+        if self.is_repeat() or self.is_combined():
+            target = "傾斜再現" if self.is_tilt() else "回転再現"
+        else:
+            target = "傾斜分割" if self.is_tilt() else "回転分割"
+        ConditionRegistryDialog(self, target=target).exec()
 
     def show_past_data(self):
         PastDataDialog(self).exec()
@@ -1921,16 +2022,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.master_judge = find_entry(self.masters["judgement"], text)
 
     def on_model_entered(self):
-        """型式が入力されたら測定条件・合否判定を自動適用する（モード別に厳密に分離）。
+        """型式入力で測定条件を自動適用する。
 
-        傾斜系モードは傾斜専用マスタのみを参照し、回転分割用の条件・温度規格は
-        一切使わない（誤用防止）。回転系・合体は ユーザー回転条件 → 提供測定条件 の順。
+        分割条件（分割系モードのみ）と再現条件（再現/合体モードのみ）を、
+        回転・傾斜で別マスタから別々に適用する（条件の誤用を防ぐ）。
         """
-        from .masters import user_condition_params
         text = self.e_model.text().strip()
         if not self.masters or not text:
             return
         key = text.upper()
+        if not self.is_repeat():
+            self._apply_division_conditions(key, text)
+        if self.is_repeat() or self.is_combined():
+            self._apply_repeat_conditions(key)
+
+    def _apply_repeat_conditions(self, key):
+        """型式ごとの再現性条件（回転/傾斜で別ファイル）を画面へ適用する。"""
+        master = self.masters.get(
+            "user_tilt_repeat" if self.is_tilt() else "user_rotary_repeat", {})
+        rec = master.get(key)
+        if not rec:
+            self.statusBar().showMessage(
+                f"型式 {key} の再現条件は未登録（「条件編集」で登録できます）")
+            return
+
+        def num(field, default):
+            try:
+                return float(rec.get(field, "") or default)
+            except ValueError:
+                return default
+        self.e_blocks.setValue(int(num("ブロック数", self.e_blocks.value())))
+        self.e_repeats.setValue(int(num("回数", self.e_repeats.value())))
+        self.e_rstart.setValue(num("再現開始", self.e_rstart.value()))
+        self.e_rend.setValue(num("再現終了", self.e_rend.value()))
+        self.statusBar().showMessage(
+            f"{key} 再現条件を適用: {self.e_blocks.value()}箇所×{self.e_repeats.value()}回")
+
+    def _apply_division_conditions(self, key, text):
+        """分割の測定条件・合否判定を適用する（傾斜は傾斜専用マスタのみ参照）。"""
+        from .masters import user_condition_params
 
         if self.is_tilt():
             # ★傾斜：回転の測定条件・規格は絶対に使わない

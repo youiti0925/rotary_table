@@ -30,6 +30,9 @@ DEFAULTS = dict(
     # ユーザー登録の測定条件（アプリから登録/編集。回転と傾斜を別ファイルに分離）
     user_rotary_csv=r"マスタ/ユーザー回転条件.csv",
     user_tilt_csv=r"マスタ/ユーザー傾斜条件.csv",
+    # 再現性の条件（型式ごと。回転・傾斜を別ファイルに分離）
+    user_rotary_repeat_csv=r"マスタ/ユーザー回転再現条件.csv",
+    user_tilt_repeat_csv=r"マスタ/ユーザー傾斜再現条件.csv",
     # 過去データ閲覧の既定件数
     recent_count=10,
     # 画面のテーマ（見た目）。themes.THEME_NAMES の名前。"システム"=OS既定

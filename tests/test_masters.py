@@ -148,6 +148,22 @@ class TestUserConditions(unittest.TestCase):
         self.assertAlmostEqual(p["wheel_end"], 120.0)
         self.assertAlmostEqual(p["wheel_pitch"], 10.0)
 
+    def test_repeat_roundtrip(self):
+        import os
+        import tempfile
+        from nd287_app.masters import (REPEAT_USER_FIELDS, load_user_conditions,
+                                       upsert_user_condition)
+        self.assertEqual(REPEAT_USER_FIELDS,
+                         ["型式", "ブロック数", "回数", "再現開始", "再現終了"])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rep.csv")
+            upsert_user_condition(path, REPEAT_USER_FIELDS, {
+                "型式": "RX-9", "ブロック数": "6", "回数": "5",
+                "再現開始": "0", "再現終了": "300"})
+            recs = load_user_conditions(path, REPEAT_USER_FIELDS)
+            self.assertEqual(recs["RX-9"]["ブロック数"], "6")
+            self.assertEqual(recs["RX-9"]["再現終了"], "300")
+
 
 if __name__ == "__main__":
     unittest.main()

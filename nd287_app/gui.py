@@ -729,15 +729,25 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
 
 
 class PastDataDialog(QtWidgets.QDialog):
-    """過去データの一覧（直近N件）。クリックでロードできる。"""
+    """過去データの一覧（直近N件）。条件＋主要な測定結果を表示し、クリックでロード。"""
 
-    COLUMNS = ["日付", "型式", "機番", "名前", "モード", "主要条件", "判定", "ファイル"]
+    # (列名, metricsのキー or None) None は特別計算（BL MAX）
+    RESULT_COLUMNS = [
+        ("ホイールCW PP", "ホイール CW 精度PP"),
+        ("ホイールCCW PP", "ホイール CCW 精度PP"),
+        ("ウォームCW PP", "ウォーム CW 精度PP"),
+        ("ウォームCCW PP", "ウォーム CCW 精度PP"),
+        ("バックラッシMAX", None),
+        ("再現性", "再現性総合"),
+    ]
+    COLUMNS = (["日付", "型式", "機番", "名前", "モード", "主要条件"]
+               + [c[0] for c in RESULT_COLUMNS] + ["判定", "ファイル"])
 
     def __init__(self, win):
         super().__init__(win)
         self.win = win
         self.setWindowTitle("過去データ")
-        self.resize(900, 520)
+        self.resize(1180, 540)
         layout = QtWidgets.QVBoxLayout(self)
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("直近"))
@@ -800,9 +810,23 @@ class PastDataDialog(QtWidgets.QDialog):
             return
         self.win.statusBar().showMessage(f"CSV出力: {path}")
 
+    @staticmethod
+    def _result_cells(metrics):
+        """RESULT_COLUMNS の各列の表示文字列を作る。"""
+        def fmt(v):
+            return "" if v is None else f'{v:.2f}"'
+        cells = []
+        for label, key in PastDataDialog.RESULT_COLUMNS:
+            if key is None:  # バックラッシMAX = ホイール/ウォームの最大
+                vals = [metrics.get("ホイールBL MAX"), metrics.get("ウォームBL MAX")]
+                vals = [v for v in vals if v is not None]
+                cells.append(fmt(max(vals)) if vals else "")
+            else:
+                cells.append(fmt(metrics.get(key)))
+        return cells
+
     def reload(self):
         from .export import MODE_KEY, load_measurement
-        from .masters import _read_text  # noqa: F401 (未使用だが将来用)
         root = resolve_save_root(self.win.settings)
         files = []
         try:
@@ -815,23 +839,26 @@ class PastDataDialog(QtWidgets.QDialog):
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         files = files[: self.e_count.value()]
         self._paths = files
+        judge_col = self.COLUMNS.index("判定")
         self.table.setRowCount(len(files))
         for i, p in enumerate(files):
-            meta = {}
+            meta, metrics = {}, {}
             try:
-                meta, _kind, _payload = load_measurement(str(p))
+                meta, kind, payload = load_measurement(str(p))
+                metrics = report.metrics_from_measurement(kind, payload, meta)
             except Exception:
                 pass
-            cond = self._condition_summary(meta)
-            cells = [
-                meta.get("日付", ""), meta.get("型式", ""), meta.get("機番", p.stem),
-                meta.get("名前", ""), meta.get(MODE_KEY, ""), cond,
-                self._judgement(p), p.name,
-            ]
+            cells = (
+                [meta.get("日付", ""), meta.get("型式", ""), meta.get("機番", p.stem),
+                 meta.get("名前", ""), meta.get(MODE_KEY, ""),
+                 self._condition_summary(meta)]
+                + self._result_cells(metrics)
+                + [self._judgement(p), p.name]
+            )
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(str(text))
-                if j == 6 and str(text).startswith("NG"):
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                if j == judge_col and str(text).startswith("NG"):
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
                 self.table.setItem(i, j, item)
         self.table.resizeColumnsToContents()
 

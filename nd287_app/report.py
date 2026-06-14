@@ -54,13 +54,44 @@ def scan_judgement(path):
     return ""
 
 
+def metrics_from_measurement(kind, payload, meta):
+    """読み込み済みの測定（kind/payload/meta）から指標 {名前: 数値[秒]} を作る。
+
+    既に load_measurement したデータから計算したいとき（過去データ一覧など）用。
+    """
+    metrics = {}
+    if kind == "repeat":
+        points, data = payload
+        rsum = repeatability_summary(points, data)
+        for key, name in (("cw", "再現性CW"), ("ccw", "再現性CCW"),
+                          ("overall", "再現性総合")):
+            if rsum.get(key) is not None:
+                metrics[name] = float(rsum[key])
+        return metrics
+    blcorr = _to_float((meta or {}).get("バックラッシ補正[秒]")) or 0.0
+    summary, _ = summarize(payload, blcorr)
+    for key, label in SERIES_LABELS.items():
+        if key in summary:
+            s = summary[key]
+            metrics[f"{label} 精度PP"] = float(s["pp"])
+            metrics[f"{label} 単一誤差"] = float(s["single"])
+            metrics[f"{label} 隣接誤差"] = float(s["adjacent"])
+            metrics[f"{label} 傾き"] = float(s["slope"])
+    for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
+        bkey = f"{grp}_backlash"
+        if bkey in summary:
+            metrics[f"{label}BL MIN"] = float(summary[bkey]["min"])
+            metrics[f"{label}BL MAX"] = float(summary[bkey]["max"])
+    return metrics
+
+
 def measurement_record(path):
     """1つの保存CSVを読み、横断比較用のレコード(dict)にする。
 
     metrics は {指標名: 数値[秒]} 。型式・機番などは文字列。読めない値は欠落。
     """
     meta, kind, payload = load_measurement(str(path))
-    rec = {
+    return {
         "パス": str(path),
         "ファイル": Path(path).name,
         "日付": meta.get("日付", ""),
@@ -70,32 +101,8 @@ def measurement_record(path):
         "モード": meta.get(MODE_KEY, ""),
         "測定温度": _to_float(meta.get("測定温度[°C]")),
         "判定": scan_judgement(path),
-        "metrics": {},
+        "metrics": metrics_from_measurement(kind, payload, meta),
     }
-    metrics = rec["metrics"]
-    if kind == "repeat":
-        points, data = payload
-        rsum = repeatability_summary(points, data)
-        for key, name in (("cw", "再現性CW"), ("ccw", "再現性CCW"),
-                          ("overall", "再現性総合")):
-            if rsum.get(key) is not None:
-                metrics[name] = float(rsum[key])
-    else:
-        blcorr = _to_float(meta.get("バックラッシ補正[秒]")) or 0.0
-        summary, _ = summarize(payload, blcorr)
-        for key, label in SERIES_LABELS.items():
-            if key in summary:
-                s = summary[key]
-                metrics[f"{label} 精度PP"] = float(s["pp"])
-                metrics[f"{label} 単一誤差"] = float(s["single"])
-                metrics[f"{label} 隣接誤差"] = float(s["adjacent"])
-                metrics[f"{label} 傾き"] = float(s["slope"])
-        for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
-            bkey = f"{grp}_backlash"
-            if bkey in summary:
-                metrics[f"{label}BL MIN"] = float(summary[bkey]["min"])
-                metrics[f"{label}BL MAX"] = float(summary[bkey]["max"])
-    return rec
 
 
 def scan_measurements(root, recent=None, model=None):

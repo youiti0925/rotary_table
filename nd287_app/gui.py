@@ -145,23 +145,45 @@ class SettingsDialog(QtWidgets.QDialog):
         bs_row = QtWidgets.QHBoxLayout()
         self.e_bs_root = QtWidgets.QLineEdit(str(settings.get("bs_save_root", "")))
         self.e_bs_root.setToolTip(
-            "旧形式(.BS)の保存先（検査表システムのデータフォルダ）。空にすると.BSを書かない"
+            "旧形式(.BS/.KS)の保存先（検査表システムのデータフォルダ）。空にすると書かない"
         )
         b_bs_browse = QtWidgets.QPushButton("参照...")
         b_bs_browse.clicked.connect(self.browse_bs_root)
         bs_row.addWidget(self.e_bs_root)
         bs_row.addWidget(b_bs_browse)
 
+        # 各種条件CSVの場所（相対ならアプリフォルダ基準）
+        self.e_conditions = self._make_file_row(
+            settings.get("conditions_csv", r"マスタ/測定条件.csv"), "測定条件CSVを選択"
+        )
+        self.e_judgement = self._make_file_row(
+            settings.get("judgement_csv", r"マスタ/合否判定.csv"), "合否判定CSVを選択"
+        )
+        self.e_user_rotary = self._make_file_row(
+            settings.get("user_rotary_csv", r"マスタ/ユーザー回転条件.csv"),
+            "ユーザー回転条件CSVを選択",
+        )
+        self.e_user_tilt = self._make_file_row(
+            settings.get("user_tilt_csv", r"マスタ/ユーザー傾斜条件.csv"),
+            "ユーザー傾斜条件CSVを選択",
+        )
+
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
         form.addRow("パリティ", self.e_parity)
-        form.addRow("保存先フォルダ", root_row)
-        form.addRow(".BS保存先（旧形式）", bs_row)
+        form.addRow("測定データ保存先", root_row)
+        form.addRow(".BS/.KS保存先（旧形式）", bs_row)
+        form.addRow("測定条件CSV", self.e_conditions.row)
+        form.addRow("合否判定CSV", self.e_judgement.row)
+        form.addRow("ユーザー回転条件CSV", self.e_user_rotary.row)
+        form.addRow("ユーザー傾斜条件CSV", self.e_user_tilt.row)
 
         note = QtWidgets.QLabel(
-            "温度別の合否規格（ホイール/ウォーム/総合）は settings.json の judgement_spec で編集"
+            "相対パスはアプリフォルダ基準。温度別の合否規格（ホイール/ウォーム/総合）は"
+            " settings.json の judgement_spec で編集"
         )
         note.setStyleSheet("color:#666;")
+        note.setWordWrap(True)
         form.addRow(note)
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -170,6 +192,29 @@ class SettingsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+    def _make_file_row(self, value, title):
+        """CSVファイルパス用の「入力欄＋参照...」行を作る。
+
+        戻り値の QLineEdit に .row（QHBoxLayout）を付けて返す。
+        """
+        edit = QtWidgets.QLineEdit(str(value or ""))
+        btn = QtWidgets.QPushButton("参照...")
+        btn.clicked.connect(lambda: self._browse_file(edit, title))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(edit)
+        row.addWidget(btn)
+        edit.row = row
+        return edit
+
+    def _browse_file(self, edit, title):
+        # 既存・新規どちらのパスも選べるよう getSaveFileName を使う（上書き確認はしない）
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, title, edit.text(), "CSVファイル (*.csv);;すべて (*)",
+            options=QtWidgets.QFileDialog.DontConfirmOverwrite,
+        )
+        if path:
+            edit.setText(path)
 
     def browse_root(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(
@@ -196,6 +241,12 @@ class SettingsDialog(QtWidgets.QDialog):
             parity=self.e_parity.currentText(),
             save_root=self.e_root.text().strip() or "測定データ",
             bs_save_root=self.e_bs_root.text().strip(),
+            conditions_csv=self.e_conditions.text().strip() or r"マスタ/測定条件.csv",
+            judgement_csv=self.e_judgement.text().strip() or r"マスタ/合否判定.csv",
+            user_rotary_csv=self.e_user_rotary.text().strip()
+            or r"マスタ/ユーザー回転条件.csv",
+            user_tilt_csv=self.e_user_tilt.text().strip()
+            or r"マスタ/ユーザー傾斜条件.csv",
         )
 
 
@@ -1684,6 +1735,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"設定の保存に失敗: {e}")
             return
+        # 条件CSVの場所が変わった可能性があるので読み直す
+        self.reload_masters()
         if not self.dev.dummy:
             self.dev.close()
             self.dev = ND287Device(

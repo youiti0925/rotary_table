@@ -22,8 +22,8 @@ THEME_NAMES = [
     "システム",
 ]
 
-DEFAULT_THEME = "ライト・ブルー"
-DEFAULT_FONT_PT = 11
+DEFAULT_THEME = "ネイビー・コーポレート"
+DEFAULT_FONT_PT = 13
 
 
 def _light(accent, accent_hover, accent_press, bg, panel, border,
@@ -65,11 +65,11 @@ QPushButton#primary:disabled {{ background: {border}; color: {muted}; }}
 
 QGroupBox {{
     background: {panel}; border: 1px solid {border}; border-radius: 8px;
-    margin-top: 14px; padding: 10px 10px 8px 10px;
+    margin-top: 12px; padding: 8px 8px 6px 8px;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin; subcontrol-position: top left;
-    left: 12px; padding: 2px 8px; color: {accent}; font-weight: bold;
+    left: 10px; padding: 1px 7px; color: {accent}; font-weight: bold;
 }}
 
 QToolBar {{ background: {header_bg}; border: none; spacing: 4px; padding: 5px 8px; }}

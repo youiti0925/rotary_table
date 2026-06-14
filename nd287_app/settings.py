@@ -33,9 +33,9 @@ DEFAULTS = dict(
     # 過去データ閲覧の既定件数
     recent_count=10,
     # 画面のテーマ（見た目）。themes.THEME_NAMES の名前。"システム"=OS既定
-    ui_theme="ライト・ブルー",
+    ui_theme="ネイビー・コーポレート",
     # 画面の基準文字サイズ[pt]（7〜22）
-    ui_font_pt=11,
+    ui_font_pt=13,
     # P補正（ピッチエラー補正表）の既定値
     p_interval=100000,   # 補正間隔（0.0001°単位。100000=10°）
     p_unit=0.001,        # 補正単位[°]

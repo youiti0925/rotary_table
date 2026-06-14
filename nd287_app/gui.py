@@ -32,11 +32,14 @@ pg.setConfigOption("foreground", "#222222")
 pg.setConfigOption("antialias", True)
 
 from .analysis import (
+    adjacent,
     band_for_temp,
     composite_backlash_minmax,
     deviation_sec,
     pp,
     repeatability_summary,
+    single,
+    slope,
     summarize,
 )
 from .pcorr import apply_compensation, compensation_table
@@ -82,6 +85,7 @@ from .sequence import (
     CombinedSequence,
     IndexingSequence,
     RepeatabilitySequence,
+    SERIES_KEYS,
     SERIES_LABELS,
     rotary_blocks,
     tilt_blocks,
@@ -1225,11 +1229,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ラベル＋入力をひと組の小箱にして、モードに応じて箱ごと出し入れする
         # （横一列に詰め込まず、左サイドの「測定条件」グループに縦並びにする）
-        def field_box(label_text, *widgets, label_width=104):
+        def field_box(label_text, *widgets, label_width=82):
             box = QtWidgets.QWidget()
             h = QtWidgets.QHBoxLayout(box)
             h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
+            h.setSpacing(5)
             lbl = QtWidgets.QLabel(label_text)
             lbl.setMinimumWidth(label_width)
             h.addWidget(lbl)
@@ -1264,6 +1268,8 @@ class MainWindow(QtWidgets.QMainWindow):
         info_form = QtWidgets.QFormLayout(info_group)
         info_form.setLabelAlignment(QtCore.Qt.AlignRight)
         info_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        info_form.setVerticalSpacing(4)
+        info_form.setContentsMargins(6, 4, 6, 4)
         info_form.addRow("型式", self.e_model)
         info_form.addRow("機番", self.e_machine)
         info_form.addRow("日付", self.e_date)
@@ -1390,9 +1396,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_comment = QtWidgets.QLineEdit()
         self.e_comment.setPlaceholderText("コメント（任意。セーブ時に保存される）")
 
+        # 入力欄は幅をそろえてサイドをコンパクトに保つ
+        for sp in (self.e_wstart, self.e_wend, self.e_wheel, self.e_worm,
+                   self.e_range, self.e_start, self.e_rstart, self.e_rend,
+                   self.e_blocks, self.e_repeats, self.e_evald, self.e_blcorr):
+            sp.setMaximumWidth(118)
+
         cond_group = QtWidgets.QGroupBox("測定条件")
         cond_v = QtWidgets.QVBoxLayout(cond_group)
-        cond_v.setSpacing(5)
+        cond_v.setSpacing(3)
+        cond_v.setContentsMargins(6, 4, 6, 4)
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.setContentsMargins(0, 0, 0, 0)
         lbl_mode = QtWidgets.QLabel("モード")
@@ -1539,6 +1552,7 @@ class MainWindow(QtWidgets.QMainWindow):
         side = QtWidgets.QWidget()
         side_v = QtWidgets.QVBoxLayout(side)
         side_v.setContentsMargins(0, 0, 0, 0)
+        side_v.setSpacing(6)
         side_v.addWidget(info_group)
         side_v.addWidget(cond_group)
         side_v.addWidget(ops_group)
@@ -1548,13 +1562,37 @@ class MainWindow(QtWidgets.QMainWindow):
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        side_scroll.setMinimumWidth(330)
-        side_scroll.setMaximumWidth(380)
+        side_scroll.setMinimumWidth(300)
+        side_scroll.setMaximumWidth(330)
+
+        # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
+        self.show_corrected = False
+        self.b_before = QtWidgets.QPushButton("補正前（生データ）")
+        self.b_after = QtWidgets.QPushButton("補正後（P補正）")
+        self.b_after.setToolTip("ホイールにピッチエラー補正を当てた想定の偏差・精度を表示"
+                                "（提出用の補正表と同じ計算）")
+        for b in (self.b_before, self.b_after):
+            b.setCheckable(True)
+        self.b_before.setChecked(True)
+        corr_group = QtWidgets.QButtonGroup(self)
+        corr_group.setExclusive(True)
+        corr_group.addButton(self.b_before)
+        corr_group.addButton(self.b_after)
+        self.b_before.clicked.connect(lambda: self.set_corrected(False))
+        self.b_after.clicked.connect(lambda: self.set_corrected(True))
+        self.corr_bar = QtWidgets.QWidget()
+        corr_row = QtWidgets.QHBoxLayout(self.corr_bar)
+        corr_row.setContentsMargins(0, 0, 0, 0)
+        corr_row.addWidget(QtWidgets.QLabel("表示"))
+        corr_row.addWidget(self.b_before)
+        corr_row.addWidget(self.b_after)
+        corr_row.addStretch(1)
 
         right = QtWidgets.QWidget()
         right_v = QtWidgets.QVBoxLayout(right)
         right_v.setContentsMargins(0, 0, 0, 0)
         right_v.addWidget(self.guide)
+        right_v.addWidget(self.corr_bar)
         right_v.addWidget(plots_widget, 1)
         right_v.addLayout(live_row)
         right_v.addWidget(tables_widget)
@@ -1960,6 +1998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.box_blcorr, self.box_evald):
             w.setVisible(show_division)
         self.box_ranges.setVisible(is_tilt and show_division)
+        self.corr_bar.setVisible(show_division)  # 補正前/後は分割系のみ
         self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
         self.plot_worm.setVisible(show_division)
         self.plot_wheel.setTitle(
@@ -1971,6 +2010,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
         self.seq = None
+        # 表示は補正前に戻す（再描画は下流で行うのでフラグのみ）
+        self.show_corrected = False
+        self.b_before.setChecked(True)
+        self.b_after.setChecked(False)
         if self.view_kind == "repeat":
             self.rep_points = None
             self.rep_data = None
@@ -2546,6 +2589,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 表示 -----
 
+    def set_corrected(self, corrected):
+        """補正前(生)／補正後(P補正)の表示を切り替えて、グラフと精度表を更新する。"""
+        self.show_corrected = bool(corrected)
+        self.b_before.setChecked(not self.show_corrected)
+        self.b_after.setChecked(self.show_corrected)
+        if self.view_kind in ("indexing", "combined") and self.has_view_data():
+            self.redraw()
+            self.finish_indexing()
+
+    def display_series_devs(self):
+        """現在の表示モードでの {系列: (指令角度list, 偏差list)}。
+
+        補正後は、ホイールにピッチエラー補正(P補正)を当てた偏差にする
+        （補正はホイールのみ。ウォームは補正前と同じ）。
+        """
+        devs = {}
+        for key in SERIES_KEYS:
+            targets, measured = self.data.get(key, ([], []))
+            if targets:
+                devs[key] = (list(targets), list(deviation_sec(targets, measured)))
+        if self.show_corrected:
+            interval = float(self.settings.get("p_interval") or 100000) * 1e-4
+            unit = float(self.settings.get("p_unit") or 0.001)
+            table = compensation_table(self.data, interval, unit)
+            for key, (t, d) in apply_compensation(self.data, table).items():
+                devs[key] = (list(t), list(d))
+        return devs
+
     def redraw(self):
         if self.view_kind == "repeat":
             xs = {"cw": [], "ccw": []}
@@ -2558,10 +2629,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curves["rep_cw"].setData(xs["cw"], ys["cw"])
             self.curves["rep_ccw"].setData(xs["ccw"], ys["ccw"])
             return
+        devs = self.display_series_devs()
         for key, curve in self.curves.items():
-            targets, measured = self.data[key]
-            if targets:
-                curve.setData(np.asarray(targets), deviation_sec(targets, measured))
+            if key in devs:
+                t, d = devs[key]
+                curve.setData(np.asarray(t, dtype=float), np.asarray(d, dtype=float))
             else:
                 curve.setData([], [])
 
@@ -2624,32 +2696,63 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.finish_indexing()
 
+    def _spec_text(self, grp, kind):
+        """精度系の規格テキスト。master_judge に <kind>_h / <kind>_w があれば使う。
+
+        傾き(slope)は合否判定.csvに既にある。精度PP/単一/隣接の規格は型式.csv
+        （規格値）を取り込んだら同じ仕組みで表示される。無ければ「—」。
+        """
+        judge = self.master_judge or {}
+        val = judge.get(f"{kind}_{'h' if grp == 'wheel' else 'w'}")
+        return f'≦{val:g}"' if val else "—"
+
     def finish_indexing(self):
         self.b_corr.setEnabled(True)
         summary, _ = summarize(self.data, self.applied_blcorr)
+        devs = self.display_series_devs()
 
-        # 左表: 系列ごとの 精度PP・単一誤差・隣接誤差・傾き
+        # 左表: 各グループ先頭に「規格」行を入れ、その下に系列ごとの
+        # 精度PP・単一誤差・隣接誤差・傾き（補正前/後の表示に追従）
         self.table_series.setColumnCount(len(SERIES_METRIC_HEADERS))
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
-        series = [k for k in SERIES_LABELS if k in summary]
-        self.table_series.setRowCount(len(series))
-        for i, key in enumerate(series):
-            s = summary[key]
-            cells = [
-                SERIES_LABELS[key],
-                f'{s["pp"]:.2f}"',
-                f'{s["single"]:.2f}"',
-                f'{s["adjacent"]:.2f}"',
-                f'{s["slope"]:+.2f}"',
-            ]
+        table_rows = []  # (cells, is_spec, slope_limit)
+        judge = self.master_judge or {}
+        for grp, glabel in (("wheel", "ホイール"), ("worm", "ウォーム")):
+            keys = [k for k in (f"{grp}_cw", f"{grp}_ccw") if k in devs]
+            if not keys:
+                continue
+            slope_limit = judge.get(f"slope_{'h' if grp == 'wheel' else 'w'}")
+            table_rows.append(([
+                f"規格（{glabel}）",
+                self._spec_text(grp, "pp"), self._spec_text(grp, "single"),
+                self._spec_text(grp, "adjacent"), self._spec_text(grp, "slope"),
+            ], True, slope_limit))
+            for key in keys:
+                d = np.asarray(devs[key][1], dtype=float)
+                table_rows.append(([
+                    SERIES_LABELS[key],
+                    f'{pp(d):.2f}"', f'{single(d):.2f}"',
+                    f'{adjacent(d):.2f}"', f'{slope(d):+.2f}"',
+                ], False, slope_limit))
+        self.table_series.setRowCount(len(table_rows))
+        for i, (cells, is_spec, slope_limit) in enumerate(table_rows):
             for j, text in enumerate(cells):
-                self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+                item = QtWidgets.QTableWidgetItem(text)
+                if is_spec:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                elif j == 4 and slope_limit:
+                    try:
+                        if abs(float(text.replace('"', ''))) > slope_limit:
+                            item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                    except ValueError:
+                        pass
+                self.table_series.setItem(i, j, item)
 
-        # 右表: バックラッシMIN/MAX・温度規格による合否・傾き判定・真の最大最小
-        rows = misc_rows(summary, self.current_judgements(summary))
-        rows.extend(self.composite_backlash_rows())
+        # 右表: コンパクトなバックラッシ（規格・OK/NG込み）・真の最大最小ほか
+        rows = self.compact_misc_rows(summary)
         rows.extend(self.main_grid_rows())
-        rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
         if self.is_combined() and self.rep_data:
@@ -2657,6 +2760,44 @@ class MainWindow(QtWidgets.QMainWindow):
             rows.extend(repeat_result_rows(
                 repeatability_summary(self.rep_points, self.rep_data)))
         self.fill_misc_table(rows)
+
+    def compact_misc_rows(self, summary):
+        """バックラッシを1項目1行（MIN〜MAX＋規格＋OK/NG）にまとめた表示用の行。"""
+        rows = []
+        if "backlash_correction" in summary:
+            rows.append(("バックラッシ手動補正",
+                         f'{summary["backlash_correction"]:+.2f}"'))
+        temp = self.parse_temp()
+        mm = None if self.is_tilt() else formula_minmax(self.master_judge, temp)
+
+        def bl_line(label, mn, mx):
+            text = f'{mn:.2f}〜{mx:.2f}"'
+            if mm:
+                ok = mm[0] <= mn and mx <= mm[1]
+                text += (f'　規格 {mm[0]:.1f}〜{mm[1]:.1f}"'
+                         f'　{"OK" if ok else "NG"}')
+            return (label, text)
+
+        for grp, lbl in (("wheel", "ホイール"), ("worm", "ウォーム")):
+            key = f"{grp}_backlash"
+            if key in summary:
+                rows.append(bl_line(f"{lbl} バックラッシ",
+                                    summary[key]["min"], summary[key]["max"]))
+        comp = composite_backlash_minmax(self.data)
+        if comp is not None:
+            rows.append(bl_line("総合バックラッシ(0°)",
+                                comp[0] + self.applied_blcorr,
+                                comp[1] + self.applied_blcorr))
+        true = summary.get("true") or {}
+        for dirn, jp in (("cw", "CW"), ("ccw", "CCW")):
+            if dirn in true:
+                rows.append((f"真の最大最小 {jp}",
+                             f'{true[dirn]["true_min"]:.2f}〜'
+                             f'{true[dirn]["true_max"]:.2f}"'))
+        jt = judgement_texts(summary, temp, self.settings.get("judgement_spec"))
+        if "true" in jt:
+            rows.append(("総合判定", jt["true"]))
+        return rows
 
     def main_grid_rows(self):
         """主点評価: 測定より粗い任意の等分数で精度を評価し直す（例 72等分→12等分）"""
@@ -2751,11 +2892,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, (item, value) in enumerate(rows):
             self.table_misc.setItem(i, 0, QtWidgets.QTableWidgetItem(item))
             cell = QtWidgets.QTableWidgetItem(value)
-            if "判定" in item:
-                if value.startswith("NG"):
-                    cell.setForeground(QtGui.QBrush(QtGui.QColor("red")))
-                elif value.startswith("OK"):
-                    cell.setForeground(QtGui.QBrush(QtGui.QColor("green")))
+            if "NG" in value:
+                cell.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+            elif "OK" in value:
+                cell.setForeground(QtGui.QBrush(QtGui.QColor("#16a34a")))
             self.table_misc.setItem(i, 1, cell)
         self.table_series.resizeColumnsToContents()
         self.table_misc.resizeColumnToContents(0)
@@ -2816,9 +2956,13 @@ class MainWindow(QtWidgets.QMainWindow):
         path = build_save_path(root, self.e_model.text(), machine_no)
         if path.exists():
             answer = QtWidgets.QMessageBox.question(
-                self, "セーブ", f"{path.name} は既にあります。上書きしますか？"
+                self, "セーブ",
+                f"元データ {path.name} が既にあります。上書き保存しますか？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
             )
             if answer != QtWidgets.QMessageBox.Yes:
+                self.statusBar().showMessage("セーブを中止しました（上書きせず）")
                 return
         meta = self.build_meta()
         try:

@@ -132,6 +132,10 @@ META_KEYS = {
 }
 
 SERIES_METRIC_HEADERS = ["系列", "精度PP", "単一誤差", "隣接誤差", "傾き"]
+
+# 統一規格[秒]（全型式共通）。単一誤差≦5、隣接誤差≦10。
+SINGLE_SPEC = 5.0
+ADJACENT_SPEC = 10.0
 REPEAT_HEADERS = ["ブロック", "角度", "CW範囲", "CCW範囲"]
 
 
@@ -1253,28 +1257,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_operator = QtWidgets.QLineEdit()
         self.e_operator.setPlaceholderText("測定者")
         self.e_temp = QtWidgets.QLineEdit()
-        self.e_temp.setPlaceholderText("例: 23.5")
+        self.e_temp.setPlaceholderText("23.5")
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
         self.b_temp = QtWidgets.QPushButton("取得")
-        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を取得"
-                               "（settings.jsonのswitchbot_token等を設定）")
+        self.b_temp.setMaximumWidth(46)
+        self.b_temp.setToolTip("SwitchBot温湿度計から測定温度を自動取得する"
+                               "（SwitchBot未設定のときは非表示）")
         self.b_temp.clicked.connect(self.fetch_temp_from_switchbot)
-        temp_row = QtWidgets.QHBoxLayout()
-        temp_row.setContentsMargins(0, 0, 0, 0)
-        temp_row.addWidget(self.e_temp, 1)
-        temp_row.addWidget(self.b_temp)
+        # 温度の自動取得はSwitchBotを設定したときだけ出す
+        self.b_temp.setVisible(bool(
+            str(self.settings.get("switchbot_token") or "").strip()
+            and str(self.settings.get("switchbot_device") or "").strip()))
+        # 入力欄は短く（枠が無駄に伸びないように上限を付ける）
+        self.e_model.setMaximumWidth(120)
+        self.e_machine.setMaximumWidth(120)
+        self.e_date.setMaximumWidth(120)
+        self.e_operator.setMaximumWidth(96)
+        self.e_temp.setMaximumWidth(58)
 
         info_group = QtWidgets.QGroupBox("測定情報")
-        info_form = QtWidgets.QFormLayout(info_group)
-        info_form.setLabelAlignment(QtCore.Qt.AlignRight)
-        info_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
-        info_form.setVerticalSpacing(4)
-        info_form.setContentsMargins(6, 4, 6, 4)
-        info_form.addRow("型式", self.e_model)
-        info_form.addRow("機番", self.e_machine)
-        info_form.addRow("日付", self.e_date)
-        info_form.addRow("名前", self.e_operator)
-        info_form.addRow("測定温度[°C]", temp_row)
+        info_grid = QtWidgets.QGridLayout(info_group)
+        info_grid.setContentsMargins(6, 4, 6, 4)
+        info_grid.setHorizontalSpacing(6)
+        info_grid.setVerticalSpacing(4)
+        info_grid.addWidget(QtWidgets.QLabel("型式"), 0, 0)
+        info_grid.addWidget(self.e_model, 0, 1)
+        info_grid.addWidget(QtWidgets.QLabel("機番"), 1, 0)
+        info_grid.addWidget(self.e_machine, 1, 1)
+        info_grid.addWidget(QtWidgets.QLabel("日付"), 2, 0)
+        info_grid.addWidget(self.e_date, 2, 1)
+        # 名前と測定温度は同じ行に並べる
+        info_grid.addWidget(QtWidgets.QLabel("名前"), 3, 0)
+        info_grid.addWidget(self.e_operator, 3, 1)
+        info_grid.addWidget(QtWidgets.QLabel("温度℃"), 3, 2)
+        temp_cell = QtWidgets.QWidget()
+        temp_h = QtWidgets.QHBoxLayout(temp_cell)
+        temp_h.setContentsMargins(0, 0, 0, 0)
+        temp_h.setSpacing(4)
+        temp_h.addWidget(self.e_temp)
+        temp_h.addWidget(self.b_temp)
+        temp_h.addStretch(1)
+        info_grid.addWidget(temp_cell, 3, 3)
+        info_grid.setColumnStretch(4, 1)  # 右に余白を作って左へ寄せる
 
         # ===== 測定条件グループ =====
         self.mode_combo = QtWidgets.QComboBox()
@@ -1568,9 +1592,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
         self.b_before = QtWidgets.QPushButton("補正前（生データ）")
-        self.b_after = QtWidgets.QPushButton("補正後（P補正）")
-        self.b_after.setToolTip("ホイールにピッチエラー補正を当てた想定の偏差・精度を表示"
-                                "（提出用の補正表と同じ計算）")
+        self.b_after = QtWidgets.QPushButton("補正後（傾き補正）")
+        self.b_after.setToolTip("始点と終点の偏差を一致させた（傾き成分を除いた）"
+                                "偏差・精度を表示。ピッチエラー補正は含まない")
         for b in (self.b_before, self.b_after):
             b.setCheckable(True)
         self.b_before.setChecked(True)
@@ -2601,21 +2625,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def display_series_devs(self):
         """現在の表示モードでの {系列: (指令角度list, 偏差list)}。
 
-        補正後は、ホイールにピッチエラー補正(P補正)を当てた偏差にする
-        （補正はホイールのみ。ウォームは補正前と同じ）。
+        補正後は傾き補正（始点と終点の偏差を一致させ、傾き成分を除く）を
+        各系列にかけた偏差。補正前は生の偏差。
+        ※ピッチエラー補正(P補正)はここには入れない（明示操作のときだけ）。
         """
         devs = {}
         for key in SERIES_KEYS:
             targets, measured = self.data.get(key, ([], []))
-            if targets:
-                devs[key] = (list(targets), list(deviation_sec(targets, measured)))
-        if self.show_corrected:
-            interval = float(self.settings.get("p_interval") or 100000) * 1e-4
-            unit = float(self.settings.get("p_unit") or 0.001)
-            table = compensation_table(self.data, interval, unit)
-            for key, (t, d) in apply_compensation(self.data, table).items():
-                devs[key] = (list(t), list(d))
+            if not targets:
+                continue
+            dev = list(deviation_sec(targets, measured))
+            if self.show_corrected:
+                dev = self._detrend(dev)
+            devs[key] = (list(targets), dev)
         return devs
+
+    @staticmethod
+    def _detrend(dev):
+        """始点と終点の偏差を一致させる（始終点を結ぶ直線＝傾き成分を除く）。"""
+        n = len(dev)
+        if n < 2:
+            return list(dev)
+        d = np.asarray(dev, dtype=float)
+        return list(d - (d[-1] - d[0]) * np.arange(n) / (n - 1))
 
     def redraw(self):
         if self.view_kind == "repeat":
@@ -2696,15 +2728,23 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.finish_indexing()
 
-    def _spec_text(self, grp, kind):
-        """精度系の規格テキスト。master_judge に <kind>_h / <kind>_w があれば使う。
+    def _spec_limit(self, grp, kind):
+        """規格の上限[秒]。単一/隣接は統一規格、傾きは合否判定.csv。無ければ None。
 
-        傾き(slope)は合否判定.csvに既にある。精度PP/単一/隣接の規格は型式.csv
-        （規格値）を取り込んだら同じ仕組みで表示される。無ければ「—」。
+        精度PPの規格は型式.csv（規格値）を取り込んだら入れる（今は未設定）。
         """
-        judge = self.master_judge or {}
-        val = judge.get(f"{kind}_{'h' if grp == 'wheel' else 'w'}")
-        return f'≦{val:g}"' if val else "—"
+        if kind == "single":
+            return SINGLE_SPEC
+        if kind == "adjacent":
+            return ADJACENT_SPEC
+        if kind == "slope":
+            return (self.master_judge or {}).get(
+                "slope_h" if grp == "wheel" else "slope_w")
+        return None
+
+    def _spec_text(self, grp, kind):
+        limit = self._spec_limit(grp, kind)
+        return f'≦{limit:g}"' if limit else "—"
 
     def finish_indexing(self):
         self.b_corr.setEnabled(True)
@@ -2742,10 +2782,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
-                elif j == 4 and slope_limit:
+                elif j in (2, 3, 4):
+                    limit = {2: SINGLE_SPEC, 3: ADJACENT_SPEC, 4: slope_limit}[j]
                     try:
-                        if abs(float(text.replace('"', ''))) > slope_limit:
-                            item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                        if limit and abs(float(text.replace('"', ''))) > limit:
+                            item.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
                     except ValueError:
                         pass
                 self.table_series.setItem(i, j, item)
@@ -3362,10 +3403,24 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- 印刷 -----
 
     def print_report(self):
-        """A4一枚（＋分割モードはP補正ページ）の検査記録を印刷する"""
+        """A4一枚の検査記録を印刷する。ピッチエラー補正ページは明示選択時のみ。"""
         if not self.has_view_data():
             return
         from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+        # ピッチエラー補正は自動では入れない。対象があるときだけ確認して付ける
+        self.include_pcorr = False
+        if self.view_kind in ("indexing", "combined") and not self.is_tilt():
+            interval = float(self.settings.get("p_interval") or 100000) * 1e-4
+            unit = float(self.settings.get("p_unit") or 0.001)
+            if compensation_table(self.data, interval, unit):
+                answer = QtWidgets.QMessageBox.question(
+                    self, "印刷",
+                    "ピッチエラー補正（提出用）のページも付けますか？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                self.include_pcorr = answer == QtWidgets.QMessageBox.Yes
 
         printer = QPrinter(QPrinter.HighResolution)
         printer.setPageOrientation(QtGui.QPageLayout.Landscape)
@@ -3464,7 +3519,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"<td valign='top'>{misc_table}</td></tr></table>")
 
     def _pcorr_html(self, document):
-        """P補正表＋補正後グラフのページ（分割モードのみ）"""
+        """P補正表＋補正後グラフのページ（印刷時に明示選択したときだけ出す）"""
+        if not getattr(self, "include_pcorr", False):
+            return ""
         interval = float(self.settings.get("p_interval") or 100000) * 1e-4
         unit = float(self.settings.get("p_unit") or 0.001)
         table = compensation_table(self.data, interval, unit)

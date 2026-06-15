@@ -1994,11 +1994,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_take.setEnabled(False)
         self.b_undo = QtWidgets.QPushButton("1点戻る")
         self.b_undo.setEnabled(False)
+        self.b_partial = QtWidgets.QPushButton("部分再測定")
+        self.b_partial.setToolTip("選んだ系列（例 ホイールCWだけ）を測り直す。他のデータはそのまま")
         self.b_start.clicked.connect(self.start)
         self.b_auto.clicked.connect(self.auto_start)
         self.b_cancel.clicked.connect(self.cancel)
         self.b_take.clicked.connect(self.take_manual)
         self.b_undo.clicked.connect(self.undo)
+        self.b_partial.clicked.connect(self.show_partial_remeasure)
         # 取込開始・自動測定は上部ツールバー（セーブの横）へ。
         # ここには取込中の操作（中止・手動取込・1点戻る）だけ置く。
         ops_group = QtWidgets.QGroupBox("取込中の操作")
@@ -2042,6 +2045,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 取込開始・自動測定を左上（セーブの横）に置く
         toolbar.addWidget(self.b_start)
         toolbar.addWidget(self.b_auto)
+        toolbar.addWidget(self.b_partial)
         toolbar.addSeparator()
         for b in (self.b_save, self.b_print, b_load):
             toolbar.addWidget(b)
@@ -2740,6 +2744,86 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_web_snapshot(with_png=True)
 
     # ----- 自動測定（SwitchBotで機械起動 + 傾きNG自動再測定） -----
+
+    def show_partial_remeasure(self):
+        """部分再測定: 系列を選んで測り直す（他の系列はそのまま残す）。"""
+        if self.view_kind not in ("indexing", "combined") or not (
+                self.data and any(t for t, _ in self.data.values())):
+            self.statusBar().showMessage(
+                "部分再測定は、回転/傾斜分割の測定データがあるときに使えます")
+            return
+        if self.seq is not None and not self.seq.done():
+            self.statusBar().showMessage("取込中は部分再測定できません（先に完了か中止を）")
+            return
+        present = [k for k in SERIES_KEYS if self.data.get(k) and self.data[k][0]]
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("部分再測定")
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.addWidget(QtWidgets.QLabel(
+            "測り直す系列を選んでください（チェックした系列だけ測り直し、\n"
+            "他のデータはそのまま残ります）:"))
+        checks = {}
+        for key in present:
+            cb = QtWidgets.QCheckBox(SERIES_LABELS[key])
+            checks[key] = cb
+            layout.addWidget(cb)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("再測定開始")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        selected = [k for k in present if checks[k].isChecked()]
+        if not selected:
+            self.statusBar().showMessage("系列が選ばれていません")
+            return
+        self.start_partial(selected)
+
+    def start_partial(self, selected):
+        """選択系列のみ測り直す。非選択系列は現在のデータを引き継ぐ。"""
+        missing = self.missing_required_fields()
+        if missing:
+            QtWidgets.QMessageBox.warning(
+                self, "部分再測定",
+                "次の項目を入力してください:\n  " + "、".join(missing))
+            return
+        old = {k: (list(t), list(m)) for k, (t, m) in self.data.items()}
+        seq = IndexingSequence(
+            wheel_pitch=self.e_wheel.value(),
+            worm_pitch=self.e_worm.value(),
+            worm_range=self.e_range.value(),
+            worm_start=self.e_start.value(),
+            wheel_start=self.e_wstart.value() if self.is_tilt() else 0.0,
+            wheel_end=self.e_wend.value() if self.is_tilt() else 360.0,
+            order=selected,
+        )
+        # 非選択系列は元データを引き継ぐ（選択系列は空＝これから測り直す）
+        for key in SERIES_KEYS:
+            if key not in selected and key in old:
+                seq.data[key] = (list(old[key][0]), list(old[key][1]))
+        self.seq = seq
+        self.data = seq.data
+        self.dev.flush_input()
+        self.rebuild_curves()
+        self.table_series.setRowCount(0)
+        self.table_misc.setRowCount(0)
+        self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(0.0)
+        self.b_corr.setEnabled(False)
+        self.b_take.setEnabled(True)
+        self.b_cancel.setEnabled(True)
+        self.b_undo.setEnabled(False)
+        self.b_save.setEnabled(False)
+        self.b_print.setEnabled(False)
+        self.redraw()  # 残す系列をすぐ表示
+        self.update_counts()
+        self.show_guide()
+        self.update_web_snapshot(with_png=True)
+        self.statusBar().showMessage(
+            "部分再測定: " + "・".join(SERIES_LABELS[k] for k in selected)
+            + " を測り直します（他はそのまま）")
 
     def auto_start(self):
         """自動測定: 取込開始→SwitchBotで機械起動→完了後に傾き/精度判定→NGなら再測定"""

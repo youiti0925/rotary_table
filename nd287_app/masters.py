@@ -18,6 +18,7 @@
 
 import csv
 import io
+import re
 from pathlib import Path
 
 from .settings import app_dir
@@ -137,10 +138,21 @@ def load_masters(settings) -> dict:
 
 
 def find_entry(entries: dict, model_text: str):
-    """入力された型式（例 RWE-200, RB-250Ri）でマスタを引く。"""
+    """入力された型式（例 RWE-200, RB-250Ri）でマスタを引く。
+
+    完全一致が無ければ、末尾の英字（クローズ記号）を外したベース型式でも引く
+    （例 RW-250R → RW-250、RB-250Ri → RB-250）。クローズ専用の行があれば
+    そちらが優先される（完全一致が先）。
+    """
     if not model_text:
         return None
-    return entries.get(model_text.strip().upper())
+    key = model_text.strip().upper()
+    if key in entries:
+        return entries[key]
+    base = re.sub(r"(\d)[A-Za-z]+$", r"\1", key)
+    if base != key and base in entries:
+        return entries[base]
+    return None
 
 
 def condition_params(cond: dict, judge: dict = None) -> dict:

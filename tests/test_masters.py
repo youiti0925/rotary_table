@@ -118,6 +118,16 @@ class TestJudgementMaster(unittest.TestCase):
         self.assertEqual(judge["multi"], "N")
         self.assertEqual(judge["teeth"], 36.0)
 
+    def test_close_variant_falls_back_to_base(self):
+        # .BSの型式 RW-250R（クローズR）は専用行が無いのでベース RW-250 で引く
+        base = find_entry(self.judgement, "RW-250")
+        variant = find_entry(self.judgement, "RW-250R")
+        self.assertIsNotNone(variant)
+        self.assertEqual(variant["model"], "RW-250")
+        self.assertEqual(formula_minmax(variant, 26.0), formula_minmax(base, 26.0))
+        self.assertEqual(tuple(round(x, 1) for x in formula_minmax(variant, 26.0)),
+                         (8.4, 46.2))
+
 
 
 class TestUserConditions(unittest.TestCase):

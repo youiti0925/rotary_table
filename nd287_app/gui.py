@@ -3178,32 +3178,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_misc_table(rows)
 
     def compact_misc_rows(self, summary):
-        """バックラッシを1項目1行（MIN〜MAX＋規格＋OK/NG）にまとめた表示用の行。"""
+        """総合バックラッシ（MIN/MAX/平均/差）と真の最大最小。
+
+        ホイール／ウォーム単品のバックラッシは出さない（旧アプリと同じく総合のみ）。
+        """
         rows = []
         if "backlash_correction" in summary:
             rows.append(("バックラッシ手動補正",
                          f'{summary["backlash_correction"]:+.2f}"'))
         temp = self.parse_temp()
         mm = None if self.is_tilt() else formula_minmax(self.master_judge, temp)
-
-        def bl_line(label, mn, mx):
-            text = f'{mn:.2f}〜{mx:.2f}"'
-            if mm:
-                ok = mm[0] <= mn and mx <= mm[1]
-                text += (f'　規格 {mm[0]:.1f}〜{mm[1]:.1f}"'
-                         f'　{"OK" if ok else "NG"}')
-            return (label, text)
-
-        for grp, lbl in (("wheel", "ホイール"), ("worm", "ウォーム")):
-            key = f"{grp}_backlash"
-            if key in summary:
-                rows.append(bl_line(f"{lbl} バックラッシ",
-                                    summary[key]["min"], summary[key]["max"]))
         comp = composite_backlash_minmax(self.data)
         if comp is not None:
-            rows.append(bl_line("総合バックラッシ(0°)",
-                                comp[0] + self.applied_blcorr,
-                                comp[1] + self.applied_blcorr))
+            cmin = comp[0] + self.applied_blcorr
+            cmax = comp[1] + self.applied_blcorr
+            cavg = (cmin + cmax) / 2.0
+            cdiff = cmax - cmin
+            if mm:
+                smin, smax = mm
+                savg = (smin + smax) / 2.0
+                rows.append(("総合バックラッシ MIN",
+                             f'{cmin:.1f}"　規格 ≧{smin:.1f}"'
+                             f'　{"OK" if cmin >= smin else "NG"}'))
+                rows.append(("総合バックラッシ MAX",
+                             f'{cmax:.1f}"　規格 ≦{smax:.1f}"'
+                             f'　{"OK" if cmax <= smax else "NG"}'))
+                rows.append(("総合バックラッシ 平均",
+                             f'{cavg:.1f}"　規格 ≦{savg:.1f}"'
+                             f'　{"OK" if cavg <= savg else "NG"}'))
+            else:
+                rows.append(("総合バックラッシ MIN", f'{cmin:.1f}"'))
+                rows.append(("総合バックラッシ MAX", f'{cmax:.1f}"'))
+                rows.append(("総合バックラッシ 平均", f'{cavg:.1f}"'))
+            rows.append(("総合バックラッシ 差", f'{cdiff:.1f}"'))
         true = summary.get("true") or {}
         for dirn, jp in (("cw", "CW"), ("ccw", "CCW")):
             if dirn in true:
@@ -3946,7 +3953,7 @@ class MainWindow(QtWidgets.QMainWindow):
             results = self._results_html(summary)
             pcorr = self._pcorr_html(document)
         html = (
-            "<h2 style='margin:2px;'>分割測定 検査記録</h2>"
+            f"<h2 style='margin:2px;'>{self.current_mode()} 検査記録</h2>"
             + self._meta_html() + graphs + results + pcorr
         )
         document.setHtml(html)

@@ -201,7 +201,15 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # SwitchBot Bot（BLE直結でNCの起動ボタンを物理押し）。クラウド/温度は使わない
         self.e_sb_mac = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_mac", "")))
-        self.e_sb_mac.setToolTip("SwitchBot Bot本体のBLE MACアドレス（直結で押す相手）")
+        self.e_sb_mac.setToolTip("SwitchBot Bot本体のBLE MACアドレス。"
+                                 "「スキャン」で自動検出して選べる")
+        self.b_sb_scan = QtWidgets.QPushButton("スキャン")
+        self.b_sb_scan.setToolTip("近くのSwitchBotをBLEスキャンして自動で見つける（手入力不要）")
+        self.b_sb_scan.clicked.connect(self.scan_switchbot)
+        mac_row = QtWidgets.QHBoxLayout()
+        mac_row.setContentsMargins(0, 0, 0, 0)
+        mac_row.addWidget(self.e_sb_mac, 1)
+        mac_row.addWidget(self.b_sb_scan)
         self.e_sb_pw = QtWidgets.QLineEdit(str(settings.get("switchbot_ble_password", "")))
         self.e_sb_pw.setEchoMode(QtWidgets.QLineEdit.Password)
         self.e_sb_pw.setToolTip("Botにパスワードを設定している場合のみ")
@@ -226,7 +234,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         sb_group = QtWidgets.QGroupBox("自動測定（SwitchBot Bot・BLE直結）")
         sb_form = QtWidgets.QFormLayout(sb_group)
-        sb_form.addRow("Bot BLE MAC", self.e_sb_mac)
+        sb_form.addRow("Bot BLE MAC", mac_row)
         sb_form.addRow("BLEパスワード", self.e_sb_pw)
         sb_form.addRow("押し方（押し回数）", self.cmb_sb_pattern)
         sb_form.addRow("自動再測定の上限", self.sp_sb_retry)
@@ -282,6 +290,32 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         if path:
             edit.setText(path)
+
+    def scan_switchbot(self):
+        """BLEスキャンで近くのSwitchBotを自動検出し、選んでMACを入れる（手入力不要）。"""
+        from .switchbot import scan_switchbot_ble
+        self.b_sb_scan.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            ok, devices, message = scan_switchbot_ble()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.b_sb_scan.setEnabled(True)
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "BLEスキャン", message)
+            return
+        candidates = [d for d in devices if d["switchbot"]] or devices
+        if not candidates:
+            QtWidgets.QMessageBox.information(
+                self, "BLEスキャン", "SwitchBotが見つかりませんでした")
+            return
+        items = [f'{d["name"] or "(名前なし)"} [{d["model"] or "?"}] '
+                 f'RSSI{d["rssi"]}  {d["mac"]}' for d in candidates]
+        choice, picked = QtWidgets.QInputDialog.getItem(
+            self, "SwitchBotを選択",
+            "見つかった機器（SwitchBot優先・電波強い順）:", items, 0, False)
+        if picked and choice:
+            self.e_sb_mac.setText(choice.split()[-1])
 
     def browse_root(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(

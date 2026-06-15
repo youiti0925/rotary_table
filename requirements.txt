@@ -3,3 +3,4 @@ pyserial
 PySide6
 pyqtgraph
 openpyxl
+bleak

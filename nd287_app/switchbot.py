@@ -69,6 +69,8 @@ def list_devices(token: str, secret: str, timeout: float = 10.0) -> list:
 
 # SwitchBot Bot の BLE GATT 定義（ハブ無し直結用）
 BLE_WRITE_CHAR = "cba20002-224d-11e6-9fb9-0002a5d5c51b"
+# SwitchBot のアドバタイズ サービスUUID（スキャンでの自動検出に使う）
+SWITCHBOT_SERVICE_PREFIX = "0000fd3d"
 
 DEFAULT_PATTERNS = {
     "1回押し": [0.0],
@@ -172,6 +174,46 @@ def press_bot_ble(mac: str, password: str = "") -> tuple:
         return True, f"BLE press 送信OK ({mac} / {used})"
     except Exception as exc:
         return False, f"BLE例外: {exc}"
+
+
+def scan_switchbot_ble(timeout: float = 6.0) -> tuple:
+    """近くのBLE機器をスキャンし、SwitchBotを優先して返す。(成功, 一覧, メッセージ)
+
+    旧アプリ xr20_tool と同じ検出方法（アドバタイズの SwitchBot サービスUUID
+    0000fd3d… で判定）。一覧は SwitchBot 優先・電波(RSSI)が強い順。各要素は
+    dict(mac, name, rssi, switchbot, model)。これで手入力なしにBotを見つけられる。
+    """
+    try:
+        from bleak import BleakScanner
+    except Exception as exc:
+        return False, [], f"bleak 未導入: {exc}（pip install bleak）"
+
+    async def _run():
+        out = []
+        results = await BleakScanner.discover(timeout=timeout, return_adv=True)
+        for dev, adv in results.values():
+            service_data = adv.service_data or {}
+            is_sb = any(str(k).lower().startswith(SWITCHBOT_SERVICE_PREFIX)
+                        for k in service_data)
+            model = ""
+            for key, value in service_data.items():
+                if str(key).lower().startswith(SWITCHBOT_SERVICE_PREFIX) and value:
+                    model = chr(value[0] & 0x7F)
+            out.append(dict(
+                mac=dev.address,
+                name=adv.local_name or (dev.name or ""),
+                rssi=adv.rssi if adv.rssi is not None else -999,
+                switchbot=is_sb,
+                model=model,
+            ))
+        return out
+
+    try:
+        devices = _run_async(_run())
+    except Exception as exc:
+        return False, [], f"スキャン失敗: {exc}"
+    devices.sort(key=lambda d: (not d["switchbot"], -d["rssi"]))
+    return True, devices, f"{len(devices)}台検出（SwitchBot優先・電波強い順）"
 
 
 def press_bot(settings: dict) -> tuple:

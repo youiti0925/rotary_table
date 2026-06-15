@@ -8,7 +8,9 @@
 設定（FanucConfig）で変更できる項目:
     axis        … 割出軸のアドレス（既定 X）
     preswing    … 前振り量[°]（バックラッシュ消しの行き過ぎ量。既定 10）
-    dwell_sec   … 位置決め後のドゥエル[秒]（G04 X… 既定 1秒）
+    swing_dwell_sec … 振り後のドゥエル[秒]（バックラッシュ消しの振り後。測定とは
+                      無関係なので小さめ＝速い。既定 1秒）
+    dwell_sec   … 測定ドゥエル[秒]（測定点で静止・読取前。G04 X… 既定 1秒）
     mcode       … 完了信号Mコード（カウンターへ送る。既定 M80）
     use_subprogram … True: 再現をサブプロ（M98 L呼び）/ False: 1本に展開
     return_to_start … 測定後に開始位置へ戻すか
@@ -28,7 +30,8 @@ from dataclasses import dataclass
 class FanucConfig:
     axis: str = "X"
     preswing: float = 10.0
-    dwell_sec: float = 1.0
+    swing_dwell_sec: float = 1.0  # バックラッシュ消しの振り後（測定無関係＝小さめ）
+    dwell_sec: float = 1.0        # 測定点での静止待ち（読取前。1.0〜5.0で調整）
     mcode: str = "M80"
     use_subprogram: bool = True
     main_number: int = 100
@@ -43,6 +46,7 @@ class FanucConfig:
         return cls(
             axis=str(s.get("fanuc_axis", "X")),
             preswing=float(s.get("fanuc_preswing", 10.0)),
+            swing_dwell_sec=float(s.get("fanuc_swing_dwell_sec", 1.0)),
             dwell_sec=float(s.get("fanuc_dwell_sec", 1.0)),
             mcode=str(s.get("fanuc_mcode", "M80")),
             use_subprogram=bool(s.get("fanuc_use_subprogram", True)),
@@ -63,28 +67,32 @@ def fmt_num(value) -> str:
     return text
 
 
-def _dwell(cfg: FanucConfig) -> str:
+def _dwell(cfg: FanucConfig, swing: bool = False) -> str:
     # G04 X… は小数点付き = 秒指定（FANUC）。小数点なしは最小指令単位になり誤動作のもと。
-    return f"G04 X{fmt_num(cfg.dwell_sec)}"
+    # swing=True: バックラッシュ消しの振り後（測定無関係・小さめ）。
+    # swing=False: 測定点での静止待ち（読取前）。
+    sec = cfg.swing_dwell_sec if swing else cfg.dwell_sec
+    return f"G04 X{fmt_num(sec)}"
 
 
 def _point_with_preswing(cfg: FanucConfig, direction: int) -> list:
     """前振り付きで1点読む（パス先頭・再現で使う基本動作）。正味移動0。
 
     direction>0: 負側から接近（-preswing→戻り）。direction<0: 正側から接近。
+    振り後は振りドゥエル（小）、測定点では測定ドゥエル→完了信号。
     """
     p = cfg.preswing
     a = cfg.axis
     if direction > 0:
-        moves = [f"G00 {a}{fmt_num(-p)}", _dwell(cfg), f"{a}{fmt_num(p)}"]
+        moves = [f"G00 {a}{fmt_num(-p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(p)}"]
     else:
-        moves = [f"G00 {a}{fmt_num(p)}", _dwell(cfg), f"{a}{fmt_num(-p)}"]
+        moves = [f"G00 {a}{fmt_num(p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(-p)}"]
     return moves + [_dwell(cfg), cfg.mcode]
 
 
 def _division_pass(cfg: FanucConfig, n_points: int, pitch: float,
                    direction: int) -> list:
-    """1パス（n_points点）。先頭で前振り、以降はピッチ送り＋ドゥエル＋完了信号。"""
+    """1パス（n_points点）。先頭で前振り、以降はピッチ送り＋測定ドゥエル＋完了信号。"""
     lines = list(_point_with_preswing(cfg, direction))  # 先頭点（n_points のうち1点目）
     step = pitch * direction
     for _ in range(max(n_points - 1, 0)):
@@ -97,18 +105,18 @@ def repeat_body(cfg: FanucConfig) -> list:
     p = cfg.preswing
     a = cfg.axis
     return [
-        f"G91 G00 {a}{fmt_num(-p)}", _dwell(cfg), f"{a}{fmt_num(p)}", _dwell(cfg),
-        cfg.mcode,
-        f"G91 G00 {a}{fmt_num(p)}", _dwell(cfg), f"{a}{fmt_num(-p)}", _dwell(cfg),
-        cfg.mcode,
+        f"G91 G00 {a}{fmt_num(-p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(p)}",
+        _dwell(cfg), cfg.mcode,
+        f"G91 G00 {a}{fmt_num(p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(-p)}",
+        _dwell(cfg), cfg.mcode,
     ]  # 完了信号 2 回
 
 
 def _goto(cfg: FanucConfig, delta: float) -> list:
-    """完了信号を出さない位置決め移動（パス間・ブロック間の割り出し）。"""
+    """完了信号を出さない位置決め移動（パス間・ブロック間の割り出し）。振りドゥエル（小）。"""
     if abs(delta) < 1e-9:
         return []
-    return [f"G00 {cfg.axis}{fmt_num(delta)}", _dwell(cfg)]
+    return [f"G00 {cfg.axis}{fmt_num(delta)}", _dwell(cfg, swing=True)]
 
 
 def _reset_block(cfg: FanucConfig) -> list:

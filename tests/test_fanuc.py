@@ -85,6 +85,14 @@ class TestRepeatBody(unittest.TestCase):
         self.assertIn("G04 X0.5", body)
         self.assertEqual(body.count("M52"), 2)
 
+    def test_swing_and_measure_dwell_separate(self):
+        # 振り後＝振りドゥエル(小)、測定点＝測定ドゥエル の2系統が別々に効く
+        cfg = FanucConfig(axis="X", preswing=10.0, swing_dwell_sec=1.0, dwell_sec=3.0)
+        self.assertEqual(repeat_body(cfg), [
+            "G91 G00 X-10.", "G04 X1.", "X10.", "G04 X3.", "M80",
+            "G91 G00 X10.", "G04 X1.", "X-10.", "G04 X3.", "M80",
+        ])
+
 
 class TestGenerate(unittest.TestCase):
     def test_division_only_signal_count(self):

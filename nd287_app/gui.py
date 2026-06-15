@@ -578,11 +578,22 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_reset_sw.setValue(float(settings.get(
             "fanuc_reset_swing", settings.get("fanuc_preswing", 10.0))))
         self.e_reset_sw.setSuffix(" °")
+        self.e_swing_dwell = QtWidgets.QDoubleSpinBox()
+        self.e_swing_dwell.setRange(0.0, 10.0)
+        self.e_swing_dwell.setDecimals(2)
+        self.e_swing_dwell.setSingleStep(0.5)
+        self.e_swing_dwell.setValue(float(settings.get("fanuc_swing_dwell_sec", 1.0)))
+        self.e_swing_dwell.setSuffix(" 秒")
+        self.e_swing_dwell.setToolTip(
+            "バックラッシュ消しの振り後のドゥエル。測定とは無関係なので小さい方が"
+            "プログラムが速い（0.5〜1.0目安）")
         self.e_dwell = QtWidgets.QDoubleSpinBox()
         self.e_dwell.setRange(0.0, 60.0)
         self.e_dwell.setDecimals(2)
+        self.e_dwell.setSingleStep(0.5)
         self.e_dwell.setValue(float(settings.get("fanuc_dwell_sec", 1.0)))
         self.e_dwell.setSuffix(" 秒")
+        self.e_dwell.setToolTip("測定点で静止・読取前のドゥエル。測定に効くので 1.0〜5.0 で調整")
         self.e_mcode = QtWidgets.QLineEdit(str(settings.get("fanuc_mcode", "M80")))
         self.e_mcode.setMaximumWidth(80)
         self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする（外すと1本に展開）")
@@ -606,7 +617,8 @@ class ProgramDialog(QtWidgets.QDialog):
         form.addRow("割出軸", self.e_axis)
         form.addRow("前振り量（測定点のバックラッシュ消し）", self.e_pre)
         form.addRow("リセット振り量（カウンター0設定用）", self.e_reset_sw)
-        form.addRow("ドゥエル（位置決め後の待ち）", self.e_dwell)
+        form.addRow("振りドゥエル（バックラッシュ消し後・小さめ）", self.e_swing_dwell)
+        form.addRow("測定ドゥエル（測定点で静止・読取前 1.0〜5.0）", self.e_dwell)
         form.addRow("完了信号Mコード", self.e_mcode)
         form.addRow("メインO番号", self.e_main)
         form.addRow("再現サブプロO番号", self.e_sub)
@@ -643,7 +655,7 @@ class ProgramDialog(QtWidgets.QDialog):
 
         for w in (self.e_axis, self.e_mcode):
             w.textChanged.connect(self.refresh)
-        for w in (self.e_pre, self.e_reset_sw, self.e_dwell):
+        for w in (self.e_pre, self.e_reset_sw, self.e_swing_dwell, self.e_dwell):
             w.valueChanged.connect(self.refresh)
         for w in (self.e_main, self.e_sub):
             w.valueChanged.connect(self.refresh)
@@ -655,6 +667,7 @@ class ProgramDialog(QtWidgets.QDialog):
         return FanucConfig(
             axis=self.e_axis.text().strip() or "X",
             preswing=self.e_pre.value(),
+            swing_dwell_sec=self.e_swing_dwell.value(),
             dwell_sec=self.e_dwell.value(),
             mcode=self.e_mcode.text().strip() or "M80",
             use_subprogram=self.c_sub.isChecked(),

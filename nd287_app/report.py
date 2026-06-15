@@ -239,6 +239,91 @@ def deviation_table(series_devs):
     return headers, rows, val_cols
 
 
+def record_from_bs(path):
+    """旧形式 .BS（回転分割）を読み、保存済みの結果値でレコードを作る（再計算しない）。"""
+    from .bs_format import load_bs
+    doc = load_bs(str(path))
+    series = doc.get("series") or {}
+    sec_label = {"HR": "ホイール CW", "HL": "ホイール CCW",
+                 "WR": "ウォーム CW", "WL": "ウォーム CCW"}
+    metrics = {}
+    for sec, lab in sec_label.items():
+        e = series.get(sec)
+        if e and e.get("points"):
+            if e.get("acc2") is not None:
+                metrics[f"{lab} 精度PP"] = float(e["acc2"])
+            if e.get("slope") is not None:
+                metrics[f"{lab} 傾き"] = float(e["slope"])
+    mn, mx = doc.get("spec_min"), doc.get("spec_max")
+    if mn is not None and mx is not None:
+        metrics["総合BL MIN"] = float(mn)
+        metrics["総合BL MAX"] = float(mx)
+        metrics["総合BL 平均"] = (float(mn) + float(mx)) / 2.0
+        metrics["総合BL 差"] = float(mx) - float(mn)
+    return {
+        "パス": str(path), "ファイル": Path(path).name,
+        "日付": doc.get("date", ""), "型式": doc.get("model", ""),
+        "機番": Path(path).stem, "名前": doc.get("operator", ""),
+        "モード": "回転分割", "測定温度": _to_float(doc.get("temperature")),
+        "判定": "", "metrics": metrics,
+    }
+
+
+def record_from_ks(path):
+    """旧形式 .KS（傾斜分割）を読み、保存済みの結果値でレコードを作る（再計算しない）。"""
+    from .ks_format import load_ks
+    doc = load_ks(str(path))
+    acw = doc.get("acc_cw") or []
+    accw = doc.get("acc_ccw") or []
+    metrics = {}
+
+    def put(key, arr, idx):
+        if len(arr) > idx and arr[idx] is not None:
+            metrics[key] = float(arr[idx])
+    put("ホイール CW 精度PP", acw, 0)
+    put("ウォーム CW 精度PP", acw, 1)
+    put("ホイール CCW 精度PP", accw, 0)
+    put("ウォーム CCW 精度PP", accw, 1)
+    return {
+        "パス": str(path), "ファイル": Path(path).name,
+        "日付": doc.get("date", ""), "型式": doc.get("model", ""),
+        "機番": Path(path).stem, "名前": doc.get("operator", ""),
+        "モード": "傾斜分割", "測定温度": None, "判定": "", "metrics": metrics,
+    }
+
+
+def search_inspection(root, model="", machine=""):
+    """.BS/.KS の検査表フォルダを型式・機番で検索してレコード列を返す（新しい順）。
+
+    型式は「フォルダ名（例 RWE）または .BS/.KS 内の型式」に部分一致、機番はファイル名に
+    部分一致。読み取りは保存済みの結果値（旧アプリ計算）をそのまま使う。
+    """
+    root = Path(root)
+    records = []
+    if not root.exists():
+        return records
+    model_u = (model or "").strip().upper()
+    machine_s = (machine or "").strip()
+    paths = list(root.rglob("*.[bB][sS]")) + list(root.rglob("*.[kK][sS]"))
+    try:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        pass
+    for p in paths:
+        if machine_s and machine_s not in p.stem:
+            continue
+        try:
+            rec = (record_from_bs(p) if p.suffix.lower() == ".bs"
+                   else record_from_ks(p))
+        except Exception:
+            continue
+        if model_u and model_u not in (rec["型式"] or "").upper() \
+                and model_u not in p.parent.name.upper():
+            continue
+        records.append(rec)
+    return records
+
+
 def write_table_csv(path, headers, rows):
     """ヘッダ＋行を Excel で開けるCSV(cp932)で書き出す。"""
     with open(path, "w", newline="", encoding="cp932", errors="replace") as f:

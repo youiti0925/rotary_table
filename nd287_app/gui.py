@@ -768,39 +768,57 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
 
 
 class PastDataDialog(QtWidgets.QDialog):
-    """過去データの一覧（直近N件）。条件＋主要な測定結果を表示し、クリックでロード。"""
+    """過去データ検索。.BS/.KS（検査表）フォルダを型式・機番で探し、保存済みの結果を表示。
 
-    # (列名, metricsのキー or None) None は特別計算（BL MAX）
+    型式の頭文字フォルダ（例 RWE）から探す。値は旧アプリが保存した結果をそのまま使う。
+    """
+
     RESULT_COLUMNS = [
-        ("ホイールCW PP", "ホイール CW 精度PP"),
-        ("ホイールCCW PP", "ホイール CCW 精度PP"),
-        ("ウォームCW PP", "ウォーム CW 精度PP"),
-        ("ウォームCCW PP", "ウォーム CCW 精度PP"),
-        ("バックラッシMAX", None),
-        ("再現性", "再現性総合"),
+        ("ホイールCW 精度", "ホイール CW 精度PP"),
+        ("ホイールCCW 精度", "ホイール CCW 精度PP"),
+        ("ウォームCW 精度", "ウォーム CW 精度PP"),
+        ("ウォームCCW 精度", "ウォーム CCW 精度PP"),
+        ("総合BL MIN", "総合BL MIN"),
+        ("総合BL MAX", "総合BL MAX"),
+        ("総合BL 差", "総合BL 差"),
     ]
-    COLUMNS = (["日付", "型式", "機番", "名前", "モード", "主要条件"]
-               + [c[0] for c in RESULT_COLUMNS] + ["判定", "ファイル"])
+    COLUMNS = (["日付", "型式", "機番", "名前", "モード"]
+               + [c[0] for c in RESULT_COLUMNS] + ["ファイル"])
 
     def __init__(self, win):
         super().__init__(win)
         self.win = win
-        self.setWindowTitle("過去データ")
-        self.resize(1180, 540)
+        self.setWindowTitle("過去データ検索（.BS/.KS）")
+        self.resize(1180, 560)
         layout = QtWidgets.QVBoxLayout(self)
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(QtWidgets.QLabel("直近"))
+        top.addWidget(QtWidgets.QLabel("型式"))
+        self.e_model = QtWidgets.QLineEdit(self.win.e_model.text().strip())
+        self.e_model.setPlaceholderText("例: RWE / RWE-200")
+        self.e_model.setMaximumWidth(160)
+        self.e_model.returnPressed.connect(self.reload)
+        top.addWidget(self.e_model)
+        top.addWidget(QtWidgets.QLabel("機番"))
+        self.e_machine = QtWidgets.QLineEdit(self.win.e_machine.text().strip())
+        self.e_machine.setPlaceholderText("例: 261042")
+        self.e_machine.setMaximumWidth(140)
+        self.e_machine.returnPressed.connect(self.reload)
+        top.addWidget(self.e_machine)
+        top.addWidget(QtWidgets.QLabel("上限"))
         self.e_count = QtWidgets.QSpinBox()
-        self.e_count.setRange(1, 500)
-        self.e_count.setValue(int(win.settings.get("recent_count") or 10))
+        self.e_count.setRange(1, 2000)
+        self.e_count.setValue(max(int(win.settings.get("recent_count") or 10), 50))
         self.e_count.setSuffix(" 件")
-        self.e_count.valueChanged.connect(self.reload)
         top.addWidget(self.e_count)
-        b_refresh = QtWidgets.QPushButton("更新")
-        b_refresh.clicked.connect(self.reload)
-        top.addWidget(b_refresh)
+        b_search = QtWidgets.QPushButton("検索")
+        b_search.clicked.connect(self.reload)
+        top.addWidget(b_search)
         top.addStretch(1)
         layout.addLayout(top)
+
+        self.lbl_root = QtWidgets.QLabel("")
+        self.lbl_root.setStyleSheet("color:#666;")
+        layout.addWidget(self.lbl_root)
 
         self.table = QtWidgets.QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
@@ -811,7 +829,7 @@ class PastDataDialog(QtWidgets.QDialog):
 
         buttons = QtWidgets.QHBoxLayout()
         b_csv = QtWidgets.QPushButton("CSV出力")
-        b_csv.setToolTip("一覧表をCSV(Excelで開ける)で保存する")
+        b_csv.setToolTip("検索結果の一覧表をCSV(Excelで開ける)で保存する")
         b_load = QtWidgets.QPushButton("選択をロード")
         b_close = QtWidgets.QPushButton("閉じる")
         b_csv.clicked.connect(self.export_csv)
@@ -822,8 +840,42 @@ class PastDataDialog(QtWidgets.QDialog):
         buttons.addWidget(b_load)
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
-        self._paths = []
+        self._records = []
         self.reload()
+
+    def _bs_root(self):
+        return str(self.win.settings.get("bs_save_root") or "").strip()
+
+    def reload(self, *args):
+        root = self._bs_root()
+        if not root:
+            self.lbl_root.setText("「.BS/.KS保存先」が未設定です（設定画面で指定してください）")
+            self.table.setRowCount(0)
+            self._records = []
+            return
+        self.lbl_root.setText(f"検索先: {root}")
+        records = report.search_inspection(
+            root, model=self.e_model.text(), machine=self.e_machine.text())
+        records = records[: self.e_count.value()]
+        self._records = records
+        self.table.setRowCount(len(records))
+        for i, rec in enumerate(records):
+            cells = ([rec.get("日付", ""), rec.get("型式", ""), rec.get("機番", ""),
+                      rec.get("名前", ""), rec.get("モード", "")]
+                     + self._result_cells(rec.get("metrics", {}))
+                     + [rec.get("ファイル", "")])
+            for j, text in enumerate(cells):
+                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(str(text)))
+        self.table.resizeColumnsToContents()
+        self.win.statusBar().showMessage(f"過去データ検索: {len(records)}件")
+
+    @classmethod
+    def _result_cells(cls, metrics):
+        cells = []
+        for _label, key in cls.RESULT_COLUMNS:
+            v = metrics.get(key)
+            cells.append("" if v is None else f'{v:g}"')
+        return cells
 
     def export_csv(self):
         if self.table.rowCount() == 0:
@@ -831,17 +883,14 @@ class PastDataDialog(QtWidgets.QDialog):
             return
         from datetime import datetime
         default = str(resolve_save_root(self.win.settings)
-                      / f"過去データ一覧_{datetime.now():%Y%m%d_%H%M}.csv")
+                      / f"過去データ検索_{datetime.now():%Y%m%d_%H%M}.csv")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "CSVに保存", default, "CSVファイル (*.csv)")
         if not path:
             return
-        rows = []
-        for i in range(self.table.rowCount()):
-            rows.append([
-                (self.table.item(i, j).text() if self.table.item(i, j) else "")
-                for j in range(self.table.columnCount())
-            ])
+        rows = [[(self.table.item(i, j).text() if self.table.item(i, j) else "")
+                 for j in range(self.table.columnCount())]
+                for i in range(self.table.rowCount())]
         try:
             report.write_table_csv(path, list(self.COLUMNS), rows)
         except Exception as e:
@@ -849,88 +898,11 @@ class PastDataDialog(QtWidgets.QDialog):
             return
         self.win.statusBar().showMessage(f"CSV出力: {path}")
 
-    @staticmethod
-    def _result_cells(metrics):
-        """RESULT_COLUMNS の各列の表示文字列を作る。"""
-        def fmt(v):
-            return "" if v is None else f'{v:.2f}"'
-        cells = []
-        for label, key in PastDataDialog.RESULT_COLUMNS:
-            if key is None:  # バックラッシMAX = ホイール/ウォームの最大
-                vals = [metrics.get("ホイールBL MAX"), metrics.get("ウォームBL MAX")]
-                vals = [v for v in vals if v is not None]
-                cells.append(fmt(max(vals)) if vals else "")
-            else:
-                cells.append(fmt(metrics.get(key)))
-        return cells
-
-    def reload(self):
-        from .export import MODE_KEY, load_measurement
-        root = resolve_save_root(self.win.settings)
-        files = []
-        try:
-            for p in Path(root).rglob("*.csv"):
-                if p.name.endswith("_再現.csv"):
-                    continue
-                files.append(p)
-        except Exception:
-            files = []
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        files = files[: self.e_count.value()]
-        self._paths = files
-        judge_col = self.COLUMNS.index("判定")
-        self.table.setRowCount(len(files))
-        for i, p in enumerate(files):
-            meta, metrics = {}, {}
-            try:
-                meta, kind, payload = load_measurement(str(p))
-                metrics = report.metrics_from_measurement(kind, payload, meta)
-            except Exception:
-                pass
-            cells = (
-                [meta.get("日付", ""), meta.get("型式", ""), meta.get("機番", p.stem),
-                 meta.get("名前", ""), meta.get(MODE_KEY, ""),
-                 self._condition_summary(meta)]
-                + self._result_cells(metrics)
-                + [self._judgement(p), p.name]
-            )
-            for j, text in enumerate(cells):
-                item = QtWidgets.QTableWidgetItem(str(text))
-                if j == judge_col and str(text).startswith("NG"):
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
-                self.table.setItem(i, j, item)
-        self.table.resizeColumnsToContents()
-
-    @staticmethod
-    def _condition_summary(meta):
-        parts = []
-        if meta.get("ホイール刻み[°]"):
-            parts.append(f"H{meta['ホイール刻み[°]']}°")
-        if meta.get("開始角度[°]"):
-            parts.append(f"{meta.get('開始角度[°]')}〜{meta.get('終了角度[°]', '')}°")
-        if meta.get("ウォーム刻み[°]"):
-            parts.append(f"W{meta['ウォーム刻み[°]']}×{meta.get('ウォーム範囲[°]', '')}°")
-        if meta.get("ブロック数"):
-            parts.append(f"{meta['ブロック数']}箇所×{meta.get('回数', '')}回")
-        return " ".join(parts)
-
-    def _judgement(self, path):
-        """保存CSVの結果サマリから判定（NGが1つでもあればNG）を拾う"""
-        try:
-            text = path.read_text(encoding="cp932", errors="ignore")
-        except Exception:
-            return ""
-        if "NG（" in text or "NG(" in text:
-            return "NG"
-        if "OK（" in text or "OK(" in text:
-            return "OK"
-        return ""
-
     def load_selected(self, *args):
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._paths):
+        if row < 0 or row >= len(self._records):
             return
-        self.win.load_path(str(self._paths[row]))
+        self.win.load_path(self._records[row]["パス"])
         self.accept()
 
 
@@ -1006,17 +978,26 @@ class AnalysisDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(w)
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("型式"))
-        self.cmb_model = QtWidgets.QComboBox()
-        self.cmb_model.addItem("（すべて）", "")
-        self.cmb_model.currentIndexChanged.connect(self.reload_compare)
-        top.addWidget(self.cmb_model)
-        top.addWidget(QtWidgets.QLabel("直近"))
+        self.e_cmp_model = QtWidgets.QLineEdit(self.win.e_model.text().strip())
+        self.e_cmp_model.setPlaceholderText("例: RWE / RWE-200")
+        self.e_cmp_model.setMaximumWidth(150)
+        self.e_cmp_model.returnPressed.connect(self.reload_compare)
+        top.addWidget(self.e_cmp_model)
+        top.addWidget(QtWidgets.QLabel("機番"))
+        self.e_cmp_machine = QtWidgets.QLineEdit()
+        self.e_cmp_machine.setPlaceholderText("例: 261042")
+        self.e_cmp_machine.setMaximumWidth(130)
+        self.e_cmp_machine.returnPressed.connect(self.reload_compare)
+        top.addWidget(self.e_cmp_machine)
+        top.addWidget(QtWidgets.QLabel("上限"))
         self.sp_count = QtWidgets.QSpinBox()
-        self.sp_count.setRange(1, 1000)
-        self.sp_count.setValue(int(self.win.settings.get("recent_count") or 10))
+        self.sp_count.setRange(1, 2000)
+        self.sp_count.setValue(max(int(self.win.settings.get("recent_count") or 10), 50))
         self.sp_count.setSuffix(" 件")
-        self.sp_count.valueChanged.connect(self.reload_compare)
         top.addWidget(self.sp_count)
+        b_search = QtWidgets.QPushButton("検索")
+        b_search.clicked.connect(self.reload_compare)
+        top.addWidget(b_search)
         top.addWidget(QtWidgets.QLabel("グラフ指標"))
         self.cmb_metric = QtWidgets.QComboBox()
         self.cmb_metric.currentIndexChanged.connect(self.update_compare_plot)
@@ -1073,18 +1054,15 @@ class AnalysisDialog(QtWidgets.QDialog):
         return w
 
     def reload_compare(self, *args):
-        root = resolve_save_root(self.win.settings)
-        recent = self.sp_count.value()
-        if not self._models_loaded:
-            # 型式プルダウンを一度だけ作る（保存先の全データから型式を集める）
-            self._models_loaded = True
-            allrecs = report.scan_measurements(root, recent=max(recent, 300))
-            self.cmb_model.blockSignals(True)
-            for m in report.distinct_models(allrecs):
-                self.cmb_model.addItem(m, m)
-            self.cmb_model.blockSignals(False)
-        model = self.cmb_model.currentData() or None
-        self.records = report.scan_measurements(root, recent=recent, model=model)
+        root = str(self.win.settings.get("bs_save_root") or "").strip()
+        if not root:
+            self.records = []
+            self.win.statusBar().showMessage(
+                "「.BS/.KS保存先」が未設定です（設定画面で指定してください）")
+        else:
+            self.records = report.search_inspection(
+                root, model=self.e_cmp_model.text(),
+                machine=self.e_cmp_machine.text())[: self.sp_count.value()]
         self.metric_cols = report.available_metrics(self.records)
         self.headers, self.rows = report.build_comparison_table(
             self.records, self.metric_cols)
@@ -1204,7 +1182,9 @@ class AnalysisDialog(QtWidgets.QDialog):
                 f"<td style='border:1px solid #999;padding:1px 4px;'>{c}</td>"
                 for c in row) + "</tr>"
         img = "<p><img src='cmp.png' width='1000'></p>" if with_image else ""
-        title = self.cmb_model.currentText()
+        title = (self.e_cmp_model.text().strip() or "すべて") + (
+            f" / 機番 {self.e_cmp_machine.text().strip()}"
+            if self.e_cmp_machine.text().strip() else "")
         return (f"<h3>過去データ横断比較（{title}）</h3>{img}"
                 f"<table style='font-size:7pt;' cellspacing='0'>"
                 f"<tr>{head}</tr>{body}</table>")

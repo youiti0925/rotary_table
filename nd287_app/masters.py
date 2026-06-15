@@ -110,18 +110,53 @@ def load_judgement(path) -> dict:
     return entries
 
 
+def resolve_master_path(settings, key, default):
+    """設定のマスタパスを解決する（相対ならアプリフォルダ基準）。"""
+    path = Path(str((settings or {}).get(key) or default))
+    if not path.is_absolute():
+        path = app_dir() / path
+    return path
+
+
+# 提供マスタ（測定条件・合否判定）の (設定キー, 既定パス, 表示名)
+PROVIDED_MASTERS = (
+    ("conditions_csv", "マスタ/測定条件.csv", "測定条件CSV"),
+    ("judgement_csv", "マスタ/合否判定.csv", "合否判定CSV"),
+)
+
+
+def missing_masters(settings):
+    """設定された提供マスタのうち、ファイルが存在しないものを返す。
+
+    返り値: [(表示名, 解決後パス), …]。ユーザー登録CSVは未作成でも正常なので対象外。
+    """
+    out = []
+    for key, default, label in PROVIDED_MASTERS:
+        path = resolve_master_path(settings, key, default)
+        if not path.exists():
+            out.append((label, str(path)))
+    return out
+
+
 def load_masters(settings) -> dict:
-    """settings のパス設定から両マスタを読む。"""
+    """settings のパス設定から両マスタを読む。
+
+    1つのマスタが欠けても全体を落とさない（欠けたものは空 dict）。欠けているかは
+    missing_masters() で別途チェックして警告する。
+    """
 
     def resolve(key, default):
-        path = Path(str(settings.get(key) or default))
-        if not path.is_absolute():
-            path = app_dir() / path
-        return path
+        return resolve_master_path(settings, key, default)
+
+    def safe(loader, path, *args):
+        try:
+            return loader(path, *args)
+        except Exception:
+            return {}
 
     return dict(
-        conditions=load_conditions(resolve("conditions_csv", "マスタ/測定条件.csv")),
-        judgement=load_judgement(resolve("judgement_csv", "マスタ/合否判定.csv")),
+        conditions=safe(load_conditions, resolve("conditions_csv", "マスタ/測定条件.csv")),
+        judgement=safe(load_judgement, resolve("judgement_csv", "マスタ/合否判定.csv")),
         user_rotary=load_user_conditions(
             resolve("user_rotary_csv", "マスタ/ユーザー回転条件.csv"),
             ROTARY_USER_FIELDS),

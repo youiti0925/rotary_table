@@ -175,5 +175,23 @@ class TestUserConditions(unittest.TestCase):
             self.assertEqual(recs["RX-9"]["再現終了"], "300")
 
 
+class TestMasterStatus(unittest.TestCase):
+    def test_missing_masters_detects_bad_paths(self):
+        from nd287_app.masters import load_masters, missing_masters
+        bad = {"conditions_csv": "マスタ/NOPE.csv", "judgement_csv": "/x/NOPE2.csv"}
+        labels = [label for label, _ in missing_masters(bad)]
+        self.assertIn("測定条件CSV", labels)
+        self.assertIn("合否判定CSV", labels)
+        # 欠けても load_masters は落ちず、空 dict を返す
+        m = load_masters(bad)
+        self.assertEqual(m["conditions"], {})
+        self.assertEqual(m["judgement"], {})
+
+    def test_present_masters_not_flagged(self):
+        from nd287_app.masters import missing_masters
+        # 既定（マスタ/測定条件.csv・合否判定.csv は存在）→ 欠落なし
+        self.assertEqual(missing_masters({}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,7 +51,13 @@ from .ks_format import (
     save_ks,
     tilt_accuracy,
 )
-from .masters import condition_params, find_entry, formula_minmax, load_masters
+from .masters import (
+    condition_params,
+    find_entry,
+    formula_minmax,
+    load_masters,
+    missing_masters,
+)
 from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
 from .export import (
@@ -239,6 +245,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_sb_wait.setToolTip("取込開始からSwitchBot押下までの待ち時間")
         self.c_sb_dry = QtWidgets.QCheckBox("空打ち（実際には押さずに動作確認）")
         self.c_sb_dry.setChecked(bool(settings.get("switchbot_dry_run", False)))
+        self.b_sb_help = QtWidgets.QPushButton("接続方法（ヘルプ）")
+        self.b_sb_help.setToolTip("SwitchBotのつなぎ方・使い方を表示する")
+        self.b_sb_help.clicked.connect(self.show_switchbot_help)
 
         sb_group = QtWidgets.QGroupBox("自動測定（SwitchBot Bot・BLE直結）")
         sb_form = QtWidgets.QFormLayout(sb_group)
@@ -249,6 +258,7 @@ class SettingsDialog(QtWidgets.QDialog):
         sb_form.addRow("精度NG 再測定上限", self.sp_sb_prec)
         sb_form.addRow("押下までの待ち", self.sp_sb_wait)
         sb_form.addRow(self.c_sb_dry)
+        sb_form.addRow(self.b_sb_help)
 
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
@@ -314,6 +324,53 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         if path:
             edit.setText(path)
+
+    SWITCHBOT_HELP = (
+        "SwitchBot Bot をBLE直結（ハブ不要）で使う手順\n"
+        "\n"
+        "【準備】\n"
+        "1. SwitchBotアプリでBotを登録し、モードを「押す（Press）」にする。\n"
+        "   （長押し/切替モードだと正しく起動できません）\n"
+        "2. Botを機械の「起動」ボタンの上に貼り付ける（アームが届く位置）。\n"
+        "3. このPCのBluetoothをONにする。\n"
+        "\n"
+        "【接続（手入力は不要）】\n"
+        "4. この設定欄の「スキャン」を押す。近くのSwitchBotが電波の強い順に\n"
+        "   一覧表示される。自分のBotを選ぶと「Bot BLE MAC」が自動で入る。\n"
+        "5. Bot本体にパスワードを設定している場合のみ「BLEパスワード」を入力。\n"
+        "   設定していなければ空のままでOK。\n"
+        "6. 「押し方」を選ぶ（機械が1回押しで起動なら「1回押し」）。\n"
+        "\n"
+        "【使い方】\n"
+        "7. 型式・機番・温度を入れて本画面の「自動測定」を押すと、\n"
+        "   取込開始→Botが起動ボタンを押す→測定→傾き/精度判定→NGなら\n"
+        "   設定した回数まで自動で測り直す。\n"
+        "8. 「空打ち」をONにすると、実際には押さず動作確認できる。\n"
+        "\n"
+        "【うまくいかないとき】\n"
+        "・スキャンに出ない：PCのBluetooth ON、Botの電池、距離（数m以内）を確認。\n"
+        "・「bleak 未導入」と出る：pip install bleak（exe版は同梱）。\n"
+        "・押せるが起動しない：Botの位置・アーム長・モード（押す）を見直す。\n"
+        "  SwitchBotアプリの押し込み量の調整も有効。\n"
+        "・ハブは不要（PCのBluetoothから直接つなぐ方式）。クラウドAPIは使いません。"
+    )
+
+    def show_switchbot_help(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("SwitchBot 接続方法")
+        dlg.resize(560, 520)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.SWITCHBOT_HELP)
+        layout.addWidget(text)
+        b = QtWidgets.QPushButton("閉じる")
+        b.clicked.connect(dlg.accept)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(b)
+        layout.addLayout(row)
+        dlg.exec()
 
     def scan_switchbot(self):
         """BLEスキャンで近くのSwitchBotを自動検出し、選んでMACを入れる（手入力不要）。"""
@@ -914,9 +971,18 @@ class PastDataDialog(QtWidgets.QDialog):
     def reload(self, *args):
         root = self._bs_root()
         if not root:
-            self.lbl_root.setText("「.BS/.KS保存先」が未設定です（設定画面で指定してください）")
+            self.lbl_root.setText("⚠ 「.BS/.KS保存先」が未設定です（設定画面で指定してください）")
             self.table.setRowCount(0)
             self._records = []
+            self.win.statusBar().showMessage(
+                "検索できません：設定の「.BS/.KS保存先」が空です")
+            return
+        if not Path(root).exists():
+            self.lbl_root.setText(f"⚠ 保存先が見つかりません: {root}")
+            self.table.setRowCount(0)
+            self._records = []
+            self.win.statusBar().showMessage(
+                f"検索できません：保存先フォルダが存在しません（{root}）")
             return
         self.lbl_root.setText(f"検索中… {root}")
         self._search_gen += 1
@@ -1140,7 +1206,11 @@ class AnalysisDialog(QtWidgets.QDialog):
         if not root:
             self.records = []
             self.win.statusBar().showMessage(
-                "「.BS/.KS保存先」が未設定です（設定画面で指定してください）")
+                "分析できません：設定の「.BS/.KS保存先」が空です")
+        elif not Path(root).exists():
+            self.records = []
+            self.win.statusBar().showMessage(
+                f"分析できません：保存先フォルダが存在しません（{root}）")
         else:
             self.records = report.search_inspection(
                 root, model=self.e_cmp_model.text(),
@@ -2137,6 +2207,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(
                 0, lambda: self.statusBar().showMessage(f"型式マスタの読み込みに失敗: {e}")
             )
+        # 起動後にマスタの欠落を確認して、見つからなければ画面が出てから警告する
+        QtCore.QTimer.singleShot(300, self.warn_missing_masters)
         self.e_model.editingFinished.connect(self.on_model_entered)
 
         self.on_mode_changed(self.mode_combo.currentText())
@@ -2299,12 +2371,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 型式マスタ -----
 
-    def reload_masters(self):
-        """マスタCSV（提供＋ユーザー登録）を読み直す"""
+    def reload_masters(self, warn=False):
+        """マスタCSV（提供＋ユーザー登録）を読み直す。warn=Trueで欠落を警告表示。"""
         try:
             self.masters = load_masters(self.settings)
         except Exception as e:
             self.statusBar().showMessage(f"マスタ再読込に失敗: {e}")
+            return
+        if warn:
+            self.warn_missing_masters()
+
+    def warn_missing_masters(self):
+        """型式マスタ（測定条件/合否判定）が指定の場所に無ければ、はっきり警告する。"""
+        missing = missing_masters(self.settings)
+        if not missing:
+            return
+        lines = "\n".join(f"・{label}：{path}" for label, path in missing)
+        QtWidgets.QMessageBox.warning(
+            self, "型式マスタが見つかりません",
+            "次の型式マスタが指定の場所にありません。\n"
+            "このままだと型式の自動適用・合否判定ができません。\n"
+            "「設定」でCSVの場所（または設置）を確認してください。\n\n" + lines,
+        )
 
     def show_condition_editor(self):
         """条件登録/編集ダイアログを開く（現在のモードに合った対象を初期選択）"""
@@ -2913,8 +3001,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"設定の保存に失敗: {e}")
             return
-        # 条件CSVの場所が変わった可能性があるので読み直す
-        self.reload_masters()
+        # 条件CSVの場所が変わった可能性があるので読み直す（欠落は警告）
+        self.reload_masters(warn=True)
         # テーマ・文字サイズを即時反映
         app = QtWidgets.QApplication.instance()
         apply_font(app, self.settings.get("ui_font_pt"))

@@ -58,9 +58,11 @@ DEFAULTS = dict(
         "3回押し（3秒間隔）": [3.0, 3.0, 0.0],
     },
     switchbot_pattern_name="1回押し",
+    switchbot_dry_run=False,     # True: 空打ち（実際には押さずにリハーサル）
     # 自動測定（XR20監視ツールの状態機械を移植）:
-    # 取込開始→SwitchBotで機械起動→完了→傾き判定→NGなら自動で再測定
-    auto_max_retries=2,          # 傾きNG時の自動再測定の上限回数
+    # 取込開始→SwitchBotで機械起動→完了→傾き/精度判定→NGなら自動で再測定
+    auto_max_retries=2,            # 傾きNG時の自動再測定の上限回数
+    auto_max_precision_retries=1,  # 精度NG（単一/隣接規格超え）時の上限回数
     auto_wait_before_press=1.0,  # 取込開始からSwitchBot押下までの待ち[秒]
     # 生データ編集（管理者モード）のパスワード
     admin_password="0925",

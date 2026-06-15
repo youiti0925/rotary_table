@@ -292,11 +292,12 @@ def record_from_ks(path):
     }
 
 
-def search_inspection(root, model="", machine=""):
+def search_inspection(root, model="", machine="", limit=None):
     """.BS/.KS の検査表フォルダを型式・機番で検索してレコード列を返す（新しい順）。
 
-    型式は「フォルダ名（例 RWE）または .BS/.KS 内の型式」に部分一致、機番はファイル名に
-    部分一致。読み取りは保存済みの結果値（旧アプリ計算）をそのまま使う。
+    速度のため、**ファイルを開く前に**フォルダ名（型式の頭文字＝シリーズ。例 RWE）と
+    ファイル名（機番）で絞り込み、条件に合うものだけ読む。読み取りは保存済みの結果値
+    （旧アプリ計算）をそのまま使う。limit を渡すとその件数で打ち切る。
     """
     root = Path(root)
     records = []
@@ -304,23 +305,38 @@ def search_inspection(root, model="", machine=""):
         return records
     model_u = (model or "").strip().upper()
     machine_s = (machine or "").strip()
+    series = model_u.split("-")[0] if model_u else ""   # 例 RWE-200 → RWE
+    has_number = any(c.isdigit() for c in model_u)
+
     paths = list(root.rglob("*.[bB][sS]")) + list(root.rglob("*.[kK][sS]"))
+
+    def prefilter(p):
+        # 読み込み前の軽い絞り込み（フォルダ名・ファイル名だけ見る）
+        if machine_s and machine_s not in p.stem:
+            return False
+        if series and series not in p.parent.name.upper() \
+                and series not in p.stem.upper():
+            return False
+        return True
+
+    paths = [p for p in paths if prefilter(p)]
     try:
         paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     except Exception:
         pass
     for p in paths:
-        if machine_s and machine_s not in p.stem:
-            continue
         try:
             rec = (record_from_bs(p) if p.suffix.lower() == ".bs"
                    else record_from_ks(p))
         except Exception:
             continue
-        if model_u and model_u not in (rec["型式"] or "").upper() \
-                and model_u not in p.parent.name.upper():
+        # 型式に数字まで入っている場合だけ中身の型式で絞る（例 RWE-200）
+        if model_u and has_number and model_u not in (rec["型式"] or "").upper() \
+                and series not in p.parent.name.upper():
             continue
         records.append(rec)
+        if limit and len(records) >= limit:
+            break
     return records
 
 

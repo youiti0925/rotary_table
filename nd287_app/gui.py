@@ -144,7 +144,8 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent, settings):
         super().__init__(parent)
         self.setWindowTitle("設定")
-        form = QtWidgets.QFormLayout(self)
+        # 縦に長くなりすぎないよう、左右2列に分ける（左=通信/保存先、右=SwitchBot）
+        form = QtWidgets.QFormLayout()
 
         self.e_port = QtWidgets.QLineEdit(str(settings.get("port", "auto")))
         self.e_port.setToolTip("auto = 自動検出。COM3 のように明示指定も可")
@@ -225,20 +226,29 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_sb_retry.setValue(int(settings.get("auto_max_retries", 2)))
         self.sp_sb_retry.setSuffix(" 回")
         self.sp_sb_retry.setToolTip("自動測定で傾きNGのとき自動で測り直す上限回数")
+        self.sp_sb_prec = QtWidgets.QSpinBox()
+        self.sp_sb_prec.setRange(0, 9)
+        self.sp_sb_prec.setValue(int(settings.get("auto_max_precision_retries", 1)))
+        self.sp_sb_prec.setSuffix(" 回")
+        self.sp_sb_prec.setToolTip("自動測定で精度NG（単一>5/隣接>10）のとき測り直す上限回数")
         self.sp_sb_wait = QtWidgets.QDoubleSpinBox()
         self.sp_sb_wait.setRange(0.0, 60.0)
         self.sp_sb_wait.setDecimals(1)
         self.sp_sb_wait.setValue(float(settings.get("auto_wait_before_press", 1.0)))
         self.sp_sb_wait.setSuffix(" 秒")
         self.sp_sb_wait.setToolTip("取込開始からSwitchBot押下までの待ち時間")
+        self.c_sb_dry = QtWidgets.QCheckBox("空打ち（実際には押さずに動作確認）")
+        self.c_sb_dry.setChecked(bool(settings.get("switchbot_dry_run", False)))
 
         sb_group = QtWidgets.QGroupBox("自動測定（SwitchBot Bot・BLE直結）")
         sb_form = QtWidgets.QFormLayout(sb_group)
         sb_form.addRow("Bot BLE MAC", mac_row)
         sb_form.addRow("BLEパスワード", self.e_sb_pw)
         sb_form.addRow("押し方（押し回数）", self.cmb_sb_pattern)
-        sb_form.addRow("自動再測定の上限", self.sp_sb_retry)
+        sb_form.addRow("傾きNG 再測定上限", self.sp_sb_retry)
+        sb_form.addRow("精度NG 再測定上限", self.sp_sb_prec)
         sb_form.addRow("押下までの待ち", self.sp_sb_wait)
+        sb_form.addRow(self.c_sb_dry)
 
         form.addRow("ポート", self.e_port)
         form.addRow("ボーレート", self.e_baud)
@@ -251,7 +261,6 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("合否判定CSV", self.e_judgement.row)
         form.addRow("ユーザー回転条件CSV", self.e_user_rotary.row)
         form.addRow("ユーザー傾斜条件CSV", self.e_user_tilt.row)
-        form.addRow(sb_group)
 
         note = QtWidgets.QLabel(
             "相対パスはアプリフォルダ基準。温度別の合否規格（ホイール/ウォーム/総合）は"
@@ -259,14 +268,29 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         note.setStyleSheet("color:#666;")
         note.setWordWrap(True)
-        form.addRow(note)
+
+        # 左列=通信・表示・保存先、右列=SwitchBot。横に並べて縦の長さを抑える
+        left = QtWidgets.QWidget()
+        left.setLayout(form)
+        right = QtWidgets.QVBoxLayout()
+        right.addWidget(sb_group)
+        right.addWidget(note)
+        right.addStretch(1)
+        right_w = QtWidgets.QWidget()
+        right_w.setLayout(right)
+        columns = QtWidgets.QHBoxLayout()
+        columns.addWidget(left)
+        columns.addWidget(right_w)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addLayout(columns)
+        outer.addWidget(buttons)
 
     def _make_file_row(self, value, title):
         """CSVファイルパス用の「入力欄＋参照...」行を作る。
@@ -354,7 +378,9 @@ class SettingsDialog(QtWidgets.QDialog):
             switchbot_ble_mac=self.e_sb_mac.text().strip(),
             switchbot_ble_password=self.e_sb_pw.text(),
             switchbot_pattern_name=self.cmb_sb_pattern.currentText(),
+            switchbot_dry_run=self.c_sb_dry.isChecked(),
             auto_max_retries=self.sp_sb_retry.value(),
+            auto_max_precision_retries=self.sp_sb_prec.value(),
             auto_wait_before_press=self.sp_sb_wait.value(),
         )
 
@@ -805,7 +831,10 @@ class PastDataDialog(QtWidgets.QDialog):
     """過去データ検索。.BS/.KS（検査表）フォルダを型式・機番で探し、保存済みの結果を表示。
 
     型式の頭文字フォルダ（例 RWE）から探す。値は旧アプリが保存した結果をそのまま使う。
+    検索はバックグラウンドで行い、画面が固まらないようにする。
     """
+
+    _search_done = QtCore.Signal(int, list)
 
     RESULT_COLUMNS = [
         ("ホイールCW 精度", "ホイール CW 精度PP"),
@@ -875,6 +904,8 @@ class PastDataDialog(QtWidgets.QDialog):
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
         self._records = []
+        self._search_gen = 0
+        self._search_done.connect(self._on_search_done)
         self.reload()
 
     def _bs_root(self):
@@ -887,11 +918,28 @@ class PastDataDialog(QtWidgets.QDialog):
             self.table.setRowCount(0)
             self._records = []
             return
-        self.lbl_root.setText(f"検索先: {root}")
-        records = report.search_inspection(
-            root, model=self.e_model.text(), machine=self.e_machine.text())
-        records = records[: self.e_count.value()]
+        self.lbl_root.setText(f"検索中… {root}")
+        self._search_gen += 1
+        gen = self._search_gen
+        model = self.e_model.text()
+        machine = self.e_machine.text()
+        limit = self.e_count.value()
+
+        def work():
+            try:
+                recs = report.search_inspection(
+                    root, model=model, machine=machine, limit=limit)
+            except Exception:
+                recs = []
+            self._search_done.emit(gen, recs)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_search_done(self, gen, records):
+        if gen != self._search_gen:
+            return  # 新しい検索が始まっているので古い結果は捨てる
         self._records = records
+        self.lbl_root.setText(f"検索先: {self._bs_root()}")
         self.table.setRowCount(len(records))
         for i, rec in enumerate(records):
             cells = ([rec.get("日付", ""), rec.get("型式", ""), rec.get("機番", ""),
@@ -1096,7 +1144,7 @@ class AnalysisDialog(QtWidgets.QDialog):
         else:
             self.records = report.search_inspection(
                 root, model=self.e_cmp_model.text(),
-                machine=self.e_cmp_machine.text())[: self.sp_count.value()]
+                machine=self.e_cmp_machine.text(), limit=self.sp_count.value())
         self.metric_cols = report.available_metrics(self.records)
         self.headers, self.rows = report.build_comparison_table(
             self.records, self.metric_cols)
@@ -1556,6 +1604,64 @@ class PitchCorrectionDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class GraphZoomDialog(QtWidgets.QDialog):
+    """グラフを画面いっぱいに拡大表示する（現在の表示データを大きく描く）。"""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.setWindowTitle("グラフ拡大")
+        layout = QtWidgets.QVBoxLayout(self)
+
+        def style_plot(plot, title):
+            plot.setTitle(title)
+            plot.addLegend(offset=(10, 10))
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            plot.setLabel("bottom", "指令角度", units="°")
+            plot.setLabel("left", "偏差", units='"')
+            for axis in ("left", "bottom"):
+                plot.getAxis(axis).enableAutoSIPrefix(False)
+
+        if win.view_kind == "repeat":
+            plot = pg.PlotWidget()
+            style_plot(plot, "再現性（ブロックごとのばらつき）")
+            xs = {"cw": [], "ccw": []}
+            ys = {"cw": [], "ccw": []}
+            for (dirn, i), vals in (win.rep_data or {}).items():
+                angle = win.rep_points[i]
+                for v in vals:
+                    xs[dirn].append(angle)
+                    ys[dirn].append((v - angle) * 3600.0)
+            plot.plot(xs["cw"], ys["cw"], pen=None, symbol="o",
+                      symbolBrush="#1f77b4", symbolSize=8, name="CW")
+            plot.plot(xs["ccw"], ys["ccw"], pen=None, symbol="o",
+                      symbolBrush="#d62728", symbolSize=8, name="CCW")
+            layout.addWidget(plot, 1)
+        else:
+            devs = win.display_series_devs() or {}
+            wheel = pg.PlotWidget()
+            worm = pg.PlotWidget()
+            style_plot(wheel, "ホイール")
+            style_plot(worm, "ウォーム")
+            for key, st in CURVE_STYLES.items():
+                ser = devs.get(key)
+                if ser and ser[0]:
+                    target = wheel if key.startswith("wheel") else worm
+                    target.plot(ser[0], ser[1], name=SERIES_LABELS.get(key, key), **st)
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(wheel, 7)
+            if not win.is_tilt() or any(devs.get(k) and devs[k][0]
+                                        for k in ("worm_cw", "worm_ccw")):
+                row.addWidget(worm, 3)
+            layout.addLayout(row, 1)
+
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        bottom.addWidget(b_close)
+        layout.addLayout(bottom)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -1579,6 +1685,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない
         self.auto_mode = False    # 自動測定（SwitchBot起動＋NG自動再測定）中か
         self.auto_retries = 0
+        self.auto_tilt_retries = 0      # 傾きNGでの再測定回数
+        self.auto_prec_retries = 0      # 精度NGでの再測定回数
         self.web = None           # Webモニタ（起動は__init__末尾で）
         self._web_lock = threading.Lock()
         self._web_state = {}
@@ -1968,6 +2076,10 @@ class MainWindow(QtWidgets.QMainWindow):
         corr_row.addWidget(self.b_before)
         corr_row.addWidget(self.b_after)
         corr_row.addStretch(1)
+        self.b_zoom = QtWidgets.QPushButton("グラフ拡大")
+        self.b_zoom.setToolTip("グラフを画面いっぱいに拡大表示する")
+        self.b_zoom.clicked.connect(self.show_graph_zoom)
+        corr_row.addWidget(self.b_zoom)
 
         right = QtWidgets.QWidget()
         right_v = QtWidgets.QVBoxLayout(right)
@@ -2218,7 +2330,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if base <= 0:
             base = DEFAULT_FONT_PT
         guide_font = QtGui.QFont("monospace")
-        guide_font.setPointSize(base + 12)
+        guide_font.setPointSize(base + 2)
         guide_font.setBold(True)
         self.guide.setFont(guide_font)
         for button in (self.b_start, self.b_auto):
@@ -2542,13 +2654,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- 自動測定（SwitchBotで機械起動 + 傾きNG自動再測定） -----
 
     def auto_start(self):
-        """自動測定: 取込開始→SwitchBotで機械起動→完了後に傾き判定→NGなら再測定"""
+        """自動測定: 取込開始→SwitchBotで機械起動→完了後に傾き/精度判定→NGなら再測定"""
         self.start()
         if self.seq is None or not self.b_take.isEnabled():
             return  # 必須項目の検証で開始できなかった
         self.auto_mode = True
         self.auto_retries = 0
-        if not bot_configured(self.settings):
+        self.auto_tilt_retries = 0
+        self.auto_prec_retries = 0
+        if self.settings.get("switchbot_dry_run"):
+            self.statusBar().showMessage("自動測定（空打ち: 実際には押しません）")
+        elif not bot_configured(self.settings):
             self.statusBar().showMessage(
                 "自動測定（SwitchBot未設定のため物理押下はスキップ。"
                 "機械は手動で起動してください）"
@@ -2562,6 +2678,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name = settings.get("switchbot_pattern_name") or "1回押し"
         pattern = patterns.get(name) or [0.0]
         wait_before = float(settings.get("auto_wait_before_press") or 0.0)
+        dry_run = bool(settings.get("switchbot_dry_run"))
         configured = bot_configured(settings)
 
         def work():
@@ -2569,7 +2686,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 time.sleep(wait_before)
             total = len(pattern)
             for i, wait_after in enumerate(pattern, start=1):
-                if not configured:
+                if dry_run:
+                    self._bot_msg.emit(f"空打ち（リハーサル）: 押下スキップ {i}/{total}")
+                elif not configured:
                     self._bot_msg.emit(f"SwitchBot未設定: 押下スキップ {i}/{total}")
                 else:
                     ok, message = press_bot(settings)
@@ -2583,8 +2702,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_bot_msg(self, message):
         self.statusBar().showMessage(message)
 
-    def auto_judge_ok(self):
-        """自動測定の合否: マスタの傾きH/W規格と突き合わせる（無ければOK扱い）"""
+    def auto_tilt_ok(self):
+        """傾き判定: マスタの傾きH/W規格と突き合わせる（無ければOK扱い）"""
         if self.view_kind != "indexing" or not self.master_judge:
             return True
         summary, _ = summarize(self.data, self.applied_blcorr)
@@ -2598,25 +2717,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         return True
 
+    def auto_precision_ok(self):
+        """精度判定: 単一誤差≦5/隣接誤差≦10（統一規格）を全系列で満たすか"""
+        if self.view_kind != "indexing":
+            return True
+        summary, _ = summarize(self.data, self.applied_blcorr)
+        for key in ("wheel_cw", "wheel_ccw", "worm_cw", "worm_ccw"):
+            s = summary.get(key)
+            if s and (s["single"] > SINGLE_SPEC or s["adjacent"] > ADJACENT_SPEC):
+                return False
+        return True
+
     def auto_after_complete(self):
-        """測定完了時の自動測定の続き: 傾きOKなら終了、NGなら自動再測定"""
+        """測定完了時の自動測定の続き: 傾き/精度OKなら終了、NGなら種類別に自動再測定"""
         if not self.auto_mode:
             return
-        if self.auto_judge_ok():
+        tilt_ok = self.auto_tilt_ok()
+        prec_ok = self.auto_precision_ok()
+        if tilt_ok and prec_ok:
             self.auto_mode = False
-            self.statusBar().showMessage("自動測定完了: 傾きOK")
+            self.statusBar().showMessage("自動測定完了: 傾き・精度OK")
             return
-        max_retries = int(self.settings.get("auto_max_retries") or 0)
-        if self.auto_retries >= max_retries:
+        max_tilt = int(self.settings.get("auto_max_retries") or 0)
+        max_prec = int(self.settings.get("auto_max_precision_retries") or 0)
+        if not tilt_ok and self.auto_tilt_retries < max_tilt:
+            self.auto_tilt_retries += 1
+            reason = f"傾きNG → 自動再測定（傾き {self.auto_tilt_retries}/{max_tilt}）"
+        elif not prec_ok and self.auto_prec_retries < max_prec:
+            self.auto_prec_retries += 1
+            reason = f"精度NG → 自動再測定（精度 {self.auto_prec_retries}/{max_prec}）"
+        else:
             self.auto_mode = False
+            ng = "傾き" if not tilt_ok else "精度"
             self.statusBar().showMessage(
-                f"自動測定終了: 傾きNGのまま再測定上限（{max_retries}回）に到達"
-            )
+                f"自動測定終了: {ng}NGのまま再測定上限に到達")
             return
         self.auto_retries += 1
-        self.statusBar().showMessage(
-            f"傾きNG → 自動再測定 {self.auto_retries}/{max_retries}"
-        )
+        self.statusBar().showMessage(reason)
         self.start()
         if self.seq is None:
             self.auto_mode = False
@@ -3728,6 +3865,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("表示する生データがありません")
             return
         RawDataDialog(self).exec()
+
+    def show_graph_zoom(self):
+        """グラフを画面いっぱいに拡大表示する"""
+        if not self.has_view_data():
+            self.statusBar().showMessage("拡大するグラフがありません")
+            return
+        dlg = GraphZoomDialog(self)
+        dlg.setWindowState(QtCore.Qt.WindowMaximized)
+        dlg.exec()
 
     def show_pitch_correction(self):
         """ピッチエラー補正（提出用）ダイアログを開く（分割のホイールデータが必要）"""

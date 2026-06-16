@@ -648,6 +648,27 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_sub.setRange(1, 9999)
         self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 9001)))
 
+        # 機械へ送信（カード不要・LAN）の設定ウィジェット
+        self.cmb_send = QtWidgets.QComboBox()
+        self.cmb_send.addItem("共有フォルダ（カード不要）", "folder")
+        self.cmb_send.addItem("FTP（機械のIPへ）", "ftp")
+        si = self.cmb_send.findData(str(settings.get("nc_send_method", "folder")))
+        self.cmb_send.setCurrentIndex(si if si >= 0 else 0)
+        self.e_send_folder = QtWidgets.QLineEdit(str(settings.get("nc_send_folder", "")))
+        self.e_send_folder.setPlaceholderText(r"例 \\192.168.0.10\nc または Z:\NC")
+        self.e_ftp_host = QtWidgets.QLineEdit(str(settings.get("nc_ftp_host", "")))
+        self.e_ftp_host.setPlaceholderText("機械のIP 例 192.168.0.10")
+        self.e_ftp_port = QtWidgets.QSpinBox()
+        self.e_ftp_port.setRange(1, 65535)
+        self.e_ftp_port.setValue(int(settings.get("nc_ftp_port", 21) or 21))
+        self.e_ftp_user = QtWidgets.QLineEdit(str(settings.get("nc_ftp_user", "")))
+        self.e_ftp_pw = QtWidgets.QLineEdit(str(settings.get("nc_ftp_password", "")))
+        self.e_ftp_pw.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.e_ftp_dir = QtWidgets.QLineEdit(str(settings.get("nc_ftp_dir", "")))
+        self.e_ftp_dir.setPlaceholderText("空=ルート")
+        self.c_ftp_passive = QtWidgets.QCheckBox("パッシブ")
+        self.c_ftp_passive.setChecked(bool(settings.get("nc_ftp_passive", True)))
+
         form.addRow("割出軸", self.e_axis)
         form.addRow("前振り量（測定点のバックラッシュ消し）", self.e_pre)
         form.addRow("リセット振り量（カウンター0設定用）", self.e_reset_sw)
@@ -685,6 +706,8 @@ class ProgramDialog(QtWidgets.QDialog):
         self.preview.setStyleSheet("font-family: monospace; font-size: 12px;")
         layout.addWidget(self.preview, 1)
 
+        layout.addWidget(self._build_send_group())
+
         buttons = QtWidgets.QHBoxLayout()
         b_refresh = QtWidgets.QPushButton("プレビュー更新")
         self.b_edit = QtWidgets.QPushButton("編集")
@@ -692,15 +715,22 @@ class ProgramDialog(QtWidgets.QDialog):
         self.b_edit.setToolTip("プレビューを手で編集できるようにする"
                                "（編集中は設定変更で上書きしない。保存は編集後の内容）")
         b_save = QtWidgets.QPushButton("保存(.NC)")
+        self.b_send = QtWidgets.QPushButton("機械へ送信")
+        self.b_send.setToolTip("生成したプログラムをLAN経由で機械へ送る（カード不要）")
+        b_sendhelp = QtWidgets.QPushButton("送信の使い方")
         b_close = QtWidgets.QPushButton("閉じる")
         b_refresh.clicked.connect(self.regenerate)
         self.b_edit.toggled.connect(self.toggle_edit)
         b_save.clicked.connect(self.save)
+        self.b_send.clicked.connect(self.do_send)
+        b_sendhelp.clicked.connect(self.show_send_help)
         b_close.clicked.connect(self.accept)
         buttons.addWidget(b_refresh)
         buttons.addWidget(self.b_edit)
         buttons.addStretch(1)
         buttons.addWidget(b_save)
+        buttons.addWidget(self.b_send)
+        buttons.addWidget(b_sendhelp)
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
 
@@ -785,6 +815,162 @@ class ProgramDialog(QtWidgets.QDialog):
         with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
             f.write(text)
         QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
+
+    def _build_send_group(self):
+        """「機械へ送信」の送信先設定（方式で共有フォルダ/FTPを切替）。"""
+        group = QtWidgets.QGroupBox("機械へ送信（カード不要・LAN）")
+        v = QtWidgets.QVBoxLayout(group)
+        m_row = QtWidgets.QHBoxLayout()
+        m_row.addWidget(QtWidgets.QLabel("方式"))
+        m_row.addWidget(self.cmb_send)
+        m_row.addStretch(1)
+        v.addLayout(m_row)
+
+        self.send_stack = QtWidgets.QStackedWidget()
+        # ページ0: 共有フォルダ
+        fpage = QtWidgets.QWidget()
+        fl = QtWidgets.QHBoxLayout(fpage)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.addWidget(QtWidgets.QLabel("フォルダ"))
+        fl.addWidget(self.e_send_folder, 1)
+        b_browse = QtWidgets.QPushButton("参照...")
+        b_browse.clicked.connect(self._browse_send_folder)
+        fl.addWidget(b_browse)
+        # ページ1: FTP
+        ppage = QtWidgets.QWidget()
+        pf = QtWidgets.QFormLayout(ppage)
+        pf.setContentsMargins(0, 0, 0, 0)
+        host_row = QtWidgets.QHBoxLayout()
+        host_row.addWidget(self.e_ftp_host, 1)
+        host_row.addWidget(QtWidgets.QLabel("ポート"))
+        host_row.addWidget(self.e_ftp_port)
+        host_row.addWidget(self.c_ftp_passive)
+        pf.addRow("ホスト", host_row)
+        cred_row = QtWidgets.QHBoxLayout()
+        cred_row.addWidget(QtWidgets.QLabel("ユーザ"))
+        cred_row.addWidget(self.e_ftp_user, 1)
+        cred_row.addWidget(QtWidgets.QLabel("パスワード"))
+        cred_row.addWidget(self.e_ftp_pw, 1)
+        pf.addRow("認証", cred_row)
+        pf.addRow("送信先フォルダ", self.e_ftp_dir)
+        self.send_stack.addWidget(fpage)
+        self.send_stack.addWidget(ppage)
+        v.addWidget(self.send_stack)
+
+        def _sync():
+            self.send_stack.setCurrentIndex(
+                1 if self.cmb_send.currentData() == "ftp" else 0)
+        self.cmb_send.currentIndexChanged.connect(_sync)
+        _sync()
+        return group
+
+    def _browse_send_folder(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "送信先（機械が見えるフォルダ）を選択", self.e_send_folder.text())
+        if path:
+            self.e_send_folder.setText(path)
+
+    def _send_settings(self):
+        return dict(
+            nc_send_method=self.cmb_send.currentData() or "folder",
+            nc_send_folder=self.e_send_folder.text().strip(),
+            nc_ftp_host=self.e_ftp_host.text().strip(),
+            nc_ftp_port=self.e_ftp_port.value(),
+            nc_ftp_user=self.e_ftp_user.text().strip(),
+            nc_ftp_password=self.e_ftp_pw.text(),
+            nc_ftp_dir=self.e_ftp_dir.text().strip(),
+            nc_ftp_passive=self.c_ftp_passive.isChecked(),
+        )
+
+    def do_send(self):
+        text = self.preview.toPlainText()
+        if not text.strip():
+            QtWidgets.QMessageBox.warning(self, "送信", "送るプログラムがありません")
+            return
+        # 送信先設定を保存（次回も使えるように）
+        self.settings.update(self._send_settings())
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        from . import ncsend
+        machine = self.params.get("machine") or ""
+        self.b_send.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            dest = ncsend.send(text, self.settings, machine=machine,
+                               main_number=self.e_main.value())
+        except Exception as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.b_send.setEnabled(True)
+            QtWidgets.QMessageBox.warning(
+                self, "送信に失敗しました",
+                f"{e}\n\n「送信の使い方」を確認してください。")
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.b_send.setEnabled(True)
+        QtWidgets.QMessageBox.information(
+            self, "送信しました",
+            f"機械へ送りました:\n{dest}\n\n"
+            "機械側でこのプログラムを選んで運転してください"
+            "（安全のため起動は機械側で）。")
+
+    SEND_HELP = (
+        "測定プログラムを機械へ直接送る（カード不要・LAN）\n"
+        "\n"
+        "【前提】\n"
+        "・このPCと機械（CNC）が同じLANに繋がっていること（LANケーブル接続済み）。\n"
+        "・機械側にネットワーク機能（Data Server／Ethernet）があること。\n"
+        "\n"
+        "────────────────────────\n"
+        "方式1: 共有フォルダ（いちばん簡単・おすすめ）\n"
+        "────────────────────────\n"
+        "1. 機械から見えるフォルダを用意する。\n"
+        "   ・機械のData Serverの共有（例 \\\\<機械のIP>\\nc）か、\n"
+        "   ・このPCの共有フォルダを機械から参照する、のどちらか。\n"
+        "2. 「方式＝共有フォルダ」を選び、そのフォルダのパスを入れる\n"
+        "   （「参照...」で選択可）。例 \\\\192.168.0.10\\nc または Z:\\NC\n"
+        "3. 「機械へ送信」を押す → <機番>.NC がそのフォルダに置かれる。\n"
+        "4. 機械側でそのファイル（プログラム）を選んで運転する。\n"
+        "\n"
+        "────────────────────────\n"
+        "方式2: FTP（機械がFTPサーバのとき）\n"
+        "────────────────────────\n"
+        "1. 「方式＝FTP」を選ぶ。\n"
+        "2. ホストに機械のIPアドレス、必要ならユーザ／パスワード、\n"
+        "   送信先フォルダを入れる。繋がらないときは「パッシブ」を切り替える。\n"
+        "3. 「機械へ送信」を押す → FTPで <機番>.NC を送る。\n"
+        "4. 機械側でそのファイルを選んで運転する。\n"
+        "\n"
+        "【注意】\n"
+        "・このアプリは「送るだけ」です。安全のため、運転開始（サイクル\n"
+        "  スタート）は機械側で人が行ってください（自動起動はしません）。\n"
+        "・送信先や接続情報は次回も使えるよう保存されます。\n"
+        "\n"
+        "【うまくいかないとき】\n"
+        "・「フォルダが見つかりません」→ そのパスをこのPCのエクスプローラで\n"
+        "  開けるか確認（共有が見えているか）。\n"
+        "・FTPで失敗 → IP・ユーザ／パス・送信先フォルダ・パッシブ設定を確認。\n"
+        "  機械のFTP機能（Data Server）が有効かも確認。\n"
+        "・ファイル名は <機番>.NC（機番が無ければ Oxxxx.NC）。"
+    )
+
+    def show_send_help(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("機械へ送信の使い方")
+        dlg.resize(580, 560)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.SEND_HELP)
+        layout.addWidget(text)
+        b = QtWidgets.QPushButton("閉じる")
+        b.clicked.connect(dlg.accept)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(b)
+        layout.addLayout(row)
+        dlg.exec()
 
 
 class ConditionRegistryDialog(QtWidgets.QDialog):

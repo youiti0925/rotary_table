@@ -86,6 +86,15 @@ DEFAULTS = dict(
     fanuc_unclamp_mcode="M11",    # アンクランプ信号Mコード（例 4軸 M11）
     fanuc_clamp_dwell_sec=1.0,    # クランプ信号後のドゥエル[秒]（すぐ締まらないので待つ）
     fanuc_unclamp_dwell_sec=1.0,  # アンクランプ信号後のドゥエル[秒]（次の動き前の緩み待ち）
+    # 測定プログラムの機械への送信（カード不要・LAN）。"folder"=共有フォルダ / "ftp"
+    nc_send_method="folder",
+    nc_send_folder="",   # 共有フォルダのパス（例 \\<機械IP>\nc や Z:\NC）
+    nc_ftp_host="",      # 機械のIPアドレス（FTP方式）
+    nc_ftp_port=21,
+    nc_ftp_user="",
+    nc_ftp_password="",
+    nc_ftp_dir="",       # アップロード先ディレクトリ（空=ルート）
+    nc_ftp_passive=True,
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

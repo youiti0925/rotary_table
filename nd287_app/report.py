@@ -239,55 +239,100 @@ def deviation_table(series_devs):
     return headers, rows, val_cols
 
 
+def _head_lines(path, n):
+    """ファイルの先頭 n 行だけ読む（cp932）。データ行を読まない＝高速。"""
+    out = []
+    with open(path, encoding="cp932", errors="ignore") as f:
+        for i, line in enumerate(f):
+            if i >= n:
+                break
+            out.append(line.rstrip("\r\n"))
+    return out
+
+
+def _csv_floats(line, count=None):
+    vals = [(_to_float(tok.strip()) if tok.strip() else None)
+            for tok in (line or "").split(",")]
+    return vals[:count] if count else vals
+
+
 def record_from_bs(path):
-    """旧形式 .BS（回転分割）を読み、保存済みの結果値でレコードを作る（再計算しない）。"""
-    from .bs_format import load_bs
-    doc = load_bs(str(path))
-    series = doc.get("series") or {}
-    sec_label = {"HR": "ホイール CW", "HL": "ホイール CCW",
-                 "WR": "ウォーム CW", "WL": "ウォーム CCW"}
+    """.BS（回転分割）の**ヘッダだけ**読んでレコードを作る（データ行は読まない＝高速）。
+
+    精度=精度2(acc2)・傾き・総合バックラッシ（規格MIN/MAX欄＝旧アプリが書いた総合値）を
+    そのまま使う（再計算しない）。
+    """
+    lines = _head_lines(path, 13)
+    if len(lines) < 13:
+        raise ValueError("not a .BS header")
+    model = lines[0].strip()
+    meta = (lines[1] or "").split(",")
+    points = _csv_floats(lines[4], 4)
+    slopes = _csv_floats(lines[5], 4)
+    acc2 = _csv_floats(lines[7], 4)
+    line13 = _csv_floats(lines[12])
+    spec_min = line13[4] if len(line13) > 5 else None
+    spec_max = line13[5] if len(line13) > 5 else None
     metrics = {}
-    for sec, lab in sec_label.items():
-        e = series.get(sec)
-        if e and e.get("points"):
-            if e.get("acc2") is not None:
-                metrics[f"{lab} 精度PP"] = float(e["acc2"])
-            if e.get("slope") is not None:
-                metrics[f"{lab} 傾き"] = float(e["slope"])
-    mn, mx = doc.get("spec_min"), doc.get("spec_max")
-    if mn is not None and mx is not None:
-        metrics["総合BL MIN"] = float(mn)
-        metrics["総合BL MAX"] = float(mx)
-        metrics["総合BL 平均"] = (float(mn) + float(mx)) / 2.0
-        metrics["総合BL 差"] = float(mx) - float(mn)
+    # HR=ホイールCW, HL=ホイールCCW, WR=ウォームCW, WL=ウォームCCW
+    for i, lab in ((0, "ホイール CW"), (3, "ホイール CCW"),
+                   (1, "ウォーム CW"), (2, "ウォーム CCW")):
+        if i < len(points) and points[i]:  # 測定した系列だけ
+            if i < len(acc2) and acc2[i] is not None:
+                metrics[f"{lab} 精度PP"] = acc2[i]
+            if i < len(slopes) and slopes[i] is not None:
+                metrics[f"{lab} 傾き"] = slopes[i]
+    if spec_min is not None and spec_max is not None:
+        metrics["総合BL MIN"] = spec_min
+        metrics["総合BL MAX"] = spec_max
+        metrics["総合BL 平均"] = (spec_min + spec_max) / 2.0
+        metrics["総合BL 差"] = spec_max - spec_min
     return {
         "パス": str(path), "ファイル": Path(path).name,
-        "日付": doc.get("date", ""), "型式": doc.get("model", ""),
-        "機番": Path(path).stem, "名前": doc.get("operator", ""),
-        "モード": "回転分割", "測定温度": _to_float(doc.get("temperature")),
+        "日付": meta[0].strip() if meta else "", "型式": model,
+        "機番": Path(path).stem,
+        "名前": meta[1].strip() if len(meta) > 1 else "",
+        "モード": "回転分割",
+        "測定温度": _to_float(meta[2]) if len(meta) > 2 else None,
         "判定": "", "metrics": metrics,
     }
 
 
 def record_from_ks(path):
-    """旧形式 .KS（傾斜分割）を読み、保存済みの結果値でレコードを作る（再計算しない）。"""
-    from .ks_format import load_ks
-    doc = load_ks(str(path))
-    acw = doc.get("acc_cw") or []
-    accw = doc.get("acc_ccw") or []
+    """.KS（傾斜分割）の**ヘッダだけ**読んでレコードを作る（データ行は読まない）。
+
+    精度(正/逆のH・W)と総合バックラッシ（MAX/MIN行の全範囲値）をそのまま使う。
+    """
+    lines = _head_lines(path, 14)
+    if len(lines) < 14:
+        raise ValueError("not a .KS header")
+    model = lines[0].strip()
+    meta = (lines[1] or "").split(",")
+    acc_cw = _csv_floats(lines[5])    # 精度H, 精度W, 精度
+    acc_ccw = _csv_floats(lines[6])
+    max3 = _csv_floats(lines[9])      # 総合バックラッシ MAX（全範囲/範囲1/範囲2）
+    min3 = _csv_floats(lines[10])
     metrics = {}
 
     def put(key, arr, idx):
         if len(arr) > idx and arr[idx] is not None:
-            metrics[key] = float(arr[idx])
-    put("ホイール CW 精度PP", acw, 0)
-    put("ウォーム CW 精度PP", acw, 1)
-    put("ホイール CCW 精度PP", accw, 0)
-    put("ウォーム CCW 精度PP", accw, 1)
+            metrics[key] = arr[idx]
+    put("ホイール CW 精度PP", acc_cw, 0)
+    put("ウォーム CW 精度PP", acc_cw, 1)
+    put("ホイール CCW 精度PP", acc_ccw, 0)
+    put("ウォーム CCW 精度PP", acc_ccw, 1)
+    mn = min3[0] if min3 else None
+    mx = max3[0] if max3 else None
+    if mn is not None and mx is not None:
+        metrics["総合BL MIN"] = mn
+        metrics["総合BL MAX"] = mx
+        metrics["総合BL 平均"] = (mn + mx) / 2.0
+        metrics["総合BL 差"] = mx - mn
     return {
         "パス": str(path), "ファイル": Path(path).name,
-        "日付": doc.get("date", ""), "型式": doc.get("model", ""),
-        "機番": Path(path).stem, "名前": doc.get("operator", ""),
+        "日付": meta[0].strip() if meta else "", "型式": model,
+        "機番": Path(path).stem,
+        "名前": meta[1].strip() if len(meta) > 1 else "",
         "モード": "傾斜分割", "測定温度": None, "判定": "", "metrics": metrics,
     }
 
@@ -295,9 +340,8 @@ def record_from_ks(path):
 def search_inspection(root, model="", machine="", limit=None):
     """.BS/.KS の検査表フォルダを型式・機番で検索してレコード列を返す（新しい順）。
 
-    速度のため、**ファイルを開く前に**フォルダ名（型式の頭文字＝シリーズ。例 RWE）と
-    ファイル名（機番）で絞り込み、条件に合うものだけ読む。読み取りは保存済みの結果値
-    （旧アプリ計算）をそのまま使う。limit を渡すとその件数で打ち切る。
+    型式があるときは**その頭文字フォルダ（例 RWE）だけ**を走査する（全体を歩かない＝
+    ネットワーク共有でも軽い）。各ファイルはヘッダだけ読む。limit で早期打切り。
     """
     root = Path(root)
     records = []
@@ -308,18 +352,36 @@ def search_inspection(root, model="", machine="", limit=None):
     series = model_u.split("-")[0] if model_u else ""   # 例 RWE-200 → RWE
     has_number = any(c.isdigit() for c in model_u)
 
-    paths = list(root.rglob("*.[bB][sS]")) + list(root.rglob("*.[kK][sS]"))
+    paths = []
+    seen = set()
 
-    def prefilter(p):
-        # 読み込み前の軽い絞り込み（フォルダ名・ファイル名だけ見る）
-        if machine_s and machine_s not in p.stem:
-            return False
-        if series and series not in p.parent.name.upper() \
-                and series not in p.stem.upper():
-            return False
-        return True
+    def collect(folder, recursive):
+        globber = folder.rglob if recursive else folder.glob
+        for pattern in ("*.[bB][sS]", "*.[kK][sS]"):
+            try:
+                for p in globber(pattern):
+                    if p not in seen:
+                        seen.add(p)
+                        paths.append(p)
+            except Exception:
+                pass
 
-    paths = [p for p in paths if prefilter(p)]
+    folders = []
+    if series and root.is_dir():
+        try:
+            folders = [d for d in root.iterdir()
+                       if d.is_dir() and series in d.name.upper()]
+        except Exception:
+            folders = []
+    if folders:
+        for d in folders:
+            collect(d, recursive=True)
+        collect(root, recursive=False)   # フォルダ分けせずroot直下に置いた分も拾う
+    else:
+        collect(root, recursive=True)    # 型式なし/該当フォルダなし → 全体
+
+    if machine_s:
+        paths = [p for p in paths if machine_s in p.stem]
     try:
         paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     except Exception:
@@ -330,7 +392,6 @@ def search_inspection(root, model="", machine="", limit=None):
                    else record_from_ks(p))
         except Exception:
             continue
-        # 型式に数字まで入っている場合だけ中身の型式で絞る（例 RWE-200）
         if model_u and has_number and model_u not in (rec["型式"] or "").upper() \
                 and series not in p.parent.name.upper():
             continue

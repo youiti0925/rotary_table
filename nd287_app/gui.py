@@ -601,6 +601,35 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_dwell.setToolTip("測定点で静止・読取前のドゥエル。測定に効くので 1.0〜5.0 で調整")
         self.e_mcode = QtWidgets.QLineEdit(str(settings.get("fanuc_mcode", "M80")))
         self.e_mcode.setMaximumWidth(80)
+        # クランプ分割: 測定点でクランプ→読取→アンクランプ
+        self.c_clamp = QtWidgets.QCheckBox(
+            "クランプ分割（測定点でクランプ→完了信号→アンクランプ）")
+        self.c_clamp.setChecked(bool(settings.get("fanuc_clamp_enabled", False)))
+        self.c_clamp.setToolTip(
+            "ONにすると各測定点で軸をクランプしてから完了信号を出し、読取後に"
+            "アンクランプして次へ動く。クランプ/アンクランプの信号と待ち時間は下で設定")
+        self.e_clamp_m = QtWidgets.QLineEdit(str(settings.get("fanuc_clamp_mcode", "M10")))
+        self.e_clamp_m.setMaximumWidth(80)
+        self.e_clamp_m.setToolTip("クランプ信号のMコード（軸ごとに決まる。例 4軸 M10）")
+        self.e_unclamp_m = QtWidgets.QLineEdit(
+            str(settings.get("fanuc_unclamp_mcode", "M11")))
+        self.e_unclamp_m.setMaximumWidth(80)
+        self.e_unclamp_m.setToolTip("アンクランプ信号のMコード（例 4軸 M11）")
+        self.e_clamp_dwell = QtWidgets.QDoubleSpinBox()
+        self.e_clamp_dwell.setRange(0.0, 30.0)
+        self.e_clamp_dwell.setDecimals(2)
+        self.e_clamp_dwell.setSingleStep(0.5)
+        self.e_clamp_dwell.setValue(float(settings.get("fanuc_clamp_dwell_sec", 1.0)))
+        self.e_clamp_dwell.setSuffix(" 秒")
+        self.e_clamp_dwell.setToolTip(
+            "クランプ信号後のドゥエル。信号を出してもすぐ締まらないので締まり待ち")
+        self.e_unclamp_dwell = QtWidgets.QDoubleSpinBox()
+        self.e_unclamp_dwell.setRange(0.0, 30.0)
+        self.e_unclamp_dwell.setDecimals(2)
+        self.e_unclamp_dwell.setSingleStep(0.5)
+        self.e_unclamp_dwell.setValue(float(settings.get("fanuc_unclamp_dwell_sec", 1.0)))
+        self.e_unclamp_dwell.setSuffix(" 秒")
+        self.e_unclamp_dwell.setToolTip("アンクランプ信号後のドゥエル（次の動き前の緩み待ち）")
         self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする（外すと1本に展開）")
         self.c_sub.setChecked(bool(settings.get("fanuc_use_subprogram", True)))
         self.c_reset = QtWidgets.QCheckBox(
@@ -625,6 +654,23 @@ class ProgramDialog(QtWidgets.QDialog):
         form.addRow("振りドゥエル（バックラッシュ消し後・小さめ）", self.e_swing_dwell)
         form.addRow("測定ドゥエル（測定点で静止・読取前 1.0〜5.0）", self.e_dwell)
         form.addRow("完了信号Mコード", self.e_mcode)
+        form.addRow(self.c_clamp)
+        clamp_m_row = QtWidgets.QHBoxLayout()
+        clamp_m_row.addWidget(QtWidgets.QLabel("クランプ"))
+        clamp_m_row.addWidget(self.e_clamp_m)
+        clamp_m_row.addSpacing(12)
+        clamp_m_row.addWidget(QtWidgets.QLabel("アンクランプ"))
+        clamp_m_row.addWidget(self.e_unclamp_m)
+        clamp_m_row.addStretch(1)
+        form.addRow("クランプ信号Mコード", clamp_m_row)
+        clamp_d_row = QtWidgets.QHBoxLayout()
+        clamp_d_row.addWidget(QtWidgets.QLabel("クランプ後"))
+        clamp_d_row.addWidget(self.e_clamp_dwell)
+        clamp_d_row.addSpacing(12)
+        clamp_d_row.addWidget(QtWidgets.QLabel("アンクランプ後"))
+        clamp_d_row.addWidget(self.e_unclamp_dwell)
+        clamp_d_row.addStretch(1)
+        form.addRow("クランプ信号後ドゥエル", clamp_d_row)
         form.addRow("メインO番号", self.e_main)
         form.addRow("再現サブプロO番号", self.e_sub)
         form.addRow(self.c_reset)
@@ -658,13 +704,15 @@ class ProgramDialog(QtWidgets.QDialog):
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
 
-        for w in (self.e_axis, self.e_mcode):
+        for w in (self.e_axis, self.e_mcode, self.e_clamp_m, self.e_unclamp_m):
             w.textChanged.connect(self.refresh)
-        for w in (self.e_pre, self.e_reset_sw, self.e_swing_dwell, self.e_dwell):
+        for w in (self.e_pre, self.e_reset_sw, self.e_swing_dwell, self.e_dwell,
+                  self.e_clamp_dwell, self.e_unclamp_dwell):
             w.valueChanged.connect(self.refresh)
         for w in (self.e_main, self.e_sub):
             w.valueChanged.connect(self.refresh)
-        for w in (self.c_sub, self.c_reset, self.c_return, self.c_div, self.c_rep):
+        for w in (self.c_sub, self.c_reset, self.c_return, self.c_div, self.c_rep,
+                  self.c_clamp):
             w.toggled.connect(self.refresh)
         self.refresh()
 
@@ -681,6 +729,11 @@ class ProgramDialog(QtWidgets.QDialog):
             return_to_start=self.c_return.isChecked(),
             counter_reset=self.c_reset.isChecked(),
             reset_swing=self.e_reset_sw.value(),
+            clamp_enabled=self.c_clamp.isChecked(),
+            clamp_mcode=self.e_clamp_m.text().strip() or "M10",
+            unclamp_mcode=self.e_unclamp_m.text().strip() or "M11",
+            clamp_dwell_sec=self.e_clamp_dwell.value(),
+            unclamp_dwell_sec=self.e_unclamp_dwell.value(),
         )
 
     def _generate(self):

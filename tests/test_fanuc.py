@@ -142,6 +142,65 @@ class TestGenerate(unittest.TestCase):
         self.assertNotIn("G04 X1 ", text)
 
 
+class TestClampDivision(unittest.TestCase):
+    """クランプ分割: 各測定点で クランプ→ドゥエル→完了信号→アンクランプ→ドゥエル"""
+
+    def test_repeat_body_clamps_each_read(self):
+        cfg = FanucConfig(axis="X", preswing=10.0, swing_dwell_sec=1.0, dwell_sec=3.0,
+                          mcode="M80", clamp_enabled=True,
+                          clamp_mcode="M10", unclamp_mcode="M11",
+                          clamp_dwell_sec=2.0, unclamp_dwell_sec=0.5)
+        # 振り後の振りドゥエル(1.)は残り、測定点はクランプ列に置き換わる（測定ドゥエル3.は出ない）
+        self.assertEqual(repeat_body(cfg), [
+            "G91 G00 X-10.", "G04 X1.", "X10.",
+            "M10", "G04 X2.", "M80", "M11", "G04 X0.5",
+            "G91 G00 X10.", "G04 X1.", "X-10.",
+            "M10", "G04 X2.", "M80", "M11", "G04 X0.5",
+        ])
+
+    def test_clamp_order_in_division(self):
+        # 1測定点の中で クランプ→完了信号→アンクランプ の順であること
+        cfg = FanucConfig(clamp_enabled=True, clamp_mcode="M10",
+                          unclamp_mcode="M11", mcode="M80")
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        seq = [l.strip().rstrip(" ;") for l in text.splitlines()]
+        i_clamp = seq.index("M10")
+        self.assertEqual(seq[i_clamp + 1][:4], "G04 ")        # クランプ後ドゥエル
+        self.assertEqual(seq[i_clamp + 2], "M80")             # 完了信号
+        self.assertEqual(seq[i_clamp + 3], "M11")             # アンクランプ
+        self.assertEqual(seq[i_clamp + 4][:4], "G04 ")        # アンクランプ後ドゥエル
+
+    def test_clamp_does_not_change_signal_count(self):
+        # クランプを入れても完了信号(取込点数)は不変
+        blocks = rotary_blocks(4)
+        kwargs = dict(rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                      worm_pitch=1.0, worm_range=2.0, blocks=blocks, repeats=3)
+        off = FanucConfig(clamp_enabled=False)
+        on = FanucConfig(clamp_enabled=True)
+        n_off = expand_runtime_signals(generate(off, **kwargs), off)
+        n_on = expand_runtime_signals(generate(on, **kwargs), on)
+        self.assertEqual(n_off, n_on)
+
+    def test_clamp_mcodes_configurable(self):
+        cfg = FanucConfig(clamp_enabled=True, clamp_mcode="M21", unclamp_mcode="M22",
+                          clamp_dwell_sec=1.5, unclamp_dwell_sec=0.3)
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        self.assertIn("M21 ;", text)
+        self.assertIn("M22 ;", text)
+        self.assertIn("G04 X1.5 ;", text)
+        self.assertIn("G04 X0.3 ;", text)
+
+    def test_clamp_off_is_unchanged(self):
+        # クランプOFFは従来どおり（測定ドゥエル→完了信号）
+        cfg = FanucConfig(clamp_enabled=False, dwell_sec=2.0, mcode="M80")
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0, include_repeat=False)
+        self.assertNotIn("M10", text)
+        self.assertNotIn("M11", text)
+
+
 class TestCounterReset(unittest.TestCase):
     def test_reset_block_at_program_top(self):
         # 分割プログラムの先頭にカウンターリセット（+p,-p,-p,+p,M00）が入る

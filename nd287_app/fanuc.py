@@ -12,6 +12,11 @@
                       無関係なので小さめ＝速い。既定 1秒）
     dwell_sec   … 測定ドゥエル[秒]（測定点で静止・読取前。G04 X… 既定 1秒）
     mcode       … 完了信号Mコード（カウンターへ送る。既定 M80）
+    clamp_enabled  … クランプ分割: 各測定点で クランプ→読取→アンクランプ する
+    clamp_mcode / unclamp_mcode … クランプ/アンクランプ信号のMコード（軸ごとに
+                      決まっているので設定で変える。例 4軸 M10/M11）
+    clamp_dwell_sec / unclamp_dwell_sec … クランプ/アンクランプ信号後のドゥエル[秒]
+                      （信号を出してもすぐ締まらない/緩まないので待つ）
     use_subprogram … True: 再現をサブプロ（M98 L呼び）/ False: 1本に展開
     return_to_start … 測定後に開始位置へ戻すか
 
@@ -39,6 +44,12 @@ class FanucConfig:
     return_to_start: bool = True
     counter_reset: bool = True   # 先頭でバックラッシュ消し→M00（作業者がカウンターを0に）
     reset_swing: float = 10.0    # カウンターリセットの振り量[°]（測定の前振りとは別）
+    # クランプ分割: 各測定点でクランプ→読取→アンクランプする（軸ロックして測る）
+    clamp_enabled: bool = False
+    clamp_mcode: str = "M10"        # クランプ信号Mコード（軸ごとに決まる。例 4軸 M10）
+    unclamp_mcode: str = "M11"      # アンクランプ信号Mコード（例 4軸 M11）
+    clamp_dwell_sec: float = 1.0    # クランプ信号後のドゥエル[秒]（締まり待ち）
+    unclamp_dwell_sec: float = 1.0  # アンクランプ信号後のドゥエル[秒]（次の動き前の緩み待ち）
 
     @classmethod
     def from_settings(cls, settings: dict) -> "FanucConfig":
@@ -55,6 +66,11 @@ class FanucConfig:
             return_to_start=bool(s.get("fanuc_return_to_start", True)),
             counter_reset=bool(s.get("fanuc_counter_reset", True)),
             reset_swing=float(s.get("fanuc_reset_swing", s.get("fanuc_preswing", 10.0))),
+            clamp_enabled=bool(s.get("fanuc_clamp_enabled", False)),
+            clamp_mcode=str(s.get("fanuc_clamp_mcode", "M10")),
+            unclamp_mcode=str(s.get("fanuc_unclamp_mcode", "M11")),
+            clamp_dwell_sec=float(s.get("fanuc_clamp_dwell_sec", 1.0)),
+            unclamp_dwell_sec=float(s.get("fanuc_unclamp_dwell_sec", 1.0)),
         )
 
 
@@ -67,19 +83,39 @@ def fmt_num(value) -> str:
     return text
 
 
-def _dwell(cfg: FanucConfig, swing: bool = False) -> str:
+def _g04(sec) -> str:
     # G04 X… は小数点付き = 秒指定（FANUC）。小数点なしは最小指令単位になり誤動作のもと。
+    return f"G04 X{fmt_num(sec)}"
+
+
+def _dwell(cfg: FanucConfig, swing: bool = False) -> str:
     # swing=True: バックラッシュ消しの振り後（測定無関係・小さめ）。
     # swing=False: 測定点での静止待ち（読取前）。
-    sec = cfg.swing_dwell_sec if swing else cfg.dwell_sec
-    return f"G04 X{fmt_num(sec)}"
+    return _g04(cfg.swing_dwell_sec if swing else cfg.dwell_sec)
+
+
+def _read(cfg: FanucConfig) -> list:
+    """測定点に着いてから完了信号を出すまでの手順。
+
+    通常: 測定ドゥエル（静止待ち）→ 完了信号。
+    クランプ分割（clamp_enabled）: クランプ信号 → クランプ後ドゥエル（締まり待ち）→
+        完了信号 → アンクランプ信号 → アンクランプ後ドゥエル（次の動き前の緩み待ち）。
+    どちらも完了信号（cfg.mcode）は1点につき1回だけ＝カウンターの取込点数は不変。
+    """
+    if cfg.clamp_enabled:
+        return [
+            cfg.clamp_mcode, _g04(cfg.clamp_dwell_sec),
+            cfg.mcode,
+            cfg.unclamp_mcode, _g04(cfg.unclamp_dwell_sec),
+        ]
+    return [_dwell(cfg), cfg.mcode]
 
 
 def _point_with_preswing(cfg: FanucConfig, direction: int) -> list:
     """前振り付きで1点読む（パス先頭・再現で使う基本動作）。正味移動0。
 
     direction>0: 負側から接近（-preswing→戻り）。direction<0: 正側から接近。
-    振り後は振りドゥエル（小）、測定点では測定ドゥエル→完了信号。
+    振り後は振りドゥエル（小）、測定点では _read（測定 or クランプ読取）。
     """
     p = cfg.preswing
     a = cfg.axis
@@ -87,16 +123,16 @@ def _point_with_preswing(cfg: FanucConfig, direction: int) -> list:
         moves = [f"G00 {a}{fmt_num(-p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(p)}"]
     else:
         moves = [f"G00 {a}{fmt_num(p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(-p)}"]
-    return moves + [_dwell(cfg), cfg.mcode]
+    return moves + _read(cfg)
 
 
 def _division_pass(cfg: FanucConfig, n_points: int, pitch: float,
                    direction: int) -> list:
-    """1パス（n_points点）。先頭で前振り、以降はピッチ送り＋測定ドゥエル＋完了信号。"""
+    """1パス（n_points点）。先頭で前振り、以降はピッチ送り＋ _read（測定/クランプ読取）。"""
     lines = list(_point_with_preswing(cfg, direction))  # 先頭点（n_points のうち1点目）
     step = pitch * direction
     for _ in range(max(n_points - 1, 0)):
-        lines += [f"G00 {cfg.axis}{fmt_num(step)}", _dwell(cfg), cfg.mcode]
+        lines += [f"G00 {cfg.axis}{fmt_num(step)}"] + _read(cfg)
     return lines  # 完了信号 n_points 回
 
 
@@ -104,12 +140,12 @@ def repeat_body(cfg: FanucConfig) -> list:
     """再現1サイクル（CW読み・CCW読みの2点、正味移動0）。実物サブプロと同形。"""
     p = cfg.preswing
     a = cfg.axis
-    return [
-        f"G91 G00 {a}{fmt_num(-p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(p)}",
-        _dwell(cfg), cfg.mcode,
-        f"G91 G00 {a}{fmt_num(p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(-p)}",
-        _dwell(cfg), cfg.mcode,
-    ]  # 完了信号 2 回
+    return (
+        [f"G91 G00 {a}{fmt_num(-p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(p)}"]
+        + _read(cfg)
+        + [f"G91 G00 {a}{fmt_num(p)}", _dwell(cfg, swing=True), f"{a}{fmt_num(-p)}"]
+        + _read(cfg)
+    )  # 完了信号 2 回
 
 
 def _goto(cfg: FanucConfig, delta: float) -> list:

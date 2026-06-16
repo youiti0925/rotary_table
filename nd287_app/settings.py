@@ -80,6 +80,12 @@ DEFAULTS = dict(
     fanuc_rep_sub_number=9001,
     fanuc_return_to_start=True,
     fanuc_counter_reset=True,   # 先頭にカウンターリセット（M00）を入れる
+    # クランプ分割: 各測定点でクランプ→読取→アンクランプ（軸ロックして測る）
+    fanuc_clamp_enabled=False,
+    fanuc_clamp_mcode="M10",      # クランプ信号Mコード（軸ごとに決まる。例 4軸 M10）
+    fanuc_unclamp_mcode="M11",    # アンクランプ信号Mコード（例 4軸 M11）
+    fanuc_clamp_dwell_sec=1.0,    # クランプ信号後のドゥエル[秒]（すぐ締まらないので待つ）
+    fanuc_unclamp_dwell_sec=1.0,  # アンクランプ信号後のドゥエル[秒]（次の動き前の緩み待ち）
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

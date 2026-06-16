@@ -766,6 +766,37 @@ class ProgramDialog(QtWidgets.QDialog):
             unclamp_dwell_sec=self.e_unclamp_dwell.value(),
         )
 
+    def _fanuc_settings(self):
+        """画面のFANUC設定を settings のキーに対応づけて返す（記憶用）。"""
+        return dict(
+            fanuc_axis=self.e_axis.text().strip() or "X",
+            fanuc_preswing=self.e_pre.value(),
+            fanuc_reset_swing=self.e_reset_sw.value(),
+            fanuc_swing_dwell_sec=self.e_swing_dwell.value(),
+            fanuc_dwell_sec=self.e_dwell.value(),
+            fanuc_mcode=self.e_mcode.text().strip() or "M80",
+            fanuc_use_subprogram=self.c_sub.isChecked(),
+            fanuc_main_number=self.e_main.value(),
+            fanuc_rep_sub_number=self.e_sub.value(),
+            fanuc_return_to_start=self.c_return.isChecked(),
+            fanuc_counter_reset=self.c_reset.isChecked(),
+            fanuc_clamp_enabled=self.c_clamp.isChecked(),
+            fanuc_clamp_mcode=self.e_clamp_m.text().strip() or "M10",
+            fanuc_unclamp_mcode=self.e_unclamp_m.text().strip() or "M11",
+            fanuc_clamp_dwell_sec=self.e_clamp_dwell.value(),
+            fanuc_unclamp_dwell_sec=self.e_unclamp_dwell.value(),
+        )
+
+    def _persist(self, extra=None):
+        """FANUC設定（＋extra）を settings.json に記憶する。失敗は無視。"""
+        self.settings.update(self._fanuc_settings())
+        if extra:
+            self.settings.update(extra)
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
     def _generate(self):
         p = self.params
         return generate_fanuc(
@@ -814,6 +845,7 @@ class ProgramDialog(QtWidgets.QDialog):
         # FANUCはASCII。CRLFで保存
         with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
             f.write(text)
+        self._persist()  # 次回も同じ設定で作れるよう記憶
         QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
 
     def _build_send_group(self):
@@ -887,12 +919,8 @@ class ProgramDialog(QtWidgets.QDialog):
         if not text.strip():
             QtWidgets.QMessageBox.warning(self, "送信", "送るプログラムがありません")
             return
-        # 送信先設定を保存（次回も使えるように）
-        self.settings.update(self._send_settings())
-        try:
-            save_settings(self.settings)
-        except Exception:
-            pass
+        # FANUC設定＋送信先設定を記憶（次回も同じ設定で送れるように）
+        self._persist(self._send_settings())
         from . import ncsend
         machine = self.params.get("machine") or ""
         self.b_send.setEnabled(False)

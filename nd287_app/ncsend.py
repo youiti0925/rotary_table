@@ -12,8 +12,12 @@ FANUCはASCII・CRLF前提なので、その形に整えて書き出す。
 """
 
 import io
+import re
 from ftplib import FTP, error_perm
 from pathlib import Path
+
+# ファイル名に使えない文字（パス区切り・予約文字・制御文字）
+_BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 def nc_bytes(text: str) -> bytes:
@@ -23,9 +27,21 @@ def nc_bytes(text: str) -> bytes:
     return norm.encode("ascii", "replace")
 
 
+def _safe_component(name: str) -> str:
+    """ファイル名に使えない文字を _ に置換し、前後の空白/ドットを除去する。
+
+    機番に / や \\ が混ざってもサブフォルダ扱い・パストラバーサルにならないよう、
+    送信前に必ず通す。
+    """
+    return _BAD_NAME_CHARS.sub("_", name or "").strip().strip(".")
+
+
 def default_filename(machine: str = "", main_number=None) -> str:
-    """送信ファイル名。機番があれば <機番>.NC、無ければ O番号 or program.NC。"""
-    machine = (machine or "").strip()
+    """送信ファイル名。機番があれば <機番>.NC、無ければ O番号 or program.NC。
+
+    機番はファイル名に使えない文字を除去してから使う（パス区切り混入対策）。
+    """
+    machine = _safe_component(str(machine or "").strip())
     if machine:
         return f"{machine}.NC"
     if main_number is not None:
@@ -79,15 +95,19 @@ def send_via_ftp(text: str, host: str, *, port: int = 21, user: str = "",
 
 
 def _ftp_chdir(ftp: FTP, remote_dir: str):
-    """remote_dir まで cwd（無ければ作成を試みる）。"""
+    """remote_dir まで cwd（無ければ作成を試みる）。移動できなければ明確に失敗。"""
     for part in remote_dir.replace("\\", "/").split("/"):
         if not part:
             continue
         try:
             ftp.cwd(part)
         except error_perm:
-            ftp.mkd(part)
-            ftp.cwd(part)
+            try:
+                ftp.mkd(part)
+                ftp.cwd(part)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"FTPの送信先フォルダへ移動できません（{remote_dir}）: {exc}")
 
 
 def send(text: str, settings: dict, *, machine: str = "",

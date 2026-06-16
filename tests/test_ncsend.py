@@ -29,6 +29,21 @@ class TestFilename(unittest.TestCase):
     def test_fallback_default(self):
         self.assertEqual(ncsend.default_filename("", None), "program.NC")
 
+    def test_path_separators_sanitized(self):
+        # 機番に / や \\ が混ざってもサブフォルダ扱いにならない
+        self.assertEqual(ncsend.default_filename("AB/CD"), "AB_CD.NC")
+        self.assertEqual(ncsend.default_filename("AB\\CD"), "AB_CD.NC")
+
+    def test_path_traversal_neutralized(self):
+        name = ncsend.default_filename("../../etc/passwd")
+        self.assertNotIn("/", name)
+        self.assertNotIn("\\", name)
+        self.assertTrue(name.endswith(".NC"))
+
+    def test_dotdot_falls_back(self):
+        # ".." はサニタイズで空になり O番号 へフォールバック（..NC を作らない）
+        self.assertEqual(ncsend.default_filename("..", main_number=100), "O0100.NC")
+
 
 class TestSendToFolder(unittest.TestCase):
     def test_writes_file_crlf(self):

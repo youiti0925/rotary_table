@@ -155,27 +155,43 @@ def _haystack(alarm: dict) -> str:
                     ("code", "group", "title", "cause", "remedy", "keywords"))
 
 
+def _code_num_matches(alarm: dict, qd: str) -> bool:
+    """番号（前ゼロ無視）がコード or keywords の数字トークンと一致するか。"""
+    target = qd.lstrip("0")
+    cd = _digits(alarm.get("code", ""))
+    if cd and cd.lstrip("0") == target:
+        return True
+    for word in str(alarm.get("keywords", "")).split():
+        wd = _digits(word)
+        if wd and wd.lstrip("0") == target:
+            return True
+    return False
+
+
 def search_alarms(alarms, query: str):
-    """番号 or キーワードでアラームを絞り込む。空クエリは全件。"""
+    """番号 or キーワードでアラームを絞り込む。空クエリは全件。
+
+    数字だけのクエリ（例 "510"）は<u>番号一致のみ</u>で探す（"10" が
+    PS0100/OT0510 等に部分一致で巻き込まれるのを防ぐ）。文字を含むクエリは
+    本文の部分一致、加えて補完として番号一致も見る（例 "ps100"）。
+    """
     q = (query or "").strip()
     if not q:
         return list(alarms)
     qn = _norm(q)
     qd = _digits(q)
+    numeric_only = bool(qd) and qd == qn  # 数字だけ（記号・文字を含まない）
     out = []
     for a in alarms:
+        if numeric_only:
+            if _code_num_matches(a, qd):
+                out.append(a)
+            continue
         if qn and qn in _norm(_haystack(a)):
             out.append(a)
             continue
-        if qd:
-            cd = _digits(a.get("code", ""))
-            if cd and cd.lstrip("0") == qd.lstrip("0"):
-                out.append(a)
-                continue
-            # keywords に旧番号がある場合も拾う
-            if any(tok and tok.lstrip("0") == qd.lstrip("0")
-                   for tok in (_digits(w) for w in str(a.get("keywords", "")).split())):
-                out.append(a)
+        if qd and _code_num_matches(a, qd):
+            out.append(a)
     return out
 
 

@@ -27,6 +27,19 @@ class TestSearch(unittest.TestCase):
         hits = fa.search_alarms(self.alarms, "100")
         self.assertTrue(any(h["code"] == "PS0100" for h in hits))
 
+    def test_short_number_no_substring_overmatch(self):
+        # "10" は PS0010 だけ。PS0100/OT0510/SV0410 等を部分一致で巻き込まない
+        codes = {h["code"] for h in fa.search_alarms(self.alarms, "10")}
+        self.assertIn("PS0010", codes)
+        self.assertNotIn("PS0100", codes)
+        self.assertNotIn("OT0510", codes)
+        self.assertNotIn("SV0410", codes)
+
+    def test_alnum_query_still_finds_code(self):
+        # "ps100"（文字+数字）でも PS0100 を補完的に拾う
+        hits = fa.search_alarms(self.alarms, "ps100")
+        self.assertTrue(any(h["code"] == "PS0100" for h in hits))
+
     def test_by_japanese_keyword(self):
         hits = fa.search_alarms(self.alarms, "オーバートラベル")
         self.assertTrue(len(hits) >= 2)

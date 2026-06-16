@@ -95,6 +95,8 @@ DEFAULTS = dict(
     nc_ftp_password="",
     nc_ftp_dir="",       # アップロード先ディレクトリ（空=ルート）
     nc_ftp_passive=True,
+    # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
+    fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

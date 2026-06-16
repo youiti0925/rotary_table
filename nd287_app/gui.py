@@ -98,10 +98,12 @@ from .sequence import (
 )
 from .settings import (
     PROFILE_LABELS,
+    app_dir,
     apply_active_profile,
     resolve_save_root,
     save_settings,
 )
+from . import fanuc_alarms
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -2070,6 +2072,79 @@ class HelpDialog(QtWidgets.QDialog):
             self.body.setHtml(help_text.HELP_SECTIONS[row][1])
 
 
+class AlarmHelpDialog(QtWidgets.QDialog):
+    """FANUCアラームを番号/キーワードで検索し、意味と対処の目安を表示する。"""
+
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.setWindowTitle("FANUCアラーム検索")
+        self.resize(820, 600)
+        csv_path = settings.get("fanuc_alarm_csv") if settings else None
+        if csv_path and not Path(csv_path).is_absolute():
+            csv_path = str(app_dir() / csv_path)
+        self.alarms = fanuc_alarms.load_alarms(csv_path)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(fanuc_alarms.DISCLAIMER)
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#b45309;")  # 注意喚起のアンバー
+        layout.addWidget(note)
+
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.addWidget(QtWidgets.QLabel("検索"))
+        self.e_query = QtWidgets.QLineEdit()
+        self.e_query.setPlaceholderText("例: 510 / OT / オーバートラベル / 100 / 電池 / 通信")
+        self.e_query.textChanged.connect(self._refilter)
+        search_row.addWidget(self.e_query, 1)
+        self.lbl_count = QtWidgets.QLabel("")
+        search_row.addWidget(self.lbl_count)
+        layout.addLayout(search_row)
+
+        split = QtWidgets.QHBoxLayout()
+        self.list = QtWidgets.QListWidget()
+        self.list.setMaximumWidth(280)
+        self.list.currentRowChanged.connect(self._show_row)
+        self.body = QtWidgets.QTextBrowser()
+        split.addWidget(self.list)
+        split.addWidget(self.body, 1)
+        layout.addLayout(split, 1)
+
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        bottom.addWidget(b_close)
+        layout.addLayout(bottom)
+
+        self._results = []
+        self._refilter()
+
+    def _refilter(self):
+        self._results = fanuc_alarms.search_alarms(self.alarms, self.e_query.text())
+        self.list.blockSignals(True)
+        self.list.clear()
+        for a in self._results:
+            self.list.addItem(f'{a.get("code", "")}　{a.get("title", "")}')
+        self.list.blockSignals(False)
+        self.lbl_count.setText(f"{len(self._results)}件")
+        if self._results:
+            self.list.setCurrentRow(0)
+        else:
+            self.body.setHtml("<p>該当するアラームが見つかりません。"
+                              "別の番号やキーワードで試すか、機械メーカーの資料を確認してください。</p>")
+
+    def _show_row(self, row):
+        if not (0 <= row < len(self._results)):
+            return
+        a = self._results[row]
+        self.body.setHtml(
+            f'<h3>{a.get("code", "")}　{a.get("title", "")}</h3>'
+            f'<p style="color:#666;">分類: {a.get("group", "")}</p>'
+            f'<p><b>原因</b><br>{a.get("cause", "")}</p>'
+            f'<p><b>対処</b><br>{a.get("remedy", "")}</p>'
+        )
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -2370,6 +2445,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
         self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
         self.b_pcorr.clicked.connect(self.show_pitch_correction)
+        self.b_alarm = QtWidgets.QPushButton("アラーム")
+        self.b_alarm.setToolTip("FANUCのアラーム番号・メッセージから意味と対処の目安を調べる")
+        self.b_alarm.clicked.connect(self.show_alarm_help)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         b_help = QtWidgets.QPushButton("ヘルプ")
@@ -2394,7 +2472,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.b_raw, self.b_past, self.b_analyze):
             toolbar.addWidget(b)
         toolbar.addSeparator()
-        for b in (self.b_cond, self.b_program, self.b_pcorr):
+        for b in (self.b_cond, self.b_program, self.b_pcorr, self.b_alarm):
             toolbar.addWidget(b)
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
@@ -3412,6 +3490,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_help(self):
         """アプリ全体＋新機能の詳細ヘルプを開く。"""
         HelpDialog(self).exec()
+
+    def show_alarm_help(self):
+        """FANUCアラームの番号/メッセージから意味・対処を調べる。"""
+        AlarmHelpDialog(self, self.settings).exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)

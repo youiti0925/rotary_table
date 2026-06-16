@@ -60,6 +60,7 @@ from .masters import (
 )
 from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
+from . import help_text
 from .export import (
     MODE_KEY,
     build_save_path,
@@ -2028,6 +2029,47 @@ class GraphZoomDialog(QtWidgets.QDialog):
         layout.addLayout(bottom)
 
 
+class HelpDialog(QtWidgets.QDialog):
+    """アプリ全体＋新機能の詳細ヘルプ（左に見出し一覧・右に本文）。"""
+
+    def __init__(self, parent=None, start_title=None):
+        super().__init__(parent)
+        self.setWindowTitle("詳細ヘルプ")
+        self.resize(860, 620)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        split = QtWidgets.QHBoxLayout()
+        self.list = QtWidgets.QListWidget()
+        self.list.setMaximumWidth(240)
+        self.body = QtWidgets.QTextBrowser()
+        self.body.setOpenExternalLinks(False)
+        for title, _ in help_text.HELP_SECTIONS:
+            self.list.addItem(title)
+        self.list.currentRowChanged.connect(self._show_row)
+        split.addWidget(self.list)
+        split.addWidget(self.body, 1)
+        layout.addLayout(split, 1)
+
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        bottom.addWidget(b_close)
+        layout.addLayout(bottom)
+
+        start = 0
+        if start_title:
+            for i, (title, _) in enumerate(help_text.HELP_SECTIONS):
+                if start_title in title:
+                    start = i
+                    break
+        self.list.setCurrentRow(start)
+
+    def _show_row(self, row):
+        if 0 <= row < len(help_text.HELP_SECTIONS):
+            self.body.setHtml(help_text.HELP_SECTIONS[row][1])
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -2330,10 +2372,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_pcorr.clicked.connect(self.show_pitch_correction)
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
+        b_help = QtWidgets.QPushButton("ヘルプ")
+        b_help.setToolTip("アプリ全体と新機能（クランプ分割・機械へ送信など）の詳細ヘルプ")
         self.b_save.clicked.connect(self.save)
         self.b_print.clicked.connect(self.print_report)
         b_load.clicked.connect(self.load)
         b_settings.clicked.connect(self.open_settings)
+        b_help.clicked.connect(self.show_help)
         toolbar = QtWidgets.QToolBar("操作")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
@@ -2356,6 +2401,7 @@ class MainWindow(QtWidgets.QMainWindow):
                              QtWidgets.QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
         toolbar.addWidget(b_settings)
+        toolbar.addWidget(b_help)
 
         # ===== ガイドと受信値・データ数 =====
         self.guide = QtWidgets.QLabel("―")
@@ -3362,6 +3408,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(
                 f"接続先を {PROFILE_LABELS[key]} に切替（ダミーモード中）"
             )
+
+    def show_help(self):
+        """アプリ全体＋新機能の詳細ヘルプを開く。"""
+        HelpDialog(self).exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)

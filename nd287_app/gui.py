@@ -66,12 +66,11 @@ from .export import (
     build_save_path,
     judgement_texts,
     load_measurement,
-    misc_rows,
     repeat_result_rows,
-    result_rows,
     sanitize_filename,
     save_csv,
     save_repeat_csv,
+    series_rows,
 )
 from . import excel_export, report
 from .themes import (
@@ -2856,10 +2855,11 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setFont(lf)
 
     def current_result_rows(self):
-        """表示中データの (項目, 値) 行（印刷・分析で使う完全版）。
+        """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
 
-        分割系は系列指標＋バックラッシ＋温度規格判定＋真の最大最小＋
-        （複合なら）再現性。再現性単独は各ブロックの範囲。
+        分割系は系列指標＋総合バックラッシ（画面と同じく総合のみ。真の最大最小・
+        総合判定は出さない）＋主点・傾き判定＋（複合なら）再現性。
+        再現性単独は各ブロックの範囲。
         """
         if not self.has_view_data():
             return []
@@ -2867,8 +2867,8 @@ class MainWindow(QtWidgets.QMainWindow):
             rsum = repeatability_summary(self.rep_points, self.rep_data)
             return list(repeat_result_rows(rsum))
         summary, _ = summarize(self.data, self.applied_blcorr)
-        rows = list(result_rows(summary, self.current_judgements(summary)))
-        rows.extend(self.composite_backlash_rows())
+        rows = list(series_rows(summary))
+        rows.extend(self.compact_misc_rows(summary))
         rows.extend(self.main_grid_rows())
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():
@@ -3102,12 +3102,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.view_kind == "repeat":
                 rsum = repeatability_summary(self.rep_points, self.rep_data)
                 return repeat_result_rows(rsum)
-            # 系列＋バックラッシ・判定・総合・主点・傾き判定・任意誤差
-            from .export import series_rows
+            # 系列＋総合バックラッシ・主点・傾き判定・任意誤差（画面と同じ）
             summary, _ = summarize(self.data, self.applied_blcorr)
             results = series_rows(summary)
-            results += misc_rows(summary, self.current_judgements(summary))
-            results += self.composite_backlash_rows()
+            results += self.compact_misc_rows(summary)
             results += self.main_grid_rows()
             results += self.slope_judgement_rows(summary)
             if self.is_tilt():
@@ -3993,29 +3991,6 @@ class MainWindow(QtWidgets.QMainWindow):
             rows.append((f"主点精度 {label}（{divisions}等分）", f'{pp(devs[::step]):.2f}"'))
         return rows
 
-    def composite_backlash_rows(self):
-        """総合バックラッシ（ウォームを0°位置でホイールに合わせた機械全体の値）"""
-        comp = composite_backlash_minmax(self.data)
-        if comp is None:
-            return []
-        comp_min = comp[0] + self.applied_blcorr
-        comp_max = comp[1] + self.applied_blcorr
-        rows = [
-            ("総合バックラッシ MIN（0°合わせ）", f'{comp_min:.2f}"'),
-            ("総合バックラッシ MAX（0°合わせ）", f'{comp_max:.2f}"'),
-        ]
-        if not self.is_tilt():
-            temp = self.parse_temp()
-            mm = formula_minmax(self.master_judge, temp)
-            if mm:
-                ok = mm[0] <= comp_min and comp_max <= mm[1]
-                rows.append((
-                    "総合バックラッシ 判定",
-                    f'{"OK" if ok else "NG"}'
-                    f'（規格 {mm[0]:.1f}〜{mm[1]:.1f}" @ {temp:g}°C）',
-                ))
-        return rows
-
     def tilt_accuracy_rows(self):
         """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""
         specs = [("全範囲", None)]
@@ -4617,8 +4592,7 @@ class MainWindow(QtWidgets.QMainWindow):
         series_table = (f"<table style='font-size:7pt;' cellspacing='0'>"
                         f"<tr>{head}</tr>{body}</table>")
 
-        rows = misc_rows(summary, self.current_judgements(summary))
-        rows.extend(self.composite_backlash_rows())
+        rows = self.compact_misc_rows(summary)
         rows.extend(self.main_grid_rows())
         rows.extend(self.slope_judgement_rows(summary))
         if self.is_tilt():

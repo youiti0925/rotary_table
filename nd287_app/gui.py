@@ -172,6 +172,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.e_font.setSuffix(" pt")
         self.e_font.setValue(int(settings.get("ui_font_pt", DEFAULT_FONT_PT)))
         self.e_font.setToolTip("画面全体の文字サイズ。OKですぐ反映される")
+        self.c_comp_bl = QtWidgets.QCheckBox("ホイール/ウォーム単品のバックラッシも表示")
+        self.c_comp_bl.setChecked(bool(settings.get("show_component_backlash", False)))
+        self.c_comp_bl.setToolTip("既定は総合バックラッシのみ。ONで単品も参考表示する")
 
         root_row = QtWidgets.QHBoxLayout()
         self.e_root = QtWidgets.QLineEdit(str(settings.get("save_root", "測定データ")))
@@ -265,6 +268,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("パリティ", self.e_parity)
         form.addRow("画面テーマ", self.e_theme)
         form.addRow("文字サイズ", self.e_font)
+        form.addRow(self.c_comp_bl)
         form.addRow("測定データ保存先", root_row)
         form.addRow(".BS/.KS保存先（旧形式）", bs_row)
         form.addRow("測定条件CSV", self.e_conditions.row)
@@ -423,6 +427,7 @@ class SettingsDialog(QtWidgets.QDialog):
             parity=self.e_parity.currentText(),
             ui_theme=self.e_theme.currentText(),
             ui_font_pt=self.e_font.value(),
+            show_component_backlash=self.c_comp_bl.isChecked(),
             save_root=self.e_root.text().strip() or "測定データ",
             bs_save_root=self.e_bs_root.text().strip(),
             conditions_csv=self.e_conditions.text().strip() or r"マスタ/測定条件.csv",
@@ -1150,6 +1155,13 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.e_cmp_machine.setMaximumWidth(130)
         self.e_cmp_machine.returnPressed.connect(self.reload_compare)
         top.addWidget(self.e_cmp_machine)
+        top.addWidget(QtWidgets.QLabel("種別"))
+        self.cmb_cmp_mode = QtWidgets.QComboBox()
+        self.cmb_cmp_mode.addItem("すべて", "")
+        for m in MODES:
+            self.cmb_cmp_mode.addItem(m, m)
+        self.cmb_cmp_mode.currentIndexChanged.connect(self.reload_compare)
+        top.addWidget(self.cmb_cmp_mode)
         top.addWidget(QtWidgets.QLabel("上限"))
         self.sp_count = QtWidgets.QSpinBox()
         self.sp_count.setRange(1, 2000)
@@ -1228,6 +1240,10 @@ class AnalysisDialog(QtWidgets.QDialog):
             self.records = report.search_inspection(
                 root, model=self.e_cmp_model.text(),
                 machine=self.e_cmp_machine.text(), limit=self.sp_count.value())
+        # 種別（回転分割/傾斜分割/再現…）で絞る＝表がごちゃつかない
+        sel_mode = self.cmb_cmp_mode.currentData()
+        if sel_mode:
+            self.records = [r for r in self.records if r.get("モード") == sel_mode]
         self.metric_cols = report.available_metrics(self.records)
         self.headers, self.rows = report.build_comparison_table(
             self.records, self.metric_cols)
@@ -3105,6 +3121,7 @@ class MainWindow(QtWidgets.QMainWindow):
         apply_font(app, self.settings.get("ui_font_pt"))
         apply_theme(app, self.settings.get("ui_theme"))
         self.apply_ui_fonts()
+        self.refresh_results()  # バックラッシ表示切替などを即反映
         if not self.dev.dummy:
             self.dev.close()
             self.dev = ND287Device(
@@ -3514,9 +3531,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_misc_table(rows)
 
     def compact_misc_rows(self, summary):
-        """総合バックラッシ（MIN/MAX/平均/差）と真の最大最小。
+        """総合バックラッシ（MIN/MAX/平均/差）だけを出す。
 
-        ホイール／ウォーム単品のバックラッシは出さない（旧アプリと同じく総合のみ）。
+        真の最大最小・総合判定は出さない（不要）。ホイール／ウォーム単品は
+        設定 show_component_backlash が True のときだけ追加で出す。
         """
         rows = []
         if "backlash_correction" in summary:
@@ -3547,15 +3565,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 rows.append(("総合バックラッシ MAX", f'{cmax:.1f}"'))
                 rows.append(("総合バックラッシ 平均", f'{cavg:.1f}"'))
             rows.append(("総合バックラッシ 差", f'{cdiff:.1f}"'))
-        true = summary.get("true") or {}
-        for dirn, jp in (("cw", "CW"), ("ccw", "CCW")):
-            if dirn in true:
-                rows.append((f"真の最大最小 {jp}",
-                             f'{true[dirn]["true_min"]:.2f}〜'
-                             f'{true[dirn]["true_max"]:.2f}"'))
-        jt = judgement_texts(summary, temp, self.settings.get("judgement_spec"))
-        if "true" in jt:
-            rows.append(("総合判定", jt["true"]))
+        # 任意: ホイール/ウォーム単品バックラッシ（設定で表示ONのときだけ）
+        if self.settings.get("show_component_backlash"):
+            for grp, label in (("wheel", "ホイール"), ("worm", "ウォーム")):
+                key = f"{grp}_backlash"
+                if key in summary:
+                    rows.append((f"（参考）{label} バックラッシ",
+                                 f'{summary[key]["min"]:.1f}〜{summary[key]["max"]:.1f}"'))
         return rows
 
     def main_grid_rows(self):

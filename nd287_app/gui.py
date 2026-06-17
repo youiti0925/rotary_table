@@ -2214,7 +2214,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_operator.setMaximumWidth(96)
         self.e_temp.setMaximumWidth(58)
 
-        info_group = QtWidgets.QGroupBox("測定情報")
+        self.info_group = info_group = QtWidgets.QGroupBox("測定情報")
         info_grid = QtWidgets.QGridLayout(info_group)
         info_grid.setContentsMargins(6, 4, 6, 4)
         info_grid.setHorizontalSpacing(6)
@@ -2370,7 +2370,7 @@ class MainWindow(QtWidgets.QMainWindow):
                    self.e_blocks, self.e_repeats, self.e_evald, self.e_blcorr):
             sp.setMaximumWidth(118)
 
-        cond_group = QtWidgets.QGroupBox("測定条件")
+        self.cond_group = cond_group = QtWidgets.QGroupBox("測定条件")
         cond_v = QtWidgets.QVBoxLayout(cond_group)
         cond_v.setSpacing(3)
         cond_v.setContentsMargins(6, 4, 6, 4)
@@ -2868,6 +2868,12 @@ class MainWindow(QtWidgets.QMainWindow):
             lf = label.font()
             lf.setPointSize(max(base - 1, 8))
             label.setFont(lf)
+        # 測定情報・測定条件・精度結果は大きめにして読みやすく
+        for w in (self.info_group, self.cond_group,
+                  self.table_series, self.table_misc):
+            wf = w.font()
+            wf.setPointSize(base + 2)
+            w.setFont(wf)
 
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
@@ -3954,8 +3960,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 d = np.asarray(devs[key][1], dtype=float)
                 table_rows.append(([
                     SERIES_LABELS[key],
-                    f'{pp(d):.2f}"', f'{single(d):.2f}"',
-                    f'{adjacent(d):.2f}"', f'{slope(d):+.2f}"',
+                    f'{pp(d):.1f}"', f'{single(d):.1f}"',
+                    f'{adjacent(d):.1f}"', f'{slope(d):+.1f}"',
                 ], False, slope_limit))
         # 主点精度（1/N）は「精度」なので精度表に入れる（バックラッシ表ではない）
         grid = self.main_grid_series_rows()
@@ -4061,7 +4067,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pairs = sorted(zip(t, m))
             devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
             rows.append((f"主点精度 {label}（{divisions}等分）",
-                         f'{pp(devs[::step]):.2f}"'))
+                         f'{pp(devs[::step]):.1f}"'))
         return rows
 
     def main_grid_series_rows(self):

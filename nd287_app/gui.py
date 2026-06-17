@@ -2299,8 +2299,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_evald.setRange(0, 720)
         self.e_evald.setSpecialValueText("なし")
         self.e_evald.setSuffix(" 等分")
+        self.e_evald.setToolTip(
+            "主点（1/N）の等分数。型式を選ぶとマスタの分割数（1/N）から自動で入る。"
+            "値を変えると、グラフの主点マーカーと主点精度が即更新される")
         self.e_evald.valueChanged.connect(self.refresh_results)
-        self.box_evald, self.l_evald = field_box("主点評価", self.e_evald)
+        self.box_evald, self.l_evald = field_box("主点評価(1/N)", self.e_evald)
         self.e_blcorr = QtWidgets.QDoubleSpinBox()
         self.e_blcorr.setRange(-999.0, 999.0)
         self.e_blcorr.setDecimals(2)
@@ -2378,12 +2381,19 @@ class MainWindow(QtWidgets.QMainWindow):
         mode_row.addWidget(lbl_mode)
         mode_row.addWidget(self.mode_combo, 1)
         cond_v.addLayout(mode_row)
-        for box in (self.box_wstart, self.box_wend, self.box_wheel,
-                    self.box_worm, self.box_range, self.box_start,
-                    self.box_blocks, self.box_repeats, self.box_rstart,
-                    self.box_rend, self.box_evald, self.box_blcorr,
-                    self.box_ranges):
-            cond_v.addWidget(box)
+        # 条件入力は2列に並べる（縦長を抑える）。モードで表示が変わるので、
+        # 表示中の項目だけを詰めて隙間が出ないよう on_mode_changed で再配置する。
+        self._cond_order = [self.box_wstart, self.box_wend, self.box_wheel,
+                            self.box_worm, self.box_range, self.box_start,
+                            self.box_evald, self.box_blcorr,
+                            self.box_blocks, self.box_repeats,
+                            self.box_rstart, self.box_rend]
+        self.cond_grid = QtWidgets.QGridLayout()
+        self.cond_grid.setContentsMargins(0, 0, 0, 0)
+        self.cond_grid.setHorizontalSpacing(10)
+        self.cond_grid.setVerticalSpacing(3)
+        cond_v.addLayout(self.cond_grid)
+        cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
         comment_row = QtWidgets.QHBoxLayout()
         comment_row.setContentsMargins(0, 0, 0, 0)
         lbl_comment = QtWidgets.QLabel("コメント")
@@ -2507,6 +2517,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for axis_name in ("left", "bottom"):
                 plot.getAxis(axis_name).enableAutoSIPrefix(False)
         self.curves = {}
+        self.main_markers = {}  # 主点（1/N）グリッドの強調マーカー
         plots_widget = QtWidgets.QWidget()
         plots = QtWidgets.QHBoxLayout(plots_widget)
         plots.setContentsMargins(0, 0, 0, 0)
@@ -2544,8 +2555,8 @@ class MainWindow(QtWidgets.QMainWindow):
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        side_scroll.setMinimumWidth(300)
-        side_scroll.setMaximumWidth(330)
+        side_scroll.setMinimumWidth(450)
+        side_scroll.setMaximumWidth(480)
 
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
@@ -2579,8 +2590,8 @@ class MainWindow(QtWidgets.QMainWindow):
         right_v.setContentsMargins(0, 0, 0, 0)
         right_v.addWidget(self.guide)
         right_v.addWidget(self.corr_bar)
+        right_v.addLayout(live_row)  # 受信値・測定点数はグラフのすぐ上
         right_v.addWidget(plots_widget, 1)
-        right_v.addLayout(live_row)
         right_v.addWidget(tables_widget)
 
         container = QtWidgets.QWidget()
@@ -3006,6 +3017,10 @@ class MainWindow(QtWidgets.QMainWindow):
             mm = formula_minmax(judge, temp if temp is not None else 20.0)
             if mm:
                 message.append(f"規格 {mm[0]:.1f}〜{mm[1]:.1f}\"")
+        # 主点評価は手入力させず、マスタの1/N（分割数1）から自動で入れる
+        if cond and int(cond.get("div1") or 0) > 0:
+            self.e_evald.setValue(int(cond["div1"]))
+            message.append(f"主点 1/N={int(cond['div1'])}等分")
         self.statusBar().showMessage(f"{text} マスタ適用: " + "　".join(message))
 
     # ----- モード -----
@@ -3022,18 +3037,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def is_combined(self):
         return "+再現" in self.current_mode()
 
+    def _reflow_conditions(self, boxes):
+        """測定条件の2列グリッドを、表示中の項目だけで詰め直す（隙間を作らない）。"""
+        while self.cond_grid.count():
+            self.cond_grid.takeAt(0)
+        for i, box in enumerate(boxes):
+            self.cond_grid.addWidget(box, i // 2, i % 2)
+
     def on_mode_changed(self, mode):
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
         show_division = not is_repeat   # 分割系（単独 or 合体）で分割入力を出す
         show_repeat_params = is_repeat or is_combined
-        for w in (self.box_wstart, self.box_wend):
-            w.setVisible(is_tilt)
-        for w in (self.box_worm, self.box_range, self.box_start, self.box_wheel):
-            w.setVisible(show_division)
-        for w in (self.box_blocks, self.box_repeats, self.box_rstart, self.box_rend):
-            w.setVisible(show_repeat_params)
-        for w in (self.box_blcorr, self.box_evald):
-            w.setVisible(show_division)
+        vis = {
+            self.box_wstart: is_tilt, self.box_wend: is_tilt,
+            self.box_wheel: show_division, self.box_worm: show_division,
+            self.box_range: show_division, self.box_start: show_division,
+            self.box_evald: show_division, self.box_blcorr: show_division,
+            self.box_blocks: show_repeat_params, self.box_repeats: show_repeat_params,
+            self.box_rstart: show_repeat_params, self.box_rend: show_repeat_params,
+        }
+        for w, on in vis.items():
+            w.setVisible(on)
+        self._reflow_conditions([w for w in self._cond_order if vis.get(w)])
         self.box_ranges.setVisible(is_tilt and show_division)
         self.corr_bar.setVisible(show_division)  # 補正前/後は分割系のみ
         self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
@@ -3367,12 +3392,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     symbolBrush="#d62728", name="CCW",
                 ),
             }
+            self.main_markers = {}
         else:
             self.curves = {
                 key: (self.plot_wheel if key.startswith("wheel") else self.plot_worm).plot(
                     name=SERIES_LABELS[key], **style
                 )
                 for key, style in CURVE_STYLES.items()
+            }
+            # 主点（1/N）の点を全カーブの上に大きいオレンジ点で重ねる
+            self.main_markers = {
+                key: (self.plot_wheel if key.startswith("wheel")
+                      else self.plot_worm).plot(
+                    [], [], pen=None, symbol="o", symbolSize=11,
+                    symbolBrush=(255, 165, 0), symbolPen="k",
+                )
+                for key in CURVE_STYLES
             }
 
     # ----- 接続 -----
@@ -3793,13 +3828,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve.setData(np.asarray(t, dtype=float), np.asarray(d, dtype=float))
             else:
                 curve.setData([], [])
+        self._update_main_markers(devs)
+
+    def _update_main_markers(self, devs):
+        """主点（1/N）の点だけを大きいマーカーで重ねる。主点評価Nに追従。"""
+        n = self.e_evald.value()
+        for key, marker in getattr(self, "main_markers", {}).items():
+            ser = devs.get(key)
+            if not ser or not ser[0] or n <= 0:
+                marker.setData([], [])
+                continue
+            t = np.asarray(ser[0], dtype=float)
+            d = np.asarray(ser[1], dtype=float)
+            intervals = len(t) - 1
+            if intervals <= 0 or n > intervals or intervals % n != 0:
+                marker.setData([], [])
+                continue
+            step = intervals // n
+            marker.setData(t[::step], d[::step])
 
     def refresh_results(self):
-        """評価範囲の変更で結果表を再計算する（測定完了後のみ）"""
+        """評価範囲・主点評価の変更で結果表とグラフを再計算する（測定完了後のみ）"""
         if (self.view_kind in ("indexing", "combined") and self.data
                 and not self.b_take.isEnabled()):
             if any(t for t, _ in self.data.values()):
                 self.finish_indexing()
+                self.redraw()  # 主点マーカーなどグラフも追従
 
     def current_judgements(self, summary):
         """温度別合否判定文。型式マスタの温度式を優先し、無ければ規格帯設定を使う
@@ -3972,23 +4026,36 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def main_grid_rows(self):
-        """主点評価: 測定より粗い任意の等分数で精度を評価し直す（例 72等分→12等分）"""
-        divisions = self.e_evald.value()
-        if divisions <= 0:
+        """主点評価（1/N）: マスタの分割数（1/N）で主点精度を出す。
+
+        主点評価欄（=マスタ分割数1から自動）と、マスタに分割数2があれば両方で評価する。
+        """
+        ns = []
+        if self.e_evald.value() > 0:
+            ns.append(self.e_evald.value())
+        if self.master_cond:
+            d2 = int(self.master_cond.get("div2") or 0)
+            if d2 > 0 and d2 not in ns:
+                ns.append(d2)
+        if not ns:
             return []
         targets = sorted(self.data.get("wheel_cw", ([], []))[0])
         intervals = len(targets) - 1
         if intervals <= 0:
             return []
-        if intervals % divisions != 0 or divisions > intervals:
-            return [("主点評価", f"{divisions}等分は測定{intervals}等分と割り切れません")]
-        step = intervals // divisions
         rows = []
-        for key, label in (("wheel_cw", "ホイールCW"), ("wheel_ccw", "ホイールCCW")):
-            t, m = self.data.get(key, ([], []))
-            pairs = sorted(zip(t, m))
-            devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
-            rows.append((f"主点精度 {label}（{divisions}等分）", f'{pp(devs[::step]):.2f}"'))
+        for divisions in ns:
+            if intervals % divisions != 0 or divisions > intervals:
+                rows.append((f"主点評価（{divisions}等分）",
+                             f"測定{intervals}等分と割り切れません"))
+                continue
+            step = intervals // divisions
+            for key, label in (("wheel_cw", "ホイールCW"), ("wheel_ccw", "ホイールCCW")):
+                t, m = self.data.get(key, ([], []))
+                pairs = sorted(zip(t, m))
+                devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
+                rows.append((f"主点精度 {label}（{divisions}等分）",
+                             f'{pp(devs[::step]):.2f}"'))
         return rows
 
     def tilt_accuracy_rows(self):

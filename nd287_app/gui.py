@@ -4123,11 +4123,12 @@ class MainWindow(QtWidgets.QMainWindow):
             cells = [
                 f"ブロック{i + 1}",
                 f'{b["angle"]:g}°',
-                f'{b["cw"]:.2f}"' if b["cw"] is not None else "―",
-                f'{b["ccw"]:.2f}"' if b["ccw"] is not None else "―",
+                f'{b["cw"]:.1f}"' if b["cw"] is not None else "―",
+                f'{b["ccw"]:.1f}"' if b["ccw"] is not None else "―",
             ]
             for j, text in enumerate(cells):
                 self.table_series.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+        self._fit_table_height(self.table_series)
         rows = []
         for key, label in (
             ("cw", "再現性 CW（全ブロック最大）"),
@@ -4135,7 +4136,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("overall", "再現性 総合"),
         ):
             if rsum.get(key) is not None:
-                rows.append((label, f'{rsum[key]:.2f}"'))
+                rows.append((label, f'{rsum[key]:.1f}"'))
         self.fill_misc_table(rows)
 
     def _fit_table_height(self, table):

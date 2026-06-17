@@ -2381,18 +2381,81 @@ class MainWindow(QtWidgets.QMainWindow):
         mode_row.addWidget(lbl_mode)
         mode_row.addWidget(self.mode_combo, 1)
         cond_v.addLayout(mode_row)
-        # 条件入力は2列に並べる（縦長を抑える）。モードで表示が変わるので、
-        # 表示中の項目だけを詰めて隙間が出ないよう on_mode_changed で再配置する。
-        self._cond_order = [self.box_wstart, self.box_wend, self.box_wheel,
-                            self.box_worm, self.box_range, self.box_start,
-                            self.box_evald, self.box_blcorr,
-                            self.box_blocks, self.box_repeats,
-                            self.box_rstart, self.box_rend]
-        self.cond_grid = QtWidgets.QGridLayout()
-        self.cond_grid.setContentsMargins(0, 0, 0, 0)
-        self.cond_grid.setHorizontalSpacing(10)
-        self.cond_grid.setVerticalSpacing(3)
-        cond_v.addLayout(self.cond_grid)
+        # ホイール／ウォーム／再現 を見出しで分けて並べる（混在させない）
+        def cond_header(text):
+            h = QtWidgets.QLabel(text)
+            hf = h.font()
+            hf.setBold(True)
+            h.setFont(hf)
+            h.setStyleSheet("background:#e3e9f2; padding:2px 6px;")
+            return h
+
+        # ホイール群（傾斜は 開始/終了角度 も出す）
+        self.wheel_group = QtWidgets.QWidget()
+        wg = QtWidgets.QGridLayout(self.wheel_group)
+        wg.setContentsMargins(0, 0, 0, 0)
+        wg.setHorizontalSpacing(8)
+        wg.setVerticalSpacing(3)
+        wg.addWidget(cond_header("ホイール"), 0, 0, 1, 4)
+        self.l_wstart2 = QtWidgets.QLabel("開始角度")
+        wg.addWidget(self.l_wstart2, 1, 0)
+        wg.addWidget(self.e_wstart, 1, 1)
+        self.l_wend2 = QtWidgets.QLabel("終了角度")
+        wg.addWidget(self.l_wend2, 1, 2)
+        wg.addWidget(self.e_wend, 1, 3)
+        wg.addWidget(QtWidgets.QLabel("刻み"), 2, 0)
+        wg.addWidget(self.e_wheel, 2, 1)
+        wg.setColumnStretch(4, 1)
+        cond_v.addWidget(self.wheel_group)
+
+        # ウォーム群
+        self.worm_group = QtWidgets.QWidget()
+        wmg = QtWidgets.QGridLayout(self.worm_group)
+        wmg.setContentsMargins(0, 0, 0, 0)
+        wmg.setHorizontalSpacing(8)
+        wmg.setVerticalSpacing(3)
+        wmg.addWidget(cond_header("ウォーム"), 0, 0, 1, 4)
+        wmg.addWidget(QtWidgets.QLabel("刻み"), 1, 0)
+        wmg.addWidget(self.e_worm, 1, 1)
+        wmg.addWidget(QtWidgets.QLabel("範囲"), 1, 2)
+        wmg.addWidget(self.e_range, 1, 3)
+        wmg.addWidget(QtWidgets.QLabel("開始"), 2, 0)
+        wmg.addWidget(self.e_start, 2, 1)
+        wmg.setColumnStretch(4, 1)
+        cond_v.addWidget(self.worm_group)
+
+        # 再現群（再現性・合体のみ）
+        self.repeat_group = QtWidgets.QWidget()
+        rg = QtWidgets.QGridLayout(self.repeat_group)
+        rg.setContentsMargins(0, 0, 0, 0)
+        rg.setHorizontalSpacing(8)
+        rg.setVerticalSpacing(3)
+        rg.addWidget(cond_header("再現"), 0, 0, 1, 4)
+        rg.addWidget(QtWidgets.QLabel("ブロック数"), 1, 0)
+        rg.addWidget(self.e_blocks, 1, 1)
+        rg.addWidget(QtWidgets.QLabel("回数"), 1, 2)
+        rg.addWidget(self.e_repeats, 1, 3)
+        rg.addWidget(QtWidgets.QLabel("再現開始"), 2, 0)
+        rg.addWidget(self.e_rstart, 2, 1)
+        rg.addWidget(QtWidgets.QLabel("再現終了"), 2, 2)
+        rg.addWidget(self.e_rend, 2, 3)
+        rg.setColumnStretch(4, 1)
+        cond_v.addWidget(self.repeat_group)
+
+        # 主点評価・バックラッシ補正（分割系のみ）
+        self.eval_group = QtWidgets.QWidget()
+        eg = QtWidgets.QGridLayout(self.eval_group)
+        eg.setContentsMargins(0, 0, 0, 0)
+        eg.setHorizontalSpacing(8)
+        eg.setVerticalSpacing(3)
+        eg.addWidget(QtWidgets.QLabel("主点評価"), 0, 0)
+        eg.addWidget(self.e_evald, 0, 1)
+        eg.addWidget(QtWidgets.QLabel("バックラッシ補正"), 1, 0)
+        eg.addWidget(self.e_blcorr, 1, 1)
+        eg.addWidget(self.b_corr, 1, 2)
+        eg.setColumnStretch(3, 1)
+        cond_v.addWidget(self.eval_group)
+
         cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
         comment_row = QtWidgets.QHBoxLayout()
         comment_row.setContentsMargins(0, 0, 0, 0)
@@ -3047,47 +3110,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def is_combined(self):
         return "+再現" in self.current_mode()
 
-    def _reflow_conditions(self, boxes):
-        """測定条件の2列グリッドを、表示中の項目だけで詰め直す（隙間を作らない）。
-
-        バックラッシ補正は「ラベル＋数値＋補正適用ボタン」で横に広いので全幅にする。
-        """
-        while self.cond_grid.count():
-            self.cond_grid.takeAt(0)
-        wide = {self.box_blcorr}
-        r = c = 0
-        for box in boxes:
-            if box in wide:
-                if c != 0:
-                    r += 1
-                    c = 0
-                self.cond_grid.addWidget(box, r, 0, 1, 2)
-                r += 1
-            else:
-                self.cond_grid.addWidget(box, r, c)
-                c += 1
-                if c >= 2:
-                    r += 1
-                    c = 0
-
     def on_mode_changed(self, mode):
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
         show_division = not is_repeat   # 分割系（単独 or 合体）で分割入力を出す
-        show_repeat_params = is_repeat or is_combined
-        vis = {
-            self.box_wstart: is_tilt, self.box_wend: is_tilt,
-            self.box_wheel: show_division, self.box_worm: show_division,
-            self.box_range: show_division, self.box_start: show_division,
-            self.box_evald: show_division, self.box_blcorr: show_division,
-            self.box_blocks: show_repeat_params, self.box_repeats: show_repeat_params,
-            self.box_rstart: show_repeat_params, self.box_rend: show_repeat_params,
-        }
-        for w, on in vis.items():
-            w.setVisible(on)
-        self._reflow_conditions([w for w in self._cond_order if vis.get(w)])
+        show_repeat = is_repeat or is_combined
+        # 群ごとにまとめて表示／非表示（ホイールとウォームが混ざらない）
+        self.wheel_group.setVisible(show_division)
+        self.worm_group.setVisible(show_division)
+        self.eval_group.setVisible(show_division)
+        self.repeat_group.setVisible(show_repeat)
+        # ホイールの開始/終了角度は傾斜分割のときだけ（回転は0〜360固定）
+        for w in (self.l_wstart2, self.e_wstart, self.l_wend2, self.e_wend):
+            w.setVisible(is_tilt)
         self.box_ranges.setVisible(is_tilt and show_division)
         self.corr_bar.setVisible(show_division)  # 補正前/後は分割系のみ
-        self.l_wheel.setText("刻み" if is_tilt else "ホイール刻み")
         self.plot_worm.setVisible(show_division)
         self.plot_wheel.setTitle(
             "再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")

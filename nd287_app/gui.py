@@ -2225,12 +2225,12 @@ class MainWindow(QtWidgets.QMainWindow):
         info_grid.addWidget(self.e_machine, 1, 1)
         info_grid.addWidget(QtWidgets.QLabel("日付"), 2, 0)
         info_grid.addWidget(self.e_date, 2, 1)
-        # 名前と測定温度は同じ行に並べる
+        # 名前の下に測定温度（測定情報を縦に積んで横幅を詰める）
         info_grid.addWidget(QtWidgets.QLabel("名前"), 3, 0)
         info_grid.addWidget(self.e_operator, 3, 1)
-        info_grid.addWidget(QtWidgets.QLabel("温度℃"), 3, 2)
-        info_grid.addWidget(self.e_temp, 3, 3)
-        info_grid.setColumnStretch(4, 1)  # 右に余白を作って左へ寄せる
+        info_grid.addWidget(QtWidgets.QLabel("温度℃"), 4, 0)
+        info_grid.addWidget(self.e_temp, 4, 1)
+        info_grid.setColumnStretch(2, 1)  # 右に余白を作って左へ寄せる
 
         # ===== 測定条件グループ =====
         self.mode_combo = QtWidgets.QComboBox()
@@ -2579,8 +2579,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # ===== 全体レイアウト（旧アプリ配置）=====
         # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
         # 下段: ホイール／ウォームのグラフを横並びで全幅
-        info_group.setMaximumWidth(330)
-        cond_group.setMaximumWidth(540)
+        info_group.setMaximumWidth(210)  # 温度を名前の下にして横幅を詰めた
+        cond_group.setMaximumWidth(560)
         top_band = QtWidgets.QHBoxLayout()
         top_band.setSpacing(8)
         top_band.addWidget(info_group)

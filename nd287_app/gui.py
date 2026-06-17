@@ -2530,9 +2530,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # 精度結果は全行を見せる（スクロールさせない）。中身に合わせて高さを広げる
         self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
-        self.table_series.horizontalHeader().setStretchLastSection(True)
+        _hdr = self.table_series.horizontalHeader()
+        _hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)  # 系列名を広く
+        for _c in range(1, len(SERIES_METRIC_HEADERS)):
+            _hdr.setSectionResizeMode(_c, QtWidgets.QHeaderView.ResizeToContents)
         self.table_series.verticalHeader().setVisible(False)
         self.table_series.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.table_series.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.table_series.setFocusPolicy(QtCore.Qt.NoFocus)
         self.table_misc = QtWidgets.QTableWidget(0, 2)
         self.table_misc.setHorizontalHeaderLabels(["項目", "値"])
         self.table_misc.horizontalHeader().setStretchLastSection(True)
@@ -3962,10 +3967,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, (cells, is_spec, slope_limit) in enumerate(table_rows):
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
+                # 系列名は左寄せ、数値は中央。見やすさのため
+                item.setTextAlignment(
+                    (QtCore.Qt.AlignLeft if j == 0 else QtCore.Qt.AlignHCenter)
+                    | QtCore.Qt.AlignVCenter)
                 if is_spec:
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
+                    item.setBackground(QtGui.QColor("#eaeef5"))  # 規格・見出し行を薄く塗る
                 elif j in (2, 3, 4):
                     limit = {2: SINGLE_SPEC, 3: ADJACENT_SPEC, 4: slope_limit}[j]
                     try:
@@ -4031,36 +4041,27 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def main_grid_rows(self):
-        """主点評価（1/N）: マスタの分割数（1/N）で主点精度を出す。
-
-        主点評価欄（=マスタ分割数1から自動）と、マスタに分割数2があれば両方で評価する。
+        """主点評価（1/N）: いま選んでいる等分（主点評価欄＝マスタ1/Nから自動）で
+        主点精度を出す。等分を変えれば都度この値が変わる。
         """
-        ns = []
-        if self.e_evald.value() > 0:
-            ns.append(self.e_evald.value())
-        if self.master_cond:
-            d2 = int(self.master_cond.get("div2") or 0)
-            if d2 > 0 and d2 not in ns:
-                ns.append(d2)
-        if not ns:
+        divisions = self.e_evald.value()
+        if divisions <= 0:
             return []
         targets = sorted(self.data.get("wheel_cw", ([], []))[0])
         intervals = len(targets) - 1
         if intervals <= 0:
             return []
+        if intervals % divisions != 0 or divisions > intervals:
+            return [(f"主点評価（{divisions}等分）",
+                     f"測定{intervals}等分と割り切れません")]
+        step = intervals // divisions
         rows = []
-        for divisions in ns:
-            if intervals % divisions != 0 or divisions > intervals:
-                rows.append((f"主点評価（{divisions}等分）",
-                             f"測定{intervals}等分と割り切れません"))
-                continue
-            step = intervals // divisions
-            for key, label in (("wheel_cw", "ホイールCW"), ("wheel_ccw", "ホイールCCW")):
-                t, m = self.data.get(key, ([], []))
-                pairs = sorted(zip(t, m))
-                devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
-                rows.append((f"主点精度 {label}（{divisions}等分）",
-                             f'{pp(devs[::step]):.2f}"'))
+        for key, label in (("wheel_cw", "ホイールCW"), ("wheel_ccw", "ホイールCCW")):
+            t, m = self.data.get(key, ([], []))
+            pairs = sorted(zip(t, m))
+            devs = deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
+            rows.append((f"主点精度 {label}（{divisions}等分）",
+                         f'{pp(devs[::step]):.2f}"'))
         return rows
 
     def main_grid_series_rows(self):

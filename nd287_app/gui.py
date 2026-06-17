@@ -2541,6 +2541,23 @@ class MainWindow(QtWidgets.QMainWindow):
         tables.addWidget(self.table_series, 5)
         tables.addWidget(self.table_misc, 4)
 
+        # ===== 全体レイアウト: 左サイド（入力）＋右メイン（グラフ・結果）=====
+        side = QtWidgets.QWidget()
+        side_v = QtWidgets.QVBoxLayout(side)
+        side_v.setContentsMargins(0, 0, 0, 0)
+        side_v.setSpacing(6)
+        side_v.addWidget(info_group)
+        side_v.addWidget(cond_group)
+        side_v.addWidget(ops_group)
+        side_v.addStretch(1)
+        side_scroll = QtWidgets.QScrollArea()
+        side_scroll.setWidget(side)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        side_scroll.setMinimumWidth(450)
+        side_scroll.setMaximumWidth(480)
+
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
         self.b_before = QtWidgets.QPushButton("補正前（生データ）")
@@ -2568,32 +2585,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_zoom.clicked.connect(self.show_graph_zoom)
         corr_row.addWidget(self.b_zoom)
 
-        # ===== 全体レイアウト（旧アプリ配置）=====
-        # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
-        # 下段: ホイール／ウォームのグラフを横並びで全幅
-        info_group.setMaximumWidth(330)
-        cond_group.setMaximumWidth(430)
-        top_band = QtWidgets.QHBoxLayout()
-        top_band.setSpacing(8)
-        top_band.addWidget(info_group)
-        top_band.addWidget(cond_group)
-        top_band.addWidget(tables_widget, 1)
-
-        # 中段: 取込中の操作 ＋ 補正前/後・グラフ拡大
-        mid_row = QtWidgets.QHBoxLayout()
-        mid_row.setSpacing(8)
-        mid_row.addWidget(ops_group)
-        mid_row.addWidget(self.corr_bar, 1)
+        right = QtWidgets.QWidget()
+        right_v = QtWidgets.QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.addWidget(self.guide)
+        right_v.addWidget(self.corr_bar)
+        right_v.addLayout(live_row)  # 受信値・測定点数はグラフのすぐ上
+        right_v.addWidget(plots_widget, 1)
+        right_v.addWidget(tables_widget)
 
         container = QtWidgets.QWidget()
-        rootv = QtWidgets.QVBoxLayout(container)
-        rootv.setContentsMargins(6, 4, 6, 6)
-        rootv.setSpacing(6)
-        rootv.addWidget(self.guide)
-        rootv.addLayout(top_band)
-        rootv.addLayout(mid_row)
-        rootv.addLayout(live_row)            # 受信値・測定点数はグラフのすぐ上
-        rootv.addWidget(plots_widget, 1)     # グラフは下段・全幅
+        root = QtWidgets.QHBoxLayout(container)
+        root.addWidget(side_scroll)
+        root.addWidget(right, 1)
         self.setCentralWidget(container)
         self.apply_ui_fonts()
 

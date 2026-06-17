@@ -3952,6 +3952,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     f'{pp(d):.2f}"', f'{single(d):.2f}"',
                     f'{adjacent(d):.2f}"', f'{slope(d):+.2f}"',
                 ], False, slope_limit))
+        # 主点精度（1/N）は「精度」なので精度表に入れる（バックラッシ表ではない）
+        grid = self.main_grid_series_rows()
+        if grid:
+            table_rows.append((["― 主点精度（1/N）―", "", "", "", ""], True, None))
+            for cells in grid:
+                table_rows.append((cells, False, None))
         self.table_series.setRowCount(len(table_rows))
         for i, (cells, is_spec, slope_limit) in enumerate(table_rows):
             for j, text in enumerate(cells):
@@ -3970,9 +3976,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.table_series.setItem(i, j, item)
         self._fit_table_height(self.table_series)
 
-        # 右表: コンパクトなバックラッシ（規格・OK/NG込み）・真の最大最小ほか
+        # 右表: コンパクトなバックラッシ（規格・OK/NG込み）など。主点精度は左の精度表へ
         rows = self.compact_misc_rows(summary)
-        rows.extend(self.main_grid_rows())
         if self.is_tilt():
             rows.extend(self.tilt_accuracy_rows())
         if self.is_combined() and self.rep_data:
@@ -4057,6 +4062,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 rows.append((f"主点精度 {label}（{divisions}等分）",
                              f'{pp(devs[::step]):.2f}"'))
         return rows
+
+    def main_grid_series_rows(self):
+        """主点精度を精度表の行 [系列, 精度PP, 単一, 隣接, 傾き] 形式で返す。
+
+        主点はPP（主点だけのバラつき）なので 精度PP 列に入れ、他列は空にする。
+        """
+        return [[label, value, "", "", ""] for label, value in self.main_grid_rows()]
 
     def tilt_accuracy_rows(self):
         """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""

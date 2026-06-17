@@ -2181,7 +2181,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ラベル＋入力をひと組の小箱にして、モードに応じて箱ごと出し入れする
         # （横一列に詰め込まず、左サイドの「測定条件」グループに縦並びにする）
-        def field_box(label_text, *widgets, label_width=82):
+        def field_box(label_text, *widgets, label_width=104):
             box = QtWidgets.QWidget()
             h = QtWidgets.QHBoxLayout(box)
             h.setContentsMargins(0, 0, 0, 0)
@@ -2303,7 +2303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "主点（1/N）の等分数。型式を選ぶとマスタの分割数（1/N）から自動で入る。"
             "値を変えると、グラフの主点マーカーと主点精度が即更新される")
         self.e_evald.valueChanged.connect(self.refresh_results)
-        self.box_evald, self.l_evald = field_box("主点評価(1/N)", self.e_evald)
+        self.box_evald, self.l_evald = field_box("主点評価", self.e_evald)
         self.e_blcorr = QtWidgets.QDoubleSpinBox()
         self.e_blcorr.setRange(-999.0, 999.0)
         self.e_blcorr.setDecimals(2)
@@ -2580,7 +2580,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
         # 下段: ホイール／ウォームのグラフを横並びで全幅
         info_group.setMaximumWidth(330)
-        cond_group.setMaximumWidth(430)
+        cond_group.setMaximumWidth(540)
         top_band = QtWidgets.QHBoxLayout()
         top_band.setSpacing(8)
         top_band.addWidget(info_group)
@@ -3048,11 +3048,27 @@ class MainWindow(QtWidgets.QMainWindow):
         return "+再現" in self.current_mode()
 
     def _reflow_conditions(self, boxes):
-        """測定条件の2列グリッドを、表示中の項目だけで詰め直す（隙間を作らない）。"""
+        """測定条件の2列グリッドを、表示中の項目だけで詰め直す（隙間を作らない）。
+
+        バックラッシ補正は「ラベル＋数値＋補正適用ボタン」で横に広いので全幅にする。
+        """
         while self.cond_grid.count():
             self.cond_grid.takeAt(0)
-        for i, box in enumerate(boxes):
-            self.cond_grid.addWidget(box, i // 2, i % 2)
+        wide = {self.box_blcorr}
+        r = c = 0
+        for box in boxes:
+            if box in wide:
+                if c != 0:
+                    r += 1
+                    c = 0
+                self.cond_grid.addWidget(box, r, 0, 1, 2)
+                r += 1
+            else:
+                self.cond_grid.addWidget(box, r, c)
+                c += 1
+                if c >= 2:
+                    r += 1
+                    c = 0
 
     def on_mode_changed(self, mode):
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()

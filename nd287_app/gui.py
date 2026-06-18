@@ -2406,7 +2406,6 @@ class MainWindow(QtWidgets.QMainWindow):
         wg.addWidget(QtWidgets.QLabel("刻み"), 2, 0)
         wg.addWidget(self.e_wheel, 2, 1)
         wg.setColumnStretch(4, 1)
-        cond_v.addWidget(self.wheel_group)
 
         # ウォーム群
         self.worm_group = QtWidgets.QWidget()
@@ -2422,7 +2421,6 @@ class MainWindow(QtWidgets.QMainWindow):
         wmg.addWidget(QtWidgets.QLabel("開始"), 2, 0)
         wmg.addWidget(self.e_start, 2, 1)
         wmg.setColumnStretch(4, 1)
-        cond_v.addWidget(self.worm_group)
 
         # 再現群（再現性・合体のみ）
         self.repeat_group = QtWidgets.QWidget()
@@ -2440,7 +2438,16 @@ class MainWindow(QtWidgets.QMainWindow):
         rg.addWidget(QtWidgets.QLabel("再現終了"), 2, 2)
         rg.addWidget(self.e_rend, 2, 3)
         rg.setColumnStretch(4, 1)
-        cond_v.addWidget(self.repeat_group)
+
+        # ホイール/ウォーム/再現を横並びにして縦の高さを詰める（全モードで全部見える）
+        groups_row = QtWidgets.QHBoxLayout()
+        groups_row.setContentsMargins(0, 0, 0, 0)
+        groups_row.setSpacing(14)
+        groups_row.addWidget(self.wheel_group, 0, QtCore.Qt.AlignTop)
+        groups_row.addWidget(self.worm_group, 0, QtCore.Qt.AlignTop)
+        groups_row.addWidget(self.repeat_group, 0, QtCore.Qt.AlignTop)
+        groups_row.addStretch(1)
+        cond_v.addLayout(groups_row)
 
         # 主点評価・バックラッシ補正（分割系のみ）
         self.eval_group = QtWidgets.QWidget()
@@ -2643,7 +2650,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
         # 下段: ホイール／ウォームのグラフを横並びで全幅
         info_group.setMaximumWidth(210)  # 温度を名前の下にして横幅を詰めた
-        cond_group.setMaximumWidth(560)
+        cond_group.setMaximumWidth(740)  # ホイール/ウォーム/再現を横並びにするため広め
         top_band = QtWidgets.QHBoxLayout()
         top_band.setSpacing(8)
         top_band.addWidget(info_group, 0, QtCore.Qt.AlignTop)
@@ -2656,9 +2663,9 @@ class MainWindow(QtWidgets.QMainWindow):
         mid_row.addWidget(ops_group)
         mid_row.addWidget(self.corr_bar, 1)
 
-        # 上段（情報・条件・結果・操作）を1つにまとめてスクロール可能にし、
-        # グラフとの間をスプリッタで分ける。フォント/DPIで上段が高くなっても
-        # グラフ側に最小高さを保証して潰れないようにする（ここが今回の修正）。
+        # 上段（情報・条件・結果・操作）を1つにまとめる。上段は内容ぶんの高さだけを
+        # 取り（＝測定条件は全部見える）、残りすべてをグラフに回して大きく表示する。
+        # 画面が小さいときだけ上段はスクロールする。
         top_content = QtWidgets.QWidget()
         topv = QtWidgets.QVBoxLayout(top_content)
         topv.setContentsMargins(0, 0, 0, 0)
@@ -2673,19 +2680,22 @@ class MainWindow(QtWidgets.QMainWindow):
         top_scroll.setWidgetResizable(True)
         top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._top_scroll = top_scroll
+        self._top_content = top_content
 
-        top_scroll.setMaximumHeight(470)     # 上段はここまで（超えたらスクロール）
-        plots_widget.setMinimumHeight(260)   # グラフは常に最低260px確保
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.addWidget(top_scroll)
-        splitter.addWidget(plots_widget)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)      # ウィンドウ拡大ぶんはグラフへ
-        splitter.setChildrenCollapsible(False)
-        splitter.setSizes([400, 780])
-        self.setCentralWidget(splitter)
+        plots_widget.setMinimumHeight(280)   # グラフは常に最低280px確保
+        # 上段とグラフをスプリッタで分ける。上段は内容ぶんの高さにするが、
+        # 画面の45%までに抑えて残りはグラフへ（＝グラフは常に下半分以上）。
+        # 上段が45%を超える重いモードでは上段だけスクロールする。境界はドラッグ可。
+        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._splitter.addWidget(top_scroll)
+        self._splitter.addWidget(plots_widget)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setChildrenCollapsible(False)
+        self.setCentralWidget(self._splitter)
         self.apply_ui_fonts()
-        QtCore.QTimer.singleShot(0, self._shrink_result_tables)  # 表示後に空表を縮める
+        QtCore.QTimer.singleShot(0, self._after_layout_ready)  # 表示後に高さを調整
 
         # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
         self.profile_combo = QtWidgets.QComboBox()
@@ -3991,6 +4001,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.finish_repeat()
         else:
             self.finish_indexing()
+        self._fit_top_height()  # 結果表の行数に合わせて上段の高さを更新
 
     def _spec_limit(self, grp, kind):
         """規格の上限[秒]。単一/隣接は統一規格、傾きは合否判定.csv。無ければ None。
@@ -4216,6 +4227,31 @@ class MainWindow(QtWidgets.QMainWindow):
         """結果表を内容（行数）に合わせた高さにする。空ならヘッダ分だけ。"""
         self._fit_table_height(self.table_series)
         self._fit_table_height(self.table_misc)
+        self._fit_top_height()
+
+    def _fit_top_height(self):
+        """上段＝中身ぶんの高さ、ただし画面の45%まで（残りはグラフ）。
+
+        上段が45%に収まれば測定条件・結果は全部見える。超える重いモードでは
+        上段だけスクロールし、グラフは常に下半分以上を確保する。
+        """
+        splitter = getattr(self, "_splitter", None)
+        content = getattr(self, "_top_content", None)
+        if splitter is None or content is None:
+            return
+        total = splitter.height() or self.height() or 900
+        want = content.sizeHint().height() + 4
+        top = min(want, int(total * 0.45))
+        splitter.setSizes([top, max(total - top, 280)])
+
+    def _after_layout_ready(self):
+        """表示後に表と上段の高さを内容に合わせる。"""
+        self._shrink_result_tables()
+        self._fit_top_height()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_top_height()  # 画面サイズが変わっても上段45%/グラフ55%を保つ
 
     def fill_misc_table(self, rows):
         self.table_misc.setRowCount(len(rows))

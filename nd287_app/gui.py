@@ -2646,9 +2646,9 @@ class MainWindow(QtWidgets.QMainWindow):
         cond_group.setMaximumWidth(560)
         top_band = QtWidgets.QHBoxLayout()
         top_band.setSpacing(8)
-        top_band.addWidget(info_group)
-        top_band.addWidget(cond_group)
-        top_band.addWidget(tables_widget, 1)
+        top_band.addWidget(info_group, 0, QtCore.Qt.AlignTop)
+        top_band.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
+        top_band.addWidget(tables_widget, 1, QtCore.Qt.AlignTop)
 
         # 中段: 取込中の操作 ＋ 補正前/後・グラフ拡大
         mid_row = QtWidgets.QHBoxLayout()
@@ -2674,14 +2674,15 @@ class MainWindow(QtWidgets.QMainWindow):
         top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
-        plots_widget.setMinimumHeight(240)   # グラフは常に最低240px確保
+        top_scroll.setMaximumHeight(470)     # 上段はここまで（超えたらスクロール）
+        plots_widget.setMinimumHeight(260)   # グラフは常に最低260px確保
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         splitter.addWidget(top_scroll)
         splitter.addWidget(plots_widget)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)      # ウィンドウ拡大ぶんはグラフへ
         splitter.setChildrenCollapsible(False)
-        splitter.setSizes([360, 620])
+        splitter.setSizes([400, 780])
         self.setCentralWidget(splitter)
         self.apply_ui_fonts()
         QtCore.QTimer.singleShot(0, self._shrink_result_tables)  # 表示後に空表を縮める
@@ -4043,6 +4044,13 @@ class MainWindow(QtWidgets.QMainWindow):
             table_rows.append((["― 主点精度（1/N）―", "", "", "", ""], True, None))
             for cells in grid:
                 table_rows.append((cells, False, None))
+        # 傾斜分割の任意誤差も「精度」なので精度表に入れる（バックラッシ表ではない）
+        if self.is_tilt():
+            tilt = self.tilt_accuracy_rows()
+            if tilt:
+                table_rows.append((["― 任意誤差（精度=H+W）―", "", "", "", ""], True, None))
+                for label, value in tilt:
+                    table_rows.append(([label, value, "", "", ""], False, None))
         self.table_series.setRowCount(len(table_rows))
         for i, (cells, is_spec, slope_limit) in enumerate(table_rows):
             for j, text in enumerate(cells):
@@ -4066,10 +4074,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.table_series.setItem(i, j, item)
         self._fit_table_height(self.table_series)
 
-        # 右表: コンパクトなバックラッシ（規格・OK/NG込み）など。主点精度は左の精度表へ
+        # 右表: コンパクトなバックラッシのみ。主点精度・任意誤差は左の精度表へ
         rows = self.compact_misc_rows(summary)
-        if self.is_tilt():
-            rows.extend(self.tilt_accuracy_rows())
         if self.is_combined() and self.rep_data:
             rows.append(("― 再現性 ―", ""))
             rows.extend(repeat_result_rows(
@@ -4427,6 +4433,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "セーブ",
                 f"{ext}（旧形式）の保存に失敗しました（CSVは保存済み）:\n{e}")
 
+    def _reset_eval_state(self):
+        """ロード時に前回の評価条件（主点評価・評価範囲・補正・コメント）をリセットする。"""
+        self.e_evald.setValue(0)
+        self.c_r1.setChecked(False)
+        self.c_r2.setChecked(False)
+        self.applied_blcorr = 0.0
+        self.e_blcorr.setValue(0.0)
+        self.e_comment.clear()
+
+    def _apply_loaded_main_grid(self):
+        """ロードした型式のマスタ1/N（分割数1）を主点評価に入れる（回転系のみ）。"""
+        if not self.is_tilt() and self.master_cond:
+            self.e_evald.setValue(int(self.master_cond.get("div1") or 0))
+
     def load(self):
         root = resolve_save_root(self.settings)
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -4471,6 +4491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.data = payload
 
         self.seq = None  # 取込中状態は解除
+        self._reset_eval_state()  # 前回の評価条件を残さない
         self.e_model.setText(meta.get("型式", ""))
         self.e_machine.setText(meta.get("機番", ""))
         self.e_operator.setText(meta.get(META_KEYS["operator"], ""))
@@ -4505,6 +4526,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_undo.setEnabled(False)
         self.live.setText("")
         self.refresh_master_refs()
+        self._apply_loaded_main_grid()
         self.update_counts()
         self.redraw()
         self.finish()
@@ -4526,6 +4548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.setCurrentText("回転分割")
         self.seq = None
         self.data = data
+        self._reset_eval_state()  # 前回の評価条件を残さない
         self.e_model.setText(doc["model"])
         self.e_machine.setText(Path(path).stem)
         self.e_operator.setText(doc["operator"])
@@ -4541,11 +4564,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_worm.setValue(abs(worm_targets[1] - worm_targets[0]))
             self.e_range.setValue(worm_targets[-1] - worm_targets[0])
             self.e_start.setValue(worm_targets[0])
-        self.applied_blcorr = 0.0
-        self.e_blcorr.setValue(0.0)
         self.b_undo.setEnabled(False)
         self.live.setText("")
         self.refresh_master_refs()
+        self._apply_loaded_main_grid()  # 主点評価を読み込んだ型式の1/Nに
         self.update_counts()
         self.redraw()
         self.finish()
@@ -4604,6 +4626,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.setCurrentText("傾斜分割")
         self.seq = None
         self.data = data
+        self._reset_eval_state()  # 前回の評価条件を残さない（評価範囲は下でファイルから復元）
         self.e_model.setText(doc["model"])
         self.e_machine.setText(Path(path).stem)
         self.e_operator.setText(doc["operator"])
@@ -4921,5 +4944,5 @@ def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     apply_font(app, settings.get("ui_font_pt", DEFAULT_FONT_PT))
     apply_theme(app, settings.get("ui_theme", DEFAULT_THEME))
     win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)
-    win.show()
+    win.showMaximized()  # 画面いっぱいで開く（グラフに十分な高さを確保）
     sys.exit(app.exec())

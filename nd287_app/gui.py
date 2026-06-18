@@ -2656,17 +2656,35 @@ class MainWindow(QtWidgets.QMainWindow):
         mid_row.addWidget(ops_group)
         mid_row.addWidget(self.corr_bar, 1)
 
-        container = QtWidgets.QWidget()
-        rootv = QtWidgets.QVBoxLayout(container)
-        rootv.setContentsMargins(6, 4, 6, 6)
-        rootv.setSpacing(6)
-        rootv.addWidget(self.guide)
-        rootv.addLayout(top_band)
-        rootv.addLayout(mid_row)
-        rootv.addLayout(live_row)            # 受信値・測定点数はグラフのすぐ上
-        rootv.addWidget(plots_widget, 1)     # グラフは下段・全幅
-        self.setCentralWidget(container)
+        # 上段（情報・条件・結果・操作）を1つにまとめてスクロール可能にし、
+        # グラフとの間をスプリッタで分ける。フォント/DPIで上段が高くなっても
+        # グラフ側に最小高さを保証して潰れないようにする（ここが今回の修正）。
+        top_content = QtWidgets.QWidget()
+        topv = QtWidgets.QVBoxLayout(top_content)
+        topv.setContentsMargins(0, 0, 0, 0)
+        topv.setSpacing(6)
+        topv.addWidget(self.guide)
+        topv.addLayout(top_band)
+        topv.addLayout(mid_row)
+        topv.addLayout(live_row)            # 受信値・測定点数はグラフのすぐ上
+        topv.addStretch(0)
+        top_scroll = QtWidgets.QScrollArea()
+        top_scroll.setWidget(top_content)
+        top_scroll.setWidgetResizable(True)
+        top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        plots_widget.setMinimumHeight(240)   # グラフは常に最低240px確保
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        splitter.addWidget(top_scroll)
+        splitter.addWidget(plots_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)      # ウィンドウ拡大ぶんはグラフへ
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([360, 620])
+        self.setCentralWidget(splitter)
         self.apply_ui_fonts()
+        QtCore.QTimer.singleShot(0, self._shrink_result_tables)  # 表示後に空表を縮める
 
         # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
         self.profile_combo = QtWidgets.QComboBox()
@@ -3150,6 +3168,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rebuild_curves()
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
+        self._shrink_result_tables()
         self.b_take.setEnabled(False)
         self.b_cancel.setEnabled(False)
         self.b_undo.setEnabled(False)
@@ -3314,6 +3333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rebuild_curves()
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
+        self._shrink_result_tables()
         self.applied_blcorr = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_corr.setEnabled(False)
@@ -3711,6 +3731,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rebuild_curves()
         self.table_series.setRowCount(0)
         self.table_misc.setRowCount(0)
+        self._shrink_result_tables()
         self.applied_blcorr = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_corr.setEnabled(False)
@@ -3813,6 +3834,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.seq and self.seq.undo():
             self.table_series.setRowCount(0)
             self.table_misc.setRowCount(0)
+            self._shrink_result_tables()
             self.b_save.setEnabled(False)
             self.b_print.setEnabled(False)
             self.b_corr.setEnabled(False)
@@ -4176,13 +4198,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_misc_table(rows)
 
     def _fit_table_height(self, table):
-        """全行が見える高さに固定する（スクロールを出さない）。"""
+        """全行が見える高さに固定する（空でもヘッダ分だけ＝場所を食わない）。"""
         table.resizeRowsToContents()
-        height = table.horizontalHeader().height() + 2 * table.frameWidth()
+        height = table.horizontalHeader().sizeHint().height() + 2 * table.frameWidth() + 4
         for r in range(table.rowCount()):
-            height += table.rowHeight(r)
-        table.setMinimumHeight(height)
-        table.setMaximumHeight(height)
+            rh = table.rowHeight(r)
+            height += rh if rh > 0 else table.sizeHintForRow(r)
+        table.setFixedHeight(height)
+
+    def _shrink_result_tables(self):
+        """結果表を内容（行数）に合わせた高さにする。空ならヘッダ分だけ。"""
+        self._fit_table_height(self.table_series)
+        self._fit_table_height(self.table_misc)
 
     def fill_misc_table(self, rows):
         self.table_misc.setRowCount(len(rows))

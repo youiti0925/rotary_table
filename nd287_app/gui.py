@@ -4285,6 +4285,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.save_ks_file(machine_no)
             else:
                 self.save_bs_file(machine_no, summary)
+        # 再現性は旧形式 .RS（回転）/ .RSK（傾斜）でも保存する
+        if self.view_kind == "repeat" or (
+                self.view_kind == "combined" and self.has_repeat_data()):
+            self.save_rs_file(machine_no)
         self.sync_to_webapp(machine_no, saved_files=[str(path)])
 
     def sync_to_webapp(self, machine_no, saved_files=None):
@@ -4364,6 +4368,37 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, "セーブ", f".BS（旧形式）の保存に失敗しました（CSVは保存済み）:\n{e}"
             )
+
+    def save_rs_file(self, machine_no):
+        """再現性の旧形式を保存する（回転再現性=.RS / 傾斜再現性=.RSK）。"""
+        bs_root = str(self.settings.get("bs_save_root") or "").strip()
+        if not bs_root or not self.rep_points or not self.rep_data:
+            return
+        ext = ".RSK" if self.is_tilt() else ".RS"
+        try:
+            from .rs_format import data_to_rs_doc, save_rs
+            close = ""
+            if self.masters:
+                entry = find_entry(self.masters.get("judgement", {}),
+                                   self.e_model.text().strip())
+                if entry:
+                    close = entry.get("close", "") or ""
+            doc = data_to_rs_doc(
+                self.rep_points, self.rep_data,
+                model=self.e_model.text().strip(),
+                close=close,
+                date=self.e_date.date().toString("yyyy/MM/dd"),
+                operator=self.e_operator.text().strip(),
+            )
+            rs_path = Path(bs_root) / f"{sanitize_filename(machine_no)}{ext}"
+            rs_path.parent.mkdir(parents=True, exist_ok=True)
+            save_rs(rs_path, doc)
+            self.statusBar().showMessage(
+                f"{self.statusBar().currentMessage()} ／ {ext}も保存: {rs_path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "セーブ",
+                f"{ext}（旧形式）の保存に失敗しました（CSVは保存済み）:\n{e}")
 
     def load(self):
         root = resolve_save_root(self.settings)

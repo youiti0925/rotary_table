@@ -2633,10 +2633,11 @@ class MainWindow(QtWidgets.QMainWindow):
             t = QtWidgets.QTableWidget(0, len(headers))
             t.setHorizontalHeaderLabels(headers)
             hh = t.horizontalHeader()
-            # 系列名は中身ぶん（無駄な空白を作らない）、数値列が残りを分ける
-            hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-            for c in range(1, len(headers)):
-                hh.setSectionResizeMode(c, QtWidgets.QHeaderView.Stretch)
+            # 全列を中身ぶんの幅にする（数値セルが無駄に大きくならない）。
+            # 表全体の幅は right_col 側を中身に合わせて決めるので余白も出ない。
+            for c in range(len(headers)):
+                hh.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
+            hh.setStretchLastSection(False)
             t.verticalHeader().setVisible(False)
             t.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             t.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -2653,6 +2654,8 @@ class MainWindow(QtWidgets.QMainWindow):
         _mh.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         _mh.setVisible(False)  # 行を「項目＋値」の全幅1行で出すので列見出しは隠す
         self.table_misc.verticalHeader().setVisible(False)
+        self.table_misc.setWordWrap(True)  # 規格つきの長い値は折返して切らさない
+        self.table_misc.setTextElideMode(QtCore.Qt.ElideNone)
         self.table_misc.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.table_misc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
@@ -3014,25 +3017,13 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setFont(lf)
         # 測定情報・測定条件・精度結果は少し大きめにして読みやすく（+1）。
         # 大きくしすぎると上段が高くなりグラフを圧迫するので控えめにする。
-        table_font = None
         for w in (self.info_group, self.cond_group, self.table_series,
                   self.table_series2, self.table_misc):
             wf = w.font()
             wf.setPointSize(base + 1)
             w.setFont(wf)
-            table_font = wf
-        # 右カラム（精度結果）の幅を、いまのフォントで実際に必要な幅に合わせる。
-        # こうすると実機のフォントが大きくても数値・バックラッシ値が切れず、かつ
-        # 余分に広げてグラフを圧迫しない。余りはすべて左（グラフ）が使う。
-        if getattr(self, "right_col", None) is not None and table_font is not None:
-            fm = QtGui.QFontMetrics(table_font)
-            # 系列名＋数値2列、または「項目＋（規格つき）値」の広い方に合わせる
-            need = max(
-                fm.horizontalAdvance("主点精度 ホイールCCW") + 2 * fm.horizontalAdvance('-10.5"'),
-                fm.horizontalAdvance("総合バックラッシ MAX") + fm.horizontalAdvance('25.0"　規格 ≦46.2"　OK'),
-            ) + 44
-            self.right_col.setFixedWidth(max(240, min(need, 560)))
-        # フォントを変えると上段の必要高さも変わるので、表示後に上限高さを合わせ直す
+        # フォント変更後に右カラム幅と上段高さを実寸に合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_right_col_width)
         QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
     def current_result_rows(self):
@@ -4123,14 +4114,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setSpan(i, 0, 1, ncol)
                 continue
             if span == "one":
-                # 単一値の行（主点精度・任意誤差）は「ラベル＋値」を1行まるごと
-                # （全列結合）で左寄せ表示。数値列を狭めず、折り返しも起きない。
-                text = f"{cells[0]}　{cells[1]}"
-                item = QtWidgets.QTableWidgetItem(text)
-                item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                item.setToolTip(text)
-                table.setItem(i, 0, item)
-                table.setSpan(i, 0, 1, ncol)
+                # 単一値の行（主点精度・任意誤差）: 系列名＝0列、値＝精度PP列。
+                # 値は傾き列まで結合して空セルの枠を出さない（数値列は広げない）。
+                lab = QtWidgets.QTableWidgetItem(cells[0])
+                lab.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                lab.setToolTip(cells[0])
+                table.setItem(i, 0, lab)
+                val = QtWidgets.QTableWidgetItem(cells[1])
+                val.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+                table.setItem(i, 1, val)
+                table.setSpan(i, 1, 1, ncol - 1)
                 continue
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
@@ -4339,7 +4332,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_table_height(self.table_series)
         self._fit_table_height(self.table_series2)
         self._fit_table_height(self.table_misc)
+        self._fit_right_col_width()
         self._fit_top_scroll()
+
+    def _fit_right_col_width(self):
+        """右カラム幅を精度表（系列＋数値2列）の中身ぶんに合わせる。
+
+        全列 ResizeToContents なので、各列は中身ぶんの幅。その合計に右カラムを
+        合わせると、数値セルが無駄に大きくならず、右端に余白も出ない。バックラッシ
+        表は全幅1行（必要なら折返し）なので幅決定には使わない。グラフが残り幅を使う。
+        """
+        rc = getattr(self, "right_col", None)
+        if rc is None:
+            return
+        need = 0
+        for t in (self.table_series, self.table_series2):
+            if not t.isVisible():
+                continue
+            t.resizeColumnsToContents()  # 全列を中身ぶんに確定させてから合計
+            s = 2 * t.frameWidth() + 10
+            for c in range(t.columnCount()):
+                s += t.columnWidth(c)
+            need = max(need, s)
+        if need > 0:
+            rc.setFixedWidth(max(220, min(need, 480)))
 
     def _fit_top_scroll(self):
         """結果・条件の高さが変わったら上段の必要高さを再計算させる。
@@ -4372,6 +4388,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 cell.setForeground(QtGui.QBrush(QtGui.QColor("#16a34a")))
             self.table_misc.setItem(i, 0, cell)
             self.table_misc.setSpan(i, 0, 1, ncol)
+        self._fit_right_col_width()  # 結果が入った後の実寸で右カラム幅を合わせる
         self._fit_table_height(self.table_misc)
         self._fit_top_scroll()  # 結果が増えた分、上段の高さを合わせ直す
 

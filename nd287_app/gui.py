@@ -2144,6 +2144,29 @@ class AlarmHelpDialog(QtWidgets.QDialog):
         )
 
 
+class _AutoHeightScroll(QtWidgets.QScrollArea):
+    """中身（widget）の必要高さを自分の sizeHint として返すスクロール領域。
+
+    通常の QScrollArea は中身に関係なく小さな sizeHint を返すため、縦レイアウト
+    に置くと「上段はこれだけで足りる」と誤解されて潰され、無駄にスクロールが出る。
+    ここで中身の高さを sizeHint に反映すると、画面に余裕があるときは上段（測定
+    情報・条件・結果）を全部見せ、画面が低くて入りきらないときだけ上段の中で縦
+    スクロールする。横幅は通常どおり広がる。
+    """
+
+    def sizeHint(self):
+        base = super().sizeHint()
+        w = self.widget()
+        if w is not None:
+            h = w.sizeHint().height() + 2 * self.frameWidth()
+            return QtCore.QSize(base.width(), h)
+        return base
+
+    def minimumSizeHint(self):
+        base = super().minimumSizeHint()
+        return QtCore.QSize(base.width(), 0)  # いくらでも縮めてよい（縮めばスクロール）
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -2657,24 +2680,15 @@ class MainWindow(QtWidgets.QMainWindow):
         top_band.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
         top_band.addWidget(tables_widget, 1, QtCore.Qt.AlignTop)
 
-        # 上段（スクロール内）: 測定情報 / 測定条件 / 精度結果。ガイドも上。
+        # 上段: 測定情報 / 測定条件 / 精度結果。ガイドも上。中身ぶんの高さを取る。
         top_content = QtWidgets.QWidget()
         topv = QtWidgets.QVBoxLayout(top_content)
         topv.setContentsMargins(0, 0, 0, 0)
         topv.setSpacing(6)
         topv.addWidget(self.guide)
         topv.addLayout(top_band)
-        topv.addStretch(0)
-        top_scroll = QtWidgets.QScrollArea()
-        top_scroll.setWidget(top_content)
-        top_scroll.setWidgetResizable(True)
-        top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self._top_scroll = top_scroll
-        self._top_content = top_content
 
-        # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を
-        # 常に表示する固定バー（上段がスクロールしても隠れない）。その下がグラフ。
+        # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(2, 0, 2, 0)
         bar.setSpacing(10)
@@ -2684,25 +2698,34 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.live)
         bar.addStretch(1)
         bar.addWidget(self.counts)
-        plots_widget.setMinimumHeight(260)   # グラフは常に最低260px確保
-        bottom = QtWidgets.QWidget()
-        bv = QtWidgets.QVBoxLayout(bottom)
-        bv.setContentsMargins(0, 0, 0, 0)
-        bv.setSpacing(4)
-        bv.addLayout(bar)
-        bv.addWidget(plots_widget, 1)
+        plots_widget.setMinimumHeight(320)  # グラフは常に最低320px（常時はっきり見える）
 
-        # 上段（情報・条件・結果）と 下段（操作バー＋グラフ）をスプリッタで分ける。
-        # 上段は内容ぶん（最大で画面の半分）まで、残りはグラフ。境界はドラッグ可。
-        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self._splitter.addWidget(top_scroll)
-        self._splitter.addWidget(bottom)
-        self._splitter.setStretchFactor(0, 0)
-        self._splitter.setStretchFactor(1, 1)
-        self._splitter.setChildrenCollapsible(False)
-        self.setCentralWidget(self._splitter)
+        # 縦並び：上段（測定情報・条件・結果）→操作バー→グラフ。
+        # 上段だけをスクロール領域に入れる。これで操作バー（補正前/後・グラフ拡大・
+        # データ数）とグラフは画面下に常に固定され、フォントが大きくても切れない。
+        # 上段は半分に収まれば全部見え、収まらないときだけ上段の中でスクロールする。
+        self._top_scroll = _AutoHeightScroll()
+        self._top_scroll.setWidget(top_content)
+        self._top_scroll.setWidgetResizable(True)
+        self._top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # 中身ぶんの高さを欲しがる（=余裕があれば全部見える）が、Maximum なので
+        # それ以上には伸びず、余りはグラフへ。足りなければ縮んでスクロールする。
+        self._top_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                       QtWidgets.QSizePolicy.Maximum)
+
+        page = QtWidgets.QWidget()
+        pv = QtWidgets.QVBoxLayout(page)
+        pv.setContentsMargins(6, 4, 6, 6)
+        pv.setSpacing(4)
+        pv.addWidget(self._top_scroll, 0)   # 上段（足りなければここだけスクロール）
+        pv.addLayout(bar)                   # 操作バー（常に見える）
+        pv.addWidget(plots_widget, 1)       # グラフは残りいっぱい（常に見える・大きい）
+        self.setCentralWidget(page)
         self.apply_ui_fonts()
-        QtCore.QTimer.singleShot(0, self._after_layout_ready)  # 表示後に高さを調整
+        # 表示後に表の高さを内容へ／上段スクロールの上限高さを合わせる
+        QtCore.QTimer.singleShot(0, self._shrink_result_tables)
+        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
         # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
         self.profile_combo = QtWidgets.QComboBox()
@@ -2967,12 +2990,15 @@ class MainWindow(QtWidgets.QMainWindow):
             lf = label.font()
             lf.setPointSize(max(base - 1, 8))
             label.setFont(lf)
-        # 測定情報・測定条件・精度結果は大きめにして読みやすく
+        # 測定情報・測定条件・精度結果は少し大きめにして読みやすく（+1）。
+        # 大きくしすぎると上段が高くなりグラフを圧迫するので控えめにする。
         for w in (self.info_group, self.cond_group,
                   self.table_series, self.table_misc):
             wf = w.font()
-            wf.setPointSize(base + 2)
+            wf.setPointSize(base + 1)
             w.setFont(wf)
+        # フォントを変えると上段の必要高さも変わるので、表示後に上限高さを合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
@@ -3166,6 +3192,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # モードを変えたら取込中の測定はキャンセル
         self.view_kind = "repeat" if is_repeat else ("combined" if is_combined else "indexing")
         self.discard_measurement()
+        # 群の表示/非表示で上段の高さが変わるので、反映後に上限高さを合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
@@ -4008,7 +4036,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.finish_repeat()
         else:
             self.finish_indexing()
-        self._fit_top_height()  # 結果表の行数に合わせて上段の高さを更新
 
     def _spec_limit(self, grp, kind):
         """規格の上限[秒]。単一/隣接は統一規格、傾きは合否判定.csv。無ければ None。
@@ -4234,31 +4261,23 @@ class MainWindow(QtWidgets.QMainWindow):
         """結果表を内容（行数）に合わせた高さにする。空ならヘッダ分だけ。"""
         self._fit_table_height(self.table_series)
         self._fit_table_height(self.table_misc)
-        self._fit_top_height()
+        self._fit_top_scroll()
 
-    def _fit_top_height(self):
-        """上段＝中身ぶんの高さ、ただし画面の45%まで（残りはグラフ）。
+    def _fit_top_scroll(self):
+        """上段スクロール領域に中身の高さの変化を知らせて再レイアウトさせる。
 
-        上段が45%に収まれば測定条件・結果は全部見える。超える重いモードでは
-        上段だけスクロールし、グラフは常に下半分以上を確保する。
+        _AutoHeightScroll は中身の必要高さを sizeHint として返すので、結果が
+        増減したりフォント・モードが変わったら updateGeometry で再計算させる。
+        余裕があれば上段は全部見え、足りないときだけ上段だけがスクロールする。
+        操作バー（補正前/後・グラフ拡大・データ数）とグラフは常に画面下に残る。
         """
-        splitter = getattr(self, "_splitter", None)
-        content = getattr(self, "_top_content", None)
-        if splitter is None or content is None:
+        scroll = getattr(self, "_top_scroll", None)
+        if scroll is None:
             return
-        total = splitter.height() or self.height() or 900
-        want = content.sizeHint().height() + 4
-        top = min(want, int(total * 0.50))
-        splitter.setSizes([top, max(total - top, 300)])
-
-    def _after_layout_ready(self):
-        """表示後に表と上段の高さを内容に合わせる。"""
-        self._shrink_result_tables()
-        self._fit_top_height()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._fit_top_height()  # 画面サイズが変わっても上段45%/グラフ55%を保つ
+        content = scroll.widget()
+        if content is not None:
+            content.adjustSize()
+        scroll.updateGeometry()
 
     def fill_misc_table(self, rows):
         self.table_misc.setRowCount(len(rows))
@@ -4273,6 +4292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_table_height(self.table_misc)
         self.table_series.resizeColumnsToContents()
         self.table_misc.resizeColumnToContents(0)
+        self._fit_top_scroll()  # 結果が増えた分、上段の上限高さを合わせ直す
 
     # ----- セーブ・ロード -----
 

@@ -2633,10 +2633,10 @@ class MainWindow(QtWidgets.QMainWindow):
             t = QtWidgets.QTableWidget(0, len(headers))
             t.setHorizontalHeaderLabels(headers)
             hh = t.horizontalHeader()
-            # 系列名は中身ぶん、数値列は残りを均等に分ける（列がはみ出して隠れない）
-            hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            # 系列名は残り幅いっぱい、数値列は中身ぶん（数値が潰れて読めなくならない）
+            hh.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
             for c in range(1, len(headers)):
-                hh.setSectionResizeMode(c, QtWidgets.QHeaderView.Stretch)
+                hh.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
             t.verticalHeader().setVisible(False)
             t.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             t.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -2738,8 +2738,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ph = QtWidgets.QHBoxLayout(page)
         ph.setContentsMargins(6, 4, 6, 6)
         ph.setSpacing(8)
-        ph.addWidget(left_col, 4)           # 左を広く（条件＋グラフ）
-        ph.addWidget(right_col, 1)          # 右は精度結果の縦長列（狭め）
+        ph.addWidget(left_col, 7)           # 左を広く（条件＋グラフ）
+        ph.addWidget(right_col, 2)          # 右は精度結果の縦長列（狭め）
         self.setCentralWidget(page)
         self.apply_ui_fonts()
         # 表示後に各表の高さを中身（行数）に合わせる
@@ -4106,15 +4106,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setSpan(i, 0, 1, ncol)
                 continue
             if span == "one":
-                lab = QtWidgets.QTableWidgetItem(cells[0])
-                lab.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                lab.setToolTip(cells[0])
-                table.setItem(i, 0, lab)
-                val = QtWidgets.QTableWidgetItem(cells[1])
-                val.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
-                val.setToolTip(cells[1])
-                table.setItem(i, 1, val)
-                table.setSpan(i, 1, 1, ncol - 1)
+                # 単一値の行（主点精度・任意誤差）は「ラベル＋値」を1行まるごと
+                # （全列結合）で左寄せ表示。数値列を狭めず、折り返しも起きない。
+                text = f"{cells[0]}　{cells[1]}"
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                item.setToolTip(text)
+                table.setItem(i, 0, item)
+                table.setSpan(i, 0, 1, ncol)
                 continue
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)

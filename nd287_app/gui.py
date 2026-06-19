@@ -2461,7 +2461,10 @@ class MainWindow(QtWidgets.QMainWindow):
         eg.addWidget(self.e_blcorr, 1, 1)
         eg.addWidget(self.b_corr, 1, 2)
         eg.setColumnStretch(3, 1)
-        cond_v.addWidget(self.eval_group)
+        # 主点評価・バックラッシ補正は、ホイール/ウォーム/再現の群と同じ横帯に
+        # 並べて横スペースを使う（短い行が単独で残って右に大きな空白ができるのを防ぐ）。
+        groups_row.insertWidget(groups_row.count() - 1, self.eval_group,
+                                0, QtCore.Qt.AlignTop)
 
         cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
         comment_row = QtWidgets.QHBoxLayout()
@@ -2647,13 +2650,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # 右カラム（縦長）: 精度結果(系列)を上、バックラッシ(項目/値)を下に積む。
         #   窓の高さをいっぱい使うので、縦に長い精度表もグラフに被らず全部出る。
         info_group.setMaximumWidth(210)  # 温度を名前の下にして横幅を詰めた
-        cond_group.setMaximumWidth(16777215)  # 右へ表を移したぶん横に広げられる
 
-        # 左上: 測定情報＋測定条件（条件は空いた横スペースへ広がる）
+        # 左上: 測定情報＋測定条件。測定条件は中身ぶんの幅だけ取り（無駄に伸ばさない）、
+        # 余った横は右側のあき（クリーンな余白）にする。短い行の横に大きな空白が
+        # できないよう、主点評価/バックラッシ補正は群の横帯にまとめてある。
         top_left = QtWidgets.QHBoxLayout()
         top_left.setSpacing(8)
         top_left.addWidget(info_group, 0, QtCore.Qt.AlignTop)
-        top_left.addWidget(cond_group, 1, QtCore.Qt.AlignTop)
+        top_left.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
+        top_left.addStretch(1)
 
         # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
         bar = QtWidgets.QHBoxLayout()

@@ -23,7 +23,7 @@ THEME_NAMES = [
 ]
 
 DEFAULT_THEME = "ネイビー・コーポレート"
-DEFAULT_FONT_PT = 13
+DEFAULT_FONT_PT = 7
 
 
 def _light(accent, accent_hover, accent_press, bg, panel, border,

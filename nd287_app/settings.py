@@ -38,7 +38,7 @@ DEFAULTS = dict(
     # 画面のテーマ（見た目）。themes.THEME_NAMES の名前。"システム"=OS既定
     ui_theme="ネイビー・コーポレート",
     # 画面の基準文字サイズ[pt]（7〜22）
-    ui_font_pt=13,
+    ui_font_pt=7,
     # 結果表に ホイール/ウォーム単品のバックラッシも出すか（既定は総合のみ）
     show_component_backlash=False,
     # P補正（ピッチエラー補正表）の既定値

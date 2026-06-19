@@ -2362,6 +2362,26 @@ class MainWindow(QtWidgets.QMainWindow):
                            0, QtCore.Qt.AlignTop)
         ranges_h.addWidget(range_block(self.c_r2, self.e_r2s, self.e_r2e),
                            0, QtCore.Qt.AlignTop)
+        # ホイールの開始/終了角度も同じ横帯に並べる（ホイール群から移して縦を詰める）
+        self.l_wstart2 = QtWidgets.QLabel("開始角度")
+        self.l_wend2 = QtWidgets.QLabel("終了角度")
+        wr_head = QtWidgets.QLabel("ホイール範囲")
+        _wf = wr_head.font(); _wf.setBold(True); wr_head.setFont(_wf)
+        wr_head.setStyleSheet("background:#e3e9f2; padding:2px 6px;")
+        wrange = QtWidgets.QWidget()
+        wrv = QtWidgets.QVBoxLayout(wrange)
+        wrv.setContentsMargins(0, 0, 0, 0)
+        wrv.setSpacing(2)
+        wrv.addWidget(wr_head)
+        wrow = QtWidgets.QHBoxLayout()
+        wrow.setContentsMargins(12, 0, 0, 0)
+        wrow.setSpacing(4)
+        wrow.addWidget(self.l_wstart2)
+        wrow.addWidget(self.e_wstart)
+        wrow.addWidget(self.l_wend2)
+        wrow.addWidget(self.e_wend)
+        wrv.addLayout(wrow)
+        ranges_h.addWidget(wrange, 0, QtCore.Qt.AlignTop)
         ranges_h.addStretch(1)
         self.range_widgets = [self.box_ranges]  # 後方互換（未使用）
         for check in (self.c_r1, self.c_r2):
@@ -2404,15 +2424,10 @@ class MainWindow(QtWidgets.QMainWindow):
         wg.setContentsMargins(0, 0, 0, 0)
         wg.setHorizontalSpacing(8)
         wg.setVerticalSpacing(3)
+        # 開始/終了角度は評価範囲の横帯へ移したので、ここは刻みだけ
         wg.addWidget(cond_header("ホイール"), 0, 0, 1, 4)
-        self.l_wstart2 = QtWidgets.QLabel("開始角度")
-        wg.addWidget(self.l_wstart2, 1, 0)
-        wg.addWidget(self.e_wstart, 1, 1)
-        self.l_wend2 = QtWidgets.QLabel("終了角度")
-        wg.addWidget(self.l_wend2, 1, 2)
-        wg.addWidget(self.e_wend, 1, 3)
-        wg.addWidget(QtWidgets.QLabel("刻み"), 2, 0)
-        wg.addWidget(self.e_wheel, 2, 1)
+        wg.addWidget(QtWidgets.QLabel("刻み"), 1, 0)
+        wg.addWidget(self.e_wheel, 1, 1)
         wg.setColumnStretch(4, 1)
 
         # ウォーム群
@@ -2612,11 +2627,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
         _hdr = self.table_series.horizontalHeader()
-        _hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)  # 系列名を広く
+        # 系列名は中身ぶんの幅、数値4列は残りを均等に分ける。こうすると主点精度・
+        # 任意誤差の長い値を結合しても、系列名が潰れたり傾き列がはみ出したりしない。
+        _hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         for _c in range(1, len(SERIES_METRIC_HEADERS)):
-            _hdr.setSectionResizeMode(_c, QtWidgets.QHeaderView.ResizeToContents)
+            _hdr.setSectionResizeMode(_c, QtWidgets.QHeaderView.Stretch)
         self.table_series.verticalHeader().setVisible(False)
         self.table_series.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # 横スクロールは出さない（系列名を縮めてでも全列＝傾きまで必ず見せる）
+        self.table_series.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.table_series.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.table_series.setFocusPolicy(QtCore.Qt.NoFocus)
         self.table_misc = QtWidgets.QTableWidget(0, 2)
@@ -2624,6 +2643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_misc.horizontalHeader().setStretchLastSection(True)
         self.table_misc.verticalHeader().setVisible(False)
         self.table_misc.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.table_misc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
@@ -4108,9 +4128,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 # 単一/隣接/傾きの空セル（枠だけ）を出さない。
                 lab = QtWidgets.QTableWidgetItem(cells[0])
                 lab.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                lab.setToolTip(cells[0])  # 列が狭く省略されても全文が分かるように
                 self.table_series.setItem(i, 0, lab)
                 val = QtWidgets.QTableWidgetItem(cells[1])
                 val.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+                val.setToolTip(cells[1])
                 self.table_series.setItem(i, 1, val)
                 self.table_series.setSpan(i, 1, 1, ncol - 1)
                 continue
@@ -4305,8 +4327,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 cell.setForeground(QtGui.QBrush(QtGui.QColor("#16a34a")))
             self.table_misc.setItem(i, 1, cell)
         self._fit_table_height(self.table_misc)
-        self.table_series.resizeColumnsToContents()
-        self.table_misc.resizeColumnToContents(0)
+        # 系列表は列モード（0=Stretch / 他=ResizeToContents）に任せる。
+        # ここで resizeColumnsToContents を呼ぶと長い系列名で0列が広がり、
+        # 右端の「傾き」列がはみ出して隠れてしまうため呼ばない。
         self._fit_top_scroll()  # 結果が増えた分、上段の上限高さを合わせ直す
 
     # ----- セーブ・ロード -----

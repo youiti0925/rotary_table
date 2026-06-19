@@ -139,6 +139,10 @@ META_KEYS = {
 }
 
 SERIES_METRIC_HEADERS = ["系列", "精度PP", "単一誤差", "隣接誤差", "傾き"]
+# 精度結果は2つの表に分ける（横を狭く・縦を長くしてグラフを広げる）。
+# 上＝精度PPと傾き、下＝単一誤差と隣接誤差。
+PP_SLOPE_HEADERS = ["系列", "精度PP", "傾き"]
+SINGLE_ADJ_HEADERS = ["系列", "単一誤差", "隣接誤差"]
 
 # 統一規格[秒]（全型式共通）。単一誤差≦5、隣接誤差≦10。
 SINGLE_SPEC = 5.0
@@ -2622,22 +2626,26 @@ class MainWindow(QtWidgets.QMainWindow):
         plots.addWidget(self.plot_wheel, 7)
         plots.addWidget(self.plot_worm, 3)
 
-        # ===== 結果表（左: 系列/ブロックごとの指標 / 右: バックラッシ・判定など）=====
-        # 精度結果は全行を見せる（スクロールさせない）。中身に合わせて高さを広げる
-        self.table_series = QtWidgets.QTableWidget(0, len(SERIES_METRIC_HEADERS))
-        self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
-        _hdr = self.table_series.horizontalHeader()
-        # 系列名は中身ぶんの幅、数値4列は残りを均等に分ける。こうすると主点精度・
-        # 任意誤差の長い値を結合しても、系列名が潰れたり傾き列がはみ出したりしない。
-        _hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        for _c in range(1, len(SERIES_METRIC_HEADERS)):
-            _hdr.setSectionResizeMode(_c, QtWidgets.QHeaderView.Stretch)
-        self.table_series.verticalHeader().setVisible(False)
-        self.table_series.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        # 横スクロールは出さない（系列名を縮めてでも全列＝傾きまで必ず見せる）
-        self.table_series.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.table_series.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.table_series.setFocusPolicy(QtCore.Qt.NoFocus)
+        # ===== 結果表 =====
+        # 精度結果は2つに分ける（横を狭く・縦を長く＝グラフを広げる）:
+        #   上＝系列/精度PP/傾き、下＝系列/単一誤差/隣接誤差。さらに下にバックラッシ表。
+        def make_metric_table(headers):
+            t = QtWidgets.QTableWidget(0, len(headers))
+            t.setHorizontalHeaderLabels(headers)
+            hh = t.horizontalHeader()
+            # 系列名は中身ぶん、数値列は残りを均等に分ける（列がはみ出して隠れない）
+            hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            for c in range(1, len(headers)):
+                hh.setSectionResizeMode(c, QtWidgets.QHeaderView.Stretch)
+            t.verticalHeader().setVisible(False)
+            t.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            t.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            t.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+            t.setFocusPolicy(QtCore.Qt.NoFocus)
+            return t
+
+        self.table_series = make_metric_table(PP_SLOPE_HEADERS)     # 上: 精度PP・傾き
+        self.table_series2 = make_metric_table(SINGLE_ADJ_HEADERS)  # 下: 単一・隣接
         self.table_misc = QtWidgets.QTableWidget(0, 2)
         self.table_misc.setHorizontalHeaderLabels(["項目", "値"])
         self.table_misc.horizontalHeader().setStretchLastSection(True)
@@ -2710,27 +2718,28 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addLayout(bar, 0)
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
 
-        # 右カラム（縦長）: 精度結果(系列)を上、バックラッシを下に積み、上へ寄せる。
-        # 表はそれぞれ中身ぶんの高さ（_fit_table_height）で全行見える。余りは下の空き。
-        self.table_series.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
-                                        QtWidgets.QSizePolicy.Fixed)
-        self.table_misc.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
-                                      QtWidgets.QSizePolicy.Fixed)
+        # 右カラム（縦長）: 精度PP・傾き → 単一・隣接 → バックラッシ を上下に積み、
+        # 上へ寄せる。各表は中身ぶんの高さ（_fit_table_height）で全行見える。
+        for _t in (self.table_series, self.table_series2, self.table_misc):
+            _t.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                             QtWidgets.QSizePolicy.Fixed)
         right_col = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(right_col)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(6)
-        rv.addWidget(self.table_series, 0)
-        rv.addWidget(self.table_misc, 0)
-        rv.addStretch(1)                    # 表は上に寄せ、余白は下へ
+        rv.addWidget(self.table_series, 0)   # 精度PP・傾き
+        rv.addWidget(self.table_series2, 0)  # 単一・隣接
+        rv.addWidget(self.table_misc, 0)     # バックラッシ
+        rv.addStretch(1)                     # 表は上に寄せ、余白は下へ
 
-        # 左（条件＋グラフ）と右（精度結果の縦長列）を横に並べる
+        # 左（条件＋グラフ）と右（精度結果の縦長列）を横に並べる。精度を3列ずつに
+        # 分けて右が狭くなったので、グラフ側（左）を広めにする。
         page = QtWidgets.QWidget()
         ph = QtWidgets.QHBoxLayout(page)
         ph.setContentsMargins(6, 4, 6, 6)
         ph.setSpacing(8)
-        ph.addWidget(left_col, 7)           # 左を広く（条件＋グラフ）
-        ph.addWidget(right_col, 3)          # 右は精度結果の縦長列
+        ph.addWidget(left_col, 4)           # 左を広く（条件＋グラフ）
+        ph.addWidget(right_col, 1)          # 右は精度結果の縦長列（狭め）
         self.setCentralWidget(page)
         self.apply_ui_fonts()
         # 表示後に各表の高さを中身（行数）に合わせる
@@ -3194,6 +3203,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.l_wstart2, self.e_wstart, self.l_wend2, self.e_wend):
             w.setVisible(is_tilt)
         self.box_ranges.setVisible(is_tilt and show_division)
+        # 単一誤差・隣接誤差の表は分割系のみ（再現性単独では出さない）
+        self.table_series2.setVisible(show_division)
         self.corr_bar.setVisible(show_division)  # 補正前/後は分割系のみ
         self.plot_worm.setVisible(show_division)
         self.plot_wheel.setTitle(
@@ -3221,7 +3232,10 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.data = None
         self.rebuild_curves()
+        self.table_series.clearSpans()
         self.table_series.setRowCount(0)
+        self.table_series2.clearSpans()
+        self.table_series2.setRowCount(0)
         self.table_misc.setRowCount(0)
         self._shrink_result_tables()
         self.b_take.setEnabled(False)
@@ -3386,7 +3400,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data = seq.data
         self.dev.flush_input()
         self.rebuild_curves()
+        self.table_series.clearSpans()
         self.table_series.setRowCount(0)
+        self.table_series2.clearSpans()
+        self.table_series2.setRowCount(0)
         self.table_misc.setRowCount(0)
         self._shrink_result_tables()
         self.applied_blcorr = 0.0
@@ -3784,7 +3801,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.data = self.seq.data
         self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
         self.rebuild_curves()
+        self.table_series.clearSpans()
         self.table_series.setRowCount(0)
+        self.table_series2.clearSpans()
+        self.table_series2.setRowCount(0)
         self.table_misc.setRowCount(0)
         self._shrink_result_tables()
         self.applied_blcorr = 0.0
@@ -4064,81 +4084,40 @@ class MainWindow(QtWidgets.QMainWindow):
         limit = self._spec_limit(grp, kind)
         return f'≦{limit:g}"' if limit else "—"
 
-    def finish_indexing(self):
-        self.b_corr.setEnabled(True)
-        summary, _ = summarize(self.data, self.applied_blcorr)
-        devs = self.display_series_devs()
+    def _render_metric_table(self, table, headers, rows):
+        """精度の表を描く共通処理。rows = (cells, is_spec, span, col_limits) の並び。
 
-        # 左表: 各グループ先頭に「規格」行を入れ、その下に系列ごとの
-        # 精度PP・単一誤差・隣接誤差・傾き（補正前/後の表示に追従）
-        ncol = len(SERIES_METRIC_HEADERS)
-        self.table_series.clearSpans()
-        self.table_series.setColumnCount(ncol)
-        self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
-        # 各行: (cells, is_spec, slope_limit, span)
-        #   span=None   …通常行（全列に値）
-        #   span="head" …見出し行（ラベルを全列に結合。空セルの枠を出さない）
-        #   span="one"  …単一値の行（系列名＋値だけ。値を右端まで結合）
-        table_rows = []
-        judge = self.master_judge or {}
-        for grp, glabel in (("wheel", "ホイール"), ("worm", "ウォーム")):
-            keys = [k for k in (f"{grp}_cw", f"{grp}_ccw") if k in devs]
-            if not keys:
-                continue
-            slope_limit = judge.get(f"slope_{'h' if grp == 'wheel' else 'w'}")
-            table_rows.append(([
-                f"規格（{glabel}）",
-                self._spec_text(grp, "pp"), self._spec_text(grp, "single"),
-                self._spec_text(grp, "adjacent"), self._spec_text(grp, "slope"),
-            ], True, slope_limit, None))
-            for key in keys:
-                d = np.asarray(devs[key][1], dtype=float)
-                table_rows.append(([
-                    SERIES_LABELS[key],
-                    f'{pp(d):.1f}"', f'{single(d):.1f}"',
-                    f'{adjacent(d):.1f}"', f'{slope(d):+.1f}"',
-                ], False, slope_limit, None))
-        # 主点精度（1/N）は「精度」なので精度表に入れる（バックラッシ表ではない）。
-        # 単一値なので 精度PP 列に入れ、単一/隣接/傾きの空セルは出さない（結合）。
-        grid = self.main_grid_rows()
-        if grid:
-            table_rows.append((["― 主点精度（1/N）―", "", "", "", ""], True, None, "head"))
-            for label, value in grid:
-                table_rows.append(([label, value, "", "", ""], False, None, "one"))
-        # 傾斜分割の任意誤差も「精度」なので精度表へ（同じく単一値なので結合）
-        if self.is_tilt():
-            tilt = self.tilt_accuracy_rows()
-            if tilt:
-                table_rows.append((["― 任意誤差（精度=H+W）―", "", "", "", ""], True, None, "head"))
-                for label, value in tilt:
-                    table_rows.append(([label, value, "", "", ""], False, None, "one"))
-        self.table_series.setRowCount(len(table_rows))
-        for i, (cells, is_spec, slope_limit, span) in enumerate(table_rows):
+        span=None  …通常行（全列に値）。col_limits[j] を超える値は赤字。
+        span="head"…見出し行（ラベルを全列に結合。空セルの枠を出さない）。
+        span="one" …単一値の行（系列名＋値。値を右端まで結合して空セルを出さない）。
+        """
+        ncol = len(headers)
+        table.clearSpans()
+        table.setColumnCount(ncol)
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        for i, (cells, is_spec, span, limits) in enumerate(rows):
             if span == "head":
-                # 見出し行: ラベルを全列に広げる（単一/隣接/傾きの空セルを消す）
                 item = QtWidgets.QTableWidgetItem(cells[0])
                 item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 font = item.font(); font.setBold(True); item.setFont(font)
                 item.setBackground(QtGui.QColor("#eaeef5"))
-                self.table_series.setItem(i, 0, item)
-                self.table_series.setSpan(i, 0, 1, ncol)
+                table.setItem(i, 0, item)
+                table.setSpan(i, 0, 1, ncol)
                 continue
             if span == "one":
-                # 単一値の行（主点精度・任意誤差）: 系列名＋値。値を右端まで結合して
-                # 単一/隣接/傾きの空セル（枠だけ）を出さない。
                 lab = QtWidgets.QTableWidgetItem(cells[0])
                 lab.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                lab.setToolTip(cells[0])  # 列が狭く省略されても全文が分かるように
-                self.table_series.setItem(i, 0, lab)
+                lab.setToolTip(cells[0])
+                table.setItem(i, 0, lab)
                 val = QtWidgets.QTableWidgetItem(cells[1])
                 val.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
                 val.setToolTip(cells[1])
-                self.table_series.setItem(i, 1, val)
-                self.table_series.setSpan(i, 1, 1, ncol - 1)
+                table.setItem(i, 1, val)
+                table.setSpan(i, 1, 1, ncol - 1)
                 continue
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
-                # 系列名は左寄せ、数値は中央。見やすさのため
                 item.setTextAlignment(
                     (QtCore.Qt.AlignLeft if j == 0 else QtCore.Qt.AlignHCenter)
                     | QtCore.Qt.AlignVCenter)
@@ -4146,18 +4125,68 @@ class MainWindow(QtWidgets.QMainWindow):
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
-                    item.setBackground(QtGui.QColor("#eaeef5"))  # 規格・見出し行を薄く塗る
-                elif j in (2, 3, 4):
-                    limit = {2: SINGLE_SPEC, 3: ADJACENT_SPEC, 4: slope_limit}[j]
+                    item.setBackground(QtGui.QColor("#eaeef5"))
+                elif limits[j] is not None:
                     try:
-                        if limit and abs(float(text.replace('"', ''))) > limit:
+                        if abs(float(text.replace('"', ''))) > limits[j]:
                             item.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
                     except ValueError:
                         pass
-                self.table_series.setItem(i, j, item)
-        self._fit_table_height(self.table_series)
+                table.setItem(i, j, item)
+        self._fit_table_height(table)
 
-        # 右表: コンパクトなバックラッシのみ。主点精度・任意誤差は左の精度表へ
+    def finish_indexing(self):
+        self.b_corr.setEnabled(True)
+        summary, _ = summarize(self.data, self.applied_blcorr)
+        devs = self.display_series_devs()
+        judge = self.master_judge or {}
+
+        # 各系列の4指標(精度PP・単一・隣接・傾き)とその規格をまとめて集める
+        groups = []  # (glabel, slope_limit, specs[4], series[(label, pp, single, adj, slope)])
+        for grp, glabel in (("wheel", "ホイール"), ("worm", "ウォーム")):
+            keys = [k for k in (f"{grp}_cw", f"{grp}_ccw") if k in devs]
+            if not keys:
+                continue
+            slope_limit = judge.get(f"slope_{'h' if grp == 'wheel' else 'w'}")
+            specs = (self._spec_text(grp, "pp"), self._spec_text(grp, "single"),
+                     self._spec_text(grp, "adjacent"), self._spec_text(grp, "slope"))
+            series = []
+            for key in keys:
+                d = np.asarray(devs[key][1], dtype=float)
+                series.append((SERIES_LABELS[key], f'{pp(d):.1f}"', f'{single(d):.1f}"',
+                               f'{adjacent(d):.1f}"', f'{slope(d):+.1f}"'))
+            groups.append((glabel, slope_limit, specs, series))
+
+        # 指標の並び: 0=精度PP, 1=単一, 2=隣接, 3=傾き。規格の上限（傾きはグループ毎）
+        fixed_limit = {0: None, 1: SINGLE_SPEC, 2: ADJACENT_SPEC, 3: None}
+
+        def build(idx_a, idx_b, extra=None):
+            rows = []
+            for glabel, slope_limit, specs, series in groups:
+                rows.append(([f"規格（{glabel}）", specs[idx_a], specs[idx_b]],
+                             True, None, [None, None, None]))
+                lim_a = slope_limit if idx_a == 3 else fixed_limit[idx_a]
+                lim_b = slope_limit if idx_b == 3 else fixed_limit[idx_b]
+                for s in series:
+                    rows.append(([s[0], s[1 + idx_a], s[1 + idx_b]],
+                                 False, None, [None, lim_a, lim_b]))
+            for head, items in (extra or []):
+                if not items:
+                    continue
+                rows.append(([head, "", ""], True, "head", [None, None, None]))
+                for label, value in items:
+                    rows.append(([label, value, ""], False, "one", [None, None, None]))
+            return rows
+
+        # 上の表＝精度PP＋傾き。単一値の主点精度・任意誤差もこちら（精度なので）
+        extra = [("― 主点精度（1/N）―", self.main_grid_rows())]
+        if self.is_tilt():
+            extra.append(("― 任意誤差（精度=H+W）―", self.tilt_accuracy_rows()))
+        self._render_metric_table(self.table_series, PP_SLOPE_HEADERS, build(0, 3, extra))
+        # 下の表＝単一誤差＋隣接誤差
+        self._render_metric_table(self.table_series2, SINGLE_ADJ_HEADERS, build(1, 2))
+
+        # バックラッシ表（主点精度・任意誤差は上の精度表へ）
         rows = self.compact_misc_rows(summary)
         if self.is_combined() and self.rep_data:
             rows.append(("― 再現性 ―", ""))
@@ -4233,13 +4262,6 @@ class MainWindow(QtWidgets.QMainWindow):
                          f'{pp(devs[::step]):.1f}"'))
         return rows
 
-    def main_grid_series_rows(self):
-        """主点精度を精度表の行 [系列, 精度PP, 単一, 隣接, 傾き] 形式で返す。
-
-        主点はPP（主点だけのバラつき）なので 精度PP 列に入れ、他列は空にする。
-        """
-        return [[label, value, "", "", ""] for label, value in self.main_grid_rows()]
-
     def tilt_accuracy_rows(self):
         """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""
         specs = [("全範囲", None)]
@@ -4266,6 +4288,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_series.clearSpans()  # 分割表示の結合が残らないように
         self.table_series.setColumnCount(len(REPEAT_HEADERS))
         self.table_series.setHorizontalHeaderLabels(REPEAT_HEADERS)
+        # 列幅: ブロック名は中身ぶん、数値3列は均等（分割→再現で列数が変わるため再設定）
+        _hh = self.table_series.horizontalHeader()
+        _hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        for _c in range(1, len(REPEAT_HEADERS)):
+            _hh.setSectionResizeMode(_c, QtWidgets.QHeaderView.Stretch)
         self.table_series.setRowCount(len(rsum["blocks"]))
         for i, b in enumerate(rsum["blocks"]):
             cells = [
@@ -4299,6 +4326,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _shrink_result_tables(self):
         """結果表を内容（行数）に合わせた高さにする。空ならヘッダ分だけ。"""
         self._fit_table_height(self.table_series)
+        self._fit_table_height(self.table_series2)
         self._fit_table_height(self.table_misc)
         self._fit_top_scroll()
 

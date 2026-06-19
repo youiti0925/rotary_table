@@ -2337,12 +2337,16 @@ class MainWindow(QtWidgets.QMainWindow):
             spin.setMaximumWidth(74)
         # 狭いサイドに収まるよう、チェック行→開始/終了行 で2段に折り返す
         self.box_ranges = QtWidgets.QWidget()
-        ranges_v = QtWidgets.QVBoxLayout(self.box_ranges)
-        ranges_v.setContentsMargins(0, 0, 0, 0)
-        ranges_v.setSpacing(2)
+        ranges_h = QtWidgets.QHBoxLayout(self.box_ranges)
+        ranges_h.setContentsMargins(0, 0, 0, 0)
+        ranges_h.setSpacing(18)
 
-        def range_row(check, e_start, e_end):
-            ranges_v.addWidget(check)
+        def range_block(check, e_start, e_end):
+            box = QtWidgets.QWidget()
+            v = QtWidgets.QVBoxLayout(box)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(2)
+            v.addWidget(check)
             row = QtWidgets.QHBoxLayout()
             row.setContentsMargins(12, 0, 0, 0)
             row.setSpacing(4)
@@ -2350,11 +2354,15 @@ class MainWindow(QtWidgets.QMainWindow):
             row.addWidget(e_start)
             row.addWidget(QtWidgets.QLabel("終了"))
             row.addWidget(e_end)
-            row.addStretch(1)
-            ranges_v.addLayout(row)
+            v.addLayout(row)
+            return box
 
-        range_row(self.c_r1, self.e_r1s, self.e_r1e)
-        range_row(self.c_r2, self.e_r2s, self.e_r2e)
+        # 評価範囲1・2は横に並べる（縦積みで右に空白を作らない）
+        ranges_h.addWidget(range_block(self.c_r1, self.e_r1s, self.e_r1e),
+                           0, QtCore.Qt.AlignTop)
+        ranges_h.addWidget(range_block(self.c_r2, self.e_r2s, self.e_r2e),
+                           0, QtCore.Qt.AlignTop)
+        ranges_h.addStretch(1)
         self.range_widgets = [self.box_ranges]  # 後方互換（未使用）
         for check in (self.c_r1, self.c_r2):
             check.toggled.connect(self.refresh_results)
@@ -4043,9 +4051,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 左表: 各グループ先頭に「規格」行を入れ、その下に系列ごとの
         # 精度PP・単一誤差・隣接誤差・傾き（補正前/後の表示に追従）
-        self.table_series.setColumnCount(len(SERIES_METRIC_HEADERS))
+        ncol = len(SERIES_METRIC_HEADERS)
+        self.table_series.clearSpans()
+        self.table_series.setColumnCount(ncol)
         self.table_series.setHorizontalHeaderLabels(SERIES_METRIC_HEADERS)
-        table_rows = []  # (cells, is_spec, slope_limit)
+        # 各行: (cells, is_spec, slope_limit, span)
+        #   span=None   …通常行（全列に値）
+        #   span="head" …見出し行（ラベルを全列に結合。空セルの枠を出さない）
+        #   span="one"  …単一値の行（系列名＋値だけ。値を右端まで結合）
+        table_rows = []
         judge = self.master_judge or {}
         for grp, glabel in (("wheel", "ホイール"), ("worm", "ウォーム")):
             keys = [k for k in (f"{grp}_cw", f"{grp}_ccw") if k in devs]
@@ -4056,29 +4070,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"規格（{glabel}）",
                 self._spec_text(grp, "pp"), self._spec_text(grp, "single"),
                 self._spec_text(grp, "adjacent"), self._spec_text(grp, "slope"),
-            ], True, slope_limit))
+            ], True, slope_limit, None))
             for key in keys:
                 d = np.asarray(devs[key][1], dtype=float)
                 table_rows.append(([
                     SERIES_LABELS[key],
                     f'{pp(d):.1f}"', f'{single(d):.1f}"',
                     f'{adjacent(d):.1f}"', f'{slope(d):+.1f}"',
-                ], False, slope_limit))
-        # 主点精度（1/N）は「精度」なので精度表に入れる（バックラッシ表ではない）
-        grid = self.main_grid_series_rows()
+                ], False, slope_limit, None))
+        # 主点精度（1/N）は「精度」なので精度表に入れる（バックラッシ表ではない）。
+        # 単一値なので 精度PP 列に入れ、単一/隣接/傾きの空セルは出さない（結合）。
+        grid = self.main_grid_rows()
         if grid:
-            table_rows.append((["― 主点精度（1/N）―", "", "", "", ""], True, None))
-            for cells in grid:
-                table_rows.append((cells, False, None))
-        # 傾斜分割の任意誤差も「精度」なので精度表に入れる（バックラッシ表ではない）
+            table_rows.append((["― 主点精度（1/N）―", "", "", "", ""], True, None, "head"))
+            for label, value in grid:
+                table_rows.append(([label, value, "", "", ""], False, None, "one"))
+        # 傾斜分割の任意誤差も「精度」なので精度表へ（同じく単一値なので結合）
         if self.is_tilt():
             tilt = self.tilt_accuracy_rows()
             if tilt:
-                table_rows.append((["― 任意誤差（精度=H+W）―", "", "", "", ""], True, None))
+                table_rows.append((["― 任意誤差（精度=H+W）―", "", "", "", ""], True, None, "head"))
                 for label, value in tilt:
-                    table_rows.append(([label, value, "", "", ""], False, None))
+                    table_rows.append(([label, value, "", "", ""], False, None, "one"))
         self.table_series.setRowCount(len(table_rows))
-        for i, (cells, is_spec, slope_limit) in enumerate(table_rows):
+        for i, (cells, is_spec, slope_limit, span) in enumerate(table_rows):
+            if span == "head":
+                # 見出し行: ラベルを全列に広げる（単一/隣接/傾きの空セルを消す）
+                item = QtWidgets.QTableWidgetItem(cells[0])
+                item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                font = item.font(); font.setBold(True); item.setFont(font)
+                item.setBackground(QtGui.QColor("#eaeef5"))
+                self.table_series.setItem(i, 0, item)
+                self.table_series.setSpan(i, 0, 1, ncol)
+                continue
+            if span == "one":
+                # 単一値の行（主点精度・任意誤差）: 系列名＋値。値を右端まで結合して
+                # 単一/隣接/傾きの空セル（枠だけ）を出さない。
+                lab = QtWidgets.QTableWidgetItem(cells[0])
+                lab.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                self.table_series.setItem(i, 0, lab)
+                val = QtWidgets.QTableWidgetItem(cells[1])
+                val.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+                self.table_series.setItem(i, 1, val)
+                self.table_series.setSpan(i, 1, 1, ncol - 1)
+                continue
             for j, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 # 系列名は左寄せ、数値は中央。見やすさのため
@@ -4206,6 +4241,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def finish_repeat(self):
         rsum = repeatability_summary(self.rep_points, self.rep_data)
+        self.table_series.clearSpans()  # 分割表示の結合が残らないように
         self.table_series.setColumnCount(len(REPEAT_HEADERS))
         self.table_series.setHorizontalHeaderLabels(REPEAT_HEADERS)
         self.table_series.setRowCount(len(rsum["blocks"]))

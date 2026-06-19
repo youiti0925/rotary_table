@@ -2644,7 +2644,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_zoom = QtWidgets.QPushButton("グラフ拡大")
         self.b_zoom.setToolTip("グラフを画面いっぱいに拡大表示する")
         self.b_zoom.clicked.connect(self.show_graph_zoom)
-        corr_row.addWidget(self.b_zoom)
+        # グラフ拡大は corr_bar に入れず、下のバーへ（全モードで常に表示）
 
         # ===== 全体レイアウト（旧アプリ配置）=====
         # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
@@ -2657,23 +2657,13 @@ class MainWindow(QtWidgets.QMainWindow):
         top_band.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
         top_band.addWidget(tables_widget, 1, QtCore.Qt.AlignTop)
 
-        # 中段: 取込中の操作 ＋ 補正前/後・グラフ拡大
-        mid_row = QtWidgets.QHBoxLayout()
-        mid_row.setSpacing(8)
-        mid_row.addWidget(ops_group)
-        mid_row.addWidget(self.corr_bar, 1)
-
-        # 上段（情報・条件・結果・操作）を1つにまとめる。上段は内容ぶんの高さだけを
-        # 取り（＝測定条件は全部見える）、残りすべてをグラフに回して大きく表示する。
-        # 画面が小さいときだけ上段はスクロールする。
+        # 上段（スクロール内）: 測定情報 / 測定条件 / 精度結果。ガイドも上。
         top_content = QtWidgets.QWidget()
         topv = QtWidgets.QVBoxLayout(top_content)
         topv.setContentsMargins(0, 0, 0, 0)
         topv.setSpacing(6)
         topv.addWidget(self.guide)
         topv.addLayout(top_band)
-        topv.addLayout(mid_row)
-        topv.addLayout(live_row)            # 受信値・測定点数はグラフのすぐ上
         topv.addStretch(0)
         top_scroll = QtWidgets.QScrollArea()
         top_scroll.setWidget(top_content)
@@ -2683,13 +2673,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._top_scroll = top_scroll
         self._top_content = top_content
 
-        plots_widget.setMinimumHeight(280)   # グラフは常に最低280px確保
-        # 上段とグラフをスプリッタで分ける。上段は内容ぶんの高さにするが、
-        # 画面の45%までに抑えて残りはグラフへ（＝グラフは常に下半分以上）。
-        # 上段が45%を超える重いモードでは上段だけスクロールする。境界はドラッグ可。
+        # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を
+        # 常に表示する固定バー（上段がスクロールしても隠れない）。その下がグラフ。
+        bar = QtWidgets.QHBoxLayout()
+        bar.setContentsMargins(2, 0, 2, 0)
+        bar.setSpacing(10)
+        bar.addWidget(ops_group)
+        bar.addWidget(self.corr_bar)        # 補正前/後（分割系のみ表示）
+        bar.addWidget(self.b_zoom)          # グラフ拡大（全モードで常に表示）
+        bar.addWidget(self.live)
+        bar.addStretch(1)
+        bar.addWidget(self.counts)
+        plots_widget.setMinimumHeight(260)   # グラフは常に最低260px確保
+        bottom = QtWidgets.QWidget()
+        bv = QtWidgets.QVBoxLayout(bottom)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(4)
+        bv.addLayout(bar)
+        bv.addWidget(plots_widget, 1)
+
+        # 上段（情報・条件・結果）と 下段（操作バー＋グラフ）をスプリッタで分ける。
+        # 上段は内容ぶん（最大で画面の半分）まで、残りはグラフ。境界はドラッグ可。
         self._splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self._splitter.addWidget(top_scroll)
-        self._splitter.addWidget(plots_widget)
+        self._splitter.addWidget(bottom)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setChildrenCollapsible(False)
@@ -4241,8 +4248,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         total = splitter.height() or self.height() or 900
         want = content.sizeHint().height() + 4
-        top = min(want, int(total * 0.45))
-        splitter.setSizes([top, max(total - top, 280)])
+        top = min(want, int(total * 0.50))
+        splitter.setSizes([top, max(total - top, 300)])
 
     def _after_layout_ready(self):
         """表示後に表と上段の高さを内容に合わせる。"""

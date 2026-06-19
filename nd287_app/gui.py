@@ -2144,29 +2144,6 @@ class AlarmHelpDialog(QtWidgets.QDialog):
         )
 
 
-class _AutoHeightScroll(QtWidgets.QScrollArea):
-    """中身（widget）の必要高さを自分の sizeHint として返すスクロール領域。
-
-    通常の QScrollArea は中身に関係なく小さな sizeHint を返すため、縦レイアウト
-    に置くと「上段はこれだけで足りる」と誤解されて潰され、無駄にスクロールが出る。
-    ここで中身の高さを sizeHint に反映すると、画面に余裕があるときは上段（測定
-    情報・条件・結果）を全部見せ、画面が低くて入りきらないときだけ上段の中で縦
-    スクロールする。横幅は通常どおり広がる。
-    """
-
-    def sizeHint(self):
-        base = super().sizeHint()
-        w = self.widget()
-        if w is not None:
-            h = w.sizeHint().height() + 2 * self.frameWidth()
-            return QtCore.QSize(base.width(), h)
-        return base
-
-    def minimumSizeHint(self):
-        base = super().minimumSizeHint()
-        return QtCore.QSize(base.width(), 0)  # いくらでも縮めてよい（縮めばスクロール）
-
-
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -2682,11 +2659,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 上段: 測定情報 / 測定条件 / 精度結果。ガイドも上。中身ぶんの高さを取る。
         top_content = QtWidgets.QWidget()
+        self._top_content = top_content
         topv = QtWidgets.QVBoxLayout(top_content)
         topv.setContentsMargins(0, 0, 0, 0)
         topv.setSpacing(6)
         topv.addWidget(self.guide)
         topv.addLayout(top_band)
+        # 上段は「中身ぶんの高さ」を必ず確保する（縮められて結果が切れないように）。
+        top_content.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                  QtWidgets.QSizePolicy.Minimum)
 
         # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
         bar = QtWidgets.QHBoxLayout()
@@ -2698,32 +2679,23 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.live)
         bar.addStretch(1)
         bar.addWidget(self.counts)
-        plots_widget.setMinimumHeight(320)  # グラフは常に最低320px（常時はっきり見える）
+        plots_widget.setMinimumHeight(240)  # グラフは最低240px（残りいっぱいに広がる）
 
         # 縦並び：上段（測定情報・条件・結果）→操作バー→グラフ。
-        # 上段だけをスクロール領域に入れる。これで操作バー（補正前/後・グラフ拡大・
-        # データ数）とグラフは画面下に常に固定され、フォントが大きくても切れない。
-        # 上段は半分に収まれば全部見え、収まらないときだけ上段の中でスクロールする。
-        self._top_scroll = _AutoHeightScroll()
-        self._top_scroll.setWidget(top_content)
-        self._top_scroll.setWidgetResizable(True)
-        self._top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        # 中身ぶんの高さを欲しがる（=余裕があれば全部見える）が、Maximum なので
-        # それ以上には伸びず、余りはグラフへ。足りなければ縮んでスクロールする。
-        self._top_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
-                                       QtWidgets.QSizePolicy.Maximum)
-
+        # 上段は中身ぶんの高さをそのまま取る（スクロール領域に入れない）。これで
+        # フォントやウィジェットの実寸が環境で違っても、結果・条件が縮められて
+        # 切れることが無い。グラフは残りの高さをいっぱいに使う（広い窓ほど大きい）。
+        # 操作バー（補正前/後・グラフ拡大・データ数）も常に画面に出たまま。
         page = QtWidgets.QWidget()
         pv = QtWidgets.QVBoxLayout(page)
         pv.setContentsMargins(6, 4, 6, 6)
         pv.setSpacing(4)
-        pv.addWidget(self._top_scroll, 0)   # 上段（足りなければここだけスクロール）
+        pv.addWidget(top_content, 0)        # 上段は中身ぶん（結果・条件が全部見える）
         pv.addLayout(bar)                   # 操作バー（常に見える）
         pv.addWidget(plots_widget, 1)       # グラフは残りいっぱい（常に見える・大きい）
         self.setCentralWidget(page)
         self.apply_ui_fonts()
-        # 表示後に表の高さを内容へ／上段スクロールの上限高さを合わせる
+        # 表示後に表の高さを内容へ合わせ、上段の高さを再計算させる
         QtCore.QTimer.singleShot(0, self._shrink_result_tables)
         QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
@@ -4264,20 +4236,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_top_scroll()
 
     def _fit_top_scroll(self):
-        """上段スクロール領域に中身の高さの変化を知らせて再レイアウトさせる。
+        """結果・条件の高さが変わったら上段の必要高さを再計算させる。
 
-        _AutoHeightScroll は中身の必要高さを sizeHint として返すので、結果が
-        増減したりフォント・モードが変わったら updateGeometry で再計算させる。
-        余裕があれば上段は全部見え、足りないときだけ上段だけがスクロールする。
-        操作バー（補正前/後・グラフ拡大・データ数）とグラフは常に画面下に残る。
+        上段（測定情報・条件・結果）はスクロールに入れず中身ぶんの高さを取るので、
+        結果が増減したりフォント・モードが変わったら updateGeometry で上段の高さを
+        計算し直させ、余った高さがグラフに回るようにする。これで環境差（フォントや
+        ウィジェットの実寸）があっても結果が縮められて切れることが無い。
         """
-        scroll = getattr(self, "_top_scroll", None)
-        if scroll is None:
+        content = getattr(self, "_top_content", None)
+        if content is None:
             return
-        content = scroll.widget()
-        if content is not None:
-            content.adjustSize()
-        scroll.updateGeometry()
+        content.adjustSize()
+        content.updateGeometry()
 
     def fill_misc_table(self, rows):
         self.table_misc.setRowCount(len(rows))

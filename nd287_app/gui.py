@@ -2613,11 +2613,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_misc.horizontalHeader().setStretchLastSection(True)
         self.table_misc.verticalHeader().setVisible(False)
         self.table_misc.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        tables_widget = QtWidgets.QWidget()
-        tables = QtWidgets.QHBoxLayout(tables_widget)
-        tables.setContentsMargins(0, 0, 0, 0)
-        tables.addWidget(self.table_series, 5)
-        tables.addWidget(self.table_misc, 4)
 
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
@@ -2646,28 +2641,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_zoom.clicked.connect(self.show_graph_zoom)
         # グラフ拡大は corr_bar に入れず、下のバーへ（全モードで常に表示）
 
-        # ===== 全体レイアウト（旧アプリ配置）=====
-        # 上段バンド: 左=測定情報 / 中央=測定条件 / 右=精度結果
-        # 下段: ホイール／ウォームのグラフを横並びで全幅
+        # ===== 全体レイアウト（左＝条件＋グラフ / 右＝精度結果の縦長列）=====
+        # 左カラム（広い）: 上に[測定情報＋測定条件（横に広げる）]、その下に操作バー、
+        #   さらに下にグラフ（左下で縦に大きく取る。右に表が無いぶん縦長・やや横狭）。
+        # 右カラム（縦長）: 精度結果(系列)を上、バックラッシ(項目/値)を下に積む。
+        #   窓の高さをいっぱい使うので、縦に長い精度表もグラフに被らず全部出る。
         info_group.setMaximumWidth(210)  # 温度を名前の下にして横幅を詰めた
-        cond_group.setMaximumWidth(740)  # ホイール/ウォーム/再現を横並びにするため広め
-        top_band = QtWidgets.QHBoxLayout()
-        top_band.setSpacing(8)
-        top_band.addWidget(info_group, 0, QtCore.Qt.AlignTop)
-        top_band.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
-        top_band.addWidget(tables_widget, 1, QtCore.Qt.AlignTop)
+        cond_group.setMaximumWidth(16777215)  # 右へ表を移したぶん横に広げられる
 
-        # 上段: 測定情報 / 測定条件 / 精度結果。ガイドも上。中身ぶんの高さを取る。
-        top_content = QtWidgets.QWidget()
-        self._top_content = top_content
-        topv = QtWidgets.QVBoxLayout(top_content)
-        topv.setContentsMargins(0, 0, 0, 0)
-        topv.setSpacing(6)
-        topv.addWidget(self.guide)
-        topv.addLayout(top_band)
-        # 上段は「中身ぶんの高さ」を必ず確保する（縮められて結果が切れないように）。
-        top_content.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
-                                  QtWidgets.QSizePolicy.Minimum)
+        # 左上: 測定情報＋測定条件（条件は空いた横スペースへ広がる）
+        top_left = QtWidgets.QHBoxLayout()
+        top_left.setSpacing(8)
+        top_left.addWidget(info_group, 0, QtCore.Qt.AlignTop)
+        top_left.addWidget(cond_group, 1, QtCore.Qt.AlignTop)
 
         # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
         bar = QtWidgets.QHBoxLayout()
@@ -2679,25 +2665,43 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.live)
         bar.addStretch(1)
         bar.addWidget(self.counts)
-        plots_widget.setMinimumHeight(240)  # グラフは最低240px（残りいっぱいに広がる）
+        plots_widget.setMinimumHeight(240)
 
-        # 縦並び：上段（測定情報・条件・結果）→操作バー→グラフ。
-        # 上段は中身ぶんの高さをそのまま取る（スクロール領域に入れない）。これで
-        # フォントやウィジェットの実寸が環境で違っても、結果・条件が縮められて
-        # 切れることが無い。グラフは残りの高さをいっぱいに使う（広い窓ほど大きい）。
-        # 操作バー（補正前/後・グラフ拡大・データ数）も常に画面に出たまま。
+        # 左カラム: ガイド → 測定情報/条件 → 操作バー → グラフ（残りを縦いっぱい）
+        left_col = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left_col)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(4)
+        lv.addWidget(self.guide, 0)
+        lv.addLayout(top_left, 0)
+        lv.addLayout(bar, 0)
+        lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
+
+        # 右カラム（縦長）: 精度結果(系列)を上、バックラッシを下に積み、上へ寄せる。
+        # 表はそれぞれ中身ぶんの高さ（_fit_table_height）で全行見える。余りは下の空き。
+        self.table_series.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                        QtWidgets.QSizePolicy.Fixed)
+        self.table_misc.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                      QtWidgets.QSizePolicy.Fixed)
+        right_col = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right_col)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(6)
+        rv.addWidget(self.table_series, 0)
+        rv.addWidget(self.table_misc, 0)
+        rv.addStretch(1)                    # 表は上に寄せ、余白は下へ
+
+        # 左（条件＋グラフ）と右（精度結果の縦長列）を横に並べる
         page = QtWidgets.QWidget()
-        pv = QtWidgets.QVBoxLayout(page)
-        pv.setContentsMargins(6, 4, 6, 6)
-        pv.setSpacing(4)
-        pv.addWidget(top_content, 0)        # 上段は中身ぶん（結果・条件が全部見える）
-        pv.addLayout(bar)                   # 操作バー（常に見える）
-        pv.addWidget(plots_widget, 1)       # グラフは残りいっぱい（常に見える・大きい）
+        ph = QtWidgets.QHBoxLayout(page)
+        ph.setContentsMargins(6, 4, 6, 6)
+        ph.setSpacing(8)
+        ph.addWidget(left_col, 7)           # 左を広く（条件＋グラフ）
+        ph.addWidget(right_col, 3)          # 右は精度結果の縦長列
         self.setCentralWidget(page)
         self.apply_ui_fonts()
-        # 表示後に表の高さを内容へ合わせ、上段の高さを再計算させる
+        # 表示後に各表の高さを中身（行数）に合わせる
         QtCore.QTimer.singleShot(0, self._shrink_result_tables)
-        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
         # 接続先プロファイル切替（X32直結 / X31変換器でポート・ボーレートを別管理）
         self.profile_combo = QtWidgets.QComboBox()

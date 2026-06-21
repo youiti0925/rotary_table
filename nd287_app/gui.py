@@ -2241,16 +2241,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.addItems(MODES)
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
 
+        # ホイールの開始/終了角度（傾斜分割用）。ラベルと配置は box_ranges 側で行う
         self.e_wstart = QtWidgets.QDoubleSpinBox()
         self.e_wstart.setRange(-360.0, 360.0)
         self.e_wstart.setValue(-30.0)
         self.e_wstart.setSuffix(" °")
-        self.box_wstart, self.l_wstart = field_box("開始角度", self.e_wstart)
         self.e_wend = QtWidgets.QDoubleSpinBox()
         self.e_wend.setRange(-360.0, 720.0)
         self.e_wend.setValue(110.0)
         self.e_wend.setSuffix(" °")
-        self.box_wend, self.l_wend = field_box("終了角度", self.e_wend)
 
         self.e_wheel = QtWidgets.QDoubleSpinBox()
         self.e_wheel.setRange(0.001, 180.0)
@@ -2387,7 +2386,6 @@ class MainWindow(QtWidgets.QMainWindow):
         wrv.addLayout(wrow)
         ranges_h.addWidget(wrange, 0, QtCore.Qt.AlignTop)
         ranges_h.addStretch(1)
-        self.range_widgets = [self.box_ranges]  # 後方互換（未使用）
         for check in (self.c_r1, self.c_r2):
             check.toggled.connect(self.refresh_results)
         for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
@@ -3022,9 +3020,8 @@ class MainWindow(QtWidgets.QMainWindow):
             wf = w.font()
             wf.setPointSize(base + 1)
             w.setFont(wf)
-        # フォント変更後に右カラム幅と上段高さを実寸に合わせ直す
+        # フォント変更後に右カラム幅を実寸へ合わせ直す
         QtCore.QTimer.singleShot(0, self._fit_right_col_width)
-        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
 
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
@@ -3220,8 +3217,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # モードを変えたら取込中の測定はキャンセル
         self.view_kind = "repeat" if is_repeat else ("combined" if is_combined else "indexing")
         self.discard_measurement()
-        # 群の表示/非表示で上段の高さが変わるので、反映後に上限高さを合わせ直す
-        QtCore.QTimer.singleShot(0, self._fit_top_scroll)
+        # 群の表示/非表示で右カラムの必要幅が変わるので合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_right_col_width)
 
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
@@ -3915,8 +3912,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def undo(self):
         if self.seq and self.seq.undo():
-            self.table_series.setRowCount(0)
-            self.table_misc.setRowCount(0)
+            for t in (self.table_series, self.table_series2, self.table_misc):
+                t.clearSpans()
+                t.setRowCount(0)
             self._shrink_result_tables()
             self.b_save.setEnabled(False)
             self.b_print.setEnabled(False)
@@ -4056,11 +4054,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ("worm_ccw", "ウォームCCW", self.master_judge.get("slope_w")),
         ):
             if limit and key in summary:
-                slope = summary[key]["slope"]
-                ok = abs(slope) <= limit
+                slope_val = summary[key]["slope"]  # 関数 slope() を隠さないよう別名
+                ok = abs(slope_val) <= limit
                 rows.append(
                     (f"{label} 傾き 判定",
-                     f'{"OK" if ok else "NG"}（|{slope:+.2f}"| ≦ {limit:g}"）')
+                     f'{"OK" if ok else "NG"}（|{slope_val:+.2f}"| ≦ {limit:g}"）')
                 )
         return rows
 
@@ -4292,11 +4290,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_series.clearSpans()  # 分割表示の結合が残らないように
         self.table_series.setColumnCount(len(REPEAT_HEADERS))
         self.table_series.setHorizontalHeaderLabels(REPEAT_HEADERS)
-        # 列幅: ブロック名は中身ぶん、数値3列は均等（分割→再現で列数が変わるため再設定）
+        # 全列を中身ぶんの幅に（分割→再現で列数が変わるので毎回設定）。右カラム幅は
+        # _fit_right_col_width が中身合計に合わせる
         _hh = self.table_series.horizontalHeader()
-        _hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        for _c in range(1, len(REPEAT_HEADERS)):
-            _hh.setSectionResizeMode(_c, QtWidgets.QHeaderView.Stretch)
+        for _c in range(len(REPEAT_HEADERS)):
+            _hh.setSectionResizeMode(_c, QtWidgets.QHeaderView.ResizeToContents)
         self.table_series.setRowCount(len(rsum["blocks"]))
         for i, b in enumerate(rsum["blocks"]):
             cells = [
@@ -4333,7 +4331,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_table_height(self.table_series2)
         self._fit_table_height(self.table_misc)
         self._fit_right_col_width()
-        self._fit_top_scroll()
 
     def _fit_right_col_width(self):
         """右カラム幅を精度表（系列＋数値2列）の中身ぶんに合わせる。
@@ -4357,20 +4354,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if need > 0:
             rc.setFixedWidth(max(220, min(need, 480)))
 
-    def _fit_top_scroll(self):
-        """結果・条件の高さが変わったら上段の必要高さを再計算させる。
-
-        上段（測定情報・条件・結果）はスクロールに入れず中身ぶんの高さを取るので、
-        結果が増減したりフォント・モードが変わったら updateGeometry で上段の高さを
-        計算し直させ、余った高さがグラフに回るようにする。これで環境差（フォントや
-        ウィジェットの実寸）があっても結果が縮められて切れることが無い。
-        """
-        content = getattr(self, "_top_content", None)
-        if content is None:
-            return
-        content.adjustSize()
-        content.updateGeometry()
-
     def fill_misc_table(self, rows):
         # バックラッシ表は「項目＋値」を1行まるごと（全列結合）で表示する。
         # こうすると項目名と値が列幅を取り合わず、狭い右カラムでも切れない。
@@ -4378,6 +4361,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_misc.setRowCount(len(rows))
         ncol = self.table_misc.columnCount()
         for i, (item, value) in enumerate(rows):
+            value = value or ""
             text = f"{item}　{value}" if value else item
             cell = QtWidgets.QTableWidgetItem(text)
             cell.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -4390,7 +4374,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table_misc.setSpan(i, 0, 1, ncol)
         self._fit_right_col_width()  # 結果が入った後の実寸で右カラム幅を合わせる
         self._fit_table_height(self.table_misc)
-        self._fit_top_scroll()  # 結果が増えた分、上段の高さを合わせ直す
 
     # ----- セーブ・ロード -----
 

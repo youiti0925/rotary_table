@@ -95,6 +95,11 @@ DEFAULTS = dict(
     nc_ftp_password="",
     nc_ftp_dir="",       # アップロード先ディレクトリ（空=ルート）
     nc_ftp_passive=True,
+    # FANUCパラメータの製品ごとの変更（差分）。紙のパラメータ表をCSV化したもの
+    # （列: 型式,番号,軸,変更値,メモ）。型式を選ぶと該当製品の変更だけを出力する。
+    param_change_csv=r"マスタ/パラメータ変更表.csv",
+    param_master_backup="",   # 任意: マスタ/バックアップ（旧値表示用、機種のバックアップ）
+    param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
     fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提

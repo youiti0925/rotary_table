@@ -103,6 +103,7 @@ from .settings import (
     save_settings,
 )
 from . import fanuc_alarms
+from . import nc_param
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -654,14 +655,14 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_sub.setRange(1, 9999)
         self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 9001)))
 
-        # 機械へ送信（カード不要・LAN）の設定ウィジェット
+        # 機械へ送信の設定ウィジェット（LAN＝共有フォルダ/FTP、またはメモリカード）
         self.cmb_send = QtWidgets.QComboBox()
-        self.cmb_send.addItem("共有フォルダ（カード不要）", "folder")
+        self.cmb_send.addItem("フォルダ／メモリカード（LAN共有・カードどちらも）", "folder")
         self.cmb_send.addItem("FTP（機械のIPへ）", "ftp")
         si = self.cmb_send.findData(str(settings.get("nc_send_method", "folder")))
         self.cmb_send.setCurrentIndex(si if si >= 0 else 0)
         self.e_send_folder = QtWidgets.QLineEdit(str(settings.get("nc_send_folder", "")))
-        self.e_send_folder.setPlaceholderText(r"例 \\192.168.0.10\nc または Z:\NC")
+        self.e_send_folder.setPlaceholderText(r"LAN共有 \\192.168.0.10\nc / カード E:\ など")
         self.e_ftp_host = QtWidgets.QLineEdit(str(settings.get("nc_ftp_host", "")))
         self.e_ftp_host.setPlaceholderText("機械のIP 例 192.168.0.10")
         self.e_ftp_port = QtWidgets.QSpinBox()
@@ -950,22 +951,22 @@ class ProgramDialog(QtWidgets.QDialog):
             "（安全のため起動は機械側で）。")
 
     SEND_HELP = (
-        "測定プログラムを機械へ直接送る（カード不要・LAN）\n"
+        "測定プログラムを機械へ渡す（LAN または メモリカード）\n"
         "\n"
-        "【前提】\n"
-        "・このPCと機械（CNC）が同じLANに繋がっていること（LANケーブル接続済み）。\n"
-        "・機械側にネットワーク機能（Data Server／Ethernet）があること。\n"
+        "渡し方は2通り。どちらも「機械に取り込んで→メモリから運転」する形で、\n"
+        "Data Serverは不要です（内蔵イーサネット または カードでOK）。\n"
         "\n"
         "────────────────────────\n"
-        "方式1: 共有フォルダ（いちばん簡単・おすすめ）\n"
+        "方式1: フォルダ／メモリカード（おすすめ・簡単）\n"
         "────────────────────────\n"
-        "1. 機械から見えるフォルダを用意する。\n"
-        "   ・機械のData Serverの共有（例 \\\\<機械のIP>\\nc）か、\n"
-        "   ・このPCの共有フォルダを機械から参照する、のどちらか。\n"
-        "2. 「方式＝共有フォルダ」を選び、そのフォルダのパスを入れる\n"
-        "   （「参照...」で選択可）。例 \\\\192.168.0.10\\nc または Z:\\NC\n"
-        "3. 「機械へ送信」を押す → <機番>.NC がそのフォルダに置かれる。\n"
-        "4. 機械側でそのファイル（プログラム）を選んで運転する。\n"
+        "● LAN（内蔵イーサネット）で渡す場合:\n"
+        "  ・機械から見える共有フォルダを用意（このPCの共有 or 機械側の共有）。\n"
+        "  ・「方式＝フォルダ／メモリカード」を選び、そのパスを入れる。\n"
+        "    例 \\\\192.168.0.10\\nc または \\\\<このPCのIP>\\NC\n"
+        "● メモリカード（CF/USB）で渡す場合:\n"
+        "  ・カードをこのPCに挿し、そのドライブ/フォルダのパスを入れる。例 E:\\\n"
+        "  ・「機械へ送信」で <機番>.NC をカードに書き出す → カードを機械へ挿す。\n"
+        "→ いずれも機械側でそのファイルを選び、取り込んで運転する。\n"
         "\n"
         "────────────────────────\n"
         "方式2: FTP（機械がFTPサーバのとき）\n"
@@ -977,15 +978,14 @@ class ProgramDialog(QtWidgets.QDialog):
         "4. 機械側でそのファイルを選んで運転する。\n"
         "\n"
         "【注意】\n"
-        "・このアプリは「送るだけ」です。安全のため、運転開始（サイクル\n"
+        "・このアプリは「渡すだけ」です。安全のため、運転開始（サイクル\n"
         "  スタート）は機械側で人が行ってください（自動起動はしません）。\n"
         "・送信先や接続情報は次回も使えるよう保存されます。\n"
         "\n"
         "【うまくいかないとき】\n"
-        "・「フォルダが見つかりません」→ そのパスをこのPCのエクスプローラで\n"
-        "  開けるか確認（共有が見えているか）。\n"
+        "・「フォルダが見つかりません」→ そのパス（共有/カードのドライブ）を\n"
+        "  このPCのエクスプローラで開けるか確認。\n"
         "・FTPで失敗 → IP・ユーザ／パス・送信先フォルダ・パッシブ設定を確認。\n"
-        "  機械のFTP機能（Data Server）が有効かも確認。\n"
         "・ファイル名は <機番>.NC（機番が無ければ Oxxxx.NC）。"
     )
 
@@ -1005,6 +1005,244 @@ class ProgramDialog(QtWidgets.QDialog):
         row.addWidget(b)
         layout.addLayout(row)
         dlg.exec()
+
+
+class ParamDialog(QtWidgets.QDialog):
+    """製品ごとのパラメータ変更（差分）の確認表・差分ファイルを作る。
+
+    紙の「パラメータ表」をCSV化（型式,番号,軸,変更値,メモ）しておけば、型式を
+    選ぶと該当製品の変更だけを確認表と差分ファイルにして、カード/LAN共有へ出力する。
+    機械への入力（PWE=1）は安全のため人が機械側で行う。
+    """
+
+    WARN = ("⚠ 機械側で PWE=1（パラメータ書込許可）にして、該当番号だけ入力してください。"
+            "一部は電源再投入が必要です。差分ファイルの厳密な書式は機種で異なるため、"
+            "実機バックアップ1個で必ず確認してから投入してください（未確認のまま投入しない）。")
+
+    def __init__(self, parent, settings, *, model="", machine=""):
+        super().__init__(parent)
+        self.settings = settings
+        self.machine = machine
+        self.setWindowTitle("パラメータ変更（差分）の出力")
+        self.resize(720, 520)
+        v = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+        self.e_model = QtWidgets.QLineEdit(model)
+        self.e_model.setPlaceholderText("型式（変更表CSVの『型式』と照合）")
+        form.addRow("型式", self.e_model)
+
+        self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
+        self.e_csv.setPlaceholderText("紙のパラメータ表をCSV化したファイル")
+        form.addRow("変更表CSV", self._with_browse(self.e_csv, self._browse_csv))
+
+        self.e_master = QtWidgets.QLineEdit(str(settings.get("param_master_backup", "")))
+        self.e_master.setPlaceholderText("任意: マスタ/バックアップ（旧値表示用）")
+        form.addRow("マスタ(任意)", self._with_browse(self.e_master, self._browse_master))
+
+        self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
+                                             or settings.get("nc_send_folder", "")))
+        self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有 \\192.168.0.10\nc）")
+        form.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
+        v.addLayout(form)
+
+        hint = QtWidgets.QLabel(
+            "変更表CSVの列: 型式, 番号, 軸, 変更値, メモ（紙のパラメータ表を一度だけCSV化）。"
+            "型式を選ぶと該当製品の変更だけを出力します。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#374151;")
+        v.addWidget(hint)
+
+        warn = QtWidgets.QLabel(self.WARN)
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color:#b45309; background:#fffbeb; padding:6px;"
+                           "border:1px solid #f59e0b;")
+        v.addWidget(warn)
+
+        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["番号", "軸", "旧値", "新値", "メモ"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        v.addWidget(self.table, 1)
+
+        self.lbl = QtWidgets.QLabel("")
+        v.addWidget(self.lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        b_reload = QtWidgets.QPushButton("読み込み/更新")
+        b_reload.clicked.connect(self.reload)
+        b_check = QtWidgets.QPushButton("確認表を保存")
+        b_check.clicked.connect(self.save_checklist)
+        b_file = QtWidgets.QPushButton("差分ファイルを保存")
+        b_file.clicked.connect(self.save_param_file)
+        b_both = QtWidgets.QPushButton("出力先へ両方出す")
+        b_both.setObjectName("primary")
+        b_both.clicked.connect(self.export_both)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        for b in (b_reload, b_check, b_file, b_both):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(b_close)
+        v.addLayout(row)
+
+        self._changes = []
+        self.reload()
+
+    def _with_browse(self, edit, slot):
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(edit, 1)
+        b = QtWidgets.QPushButton("参照...")
+        b.clicked.connect(slot)
+        h.addWidget(b)
+        return w
+
+    def _browse_csv(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "変更表CSV", self.e_csv.text(), "CSV (*.csv);;すべて (*.*)")
+        if p:
+            self.e_csv.setText(p)
+            self.reload()
+
+    def _browse_master(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "マスタ/バックアップ", self.e_master.text(), "すべて (*.*)")
+        if p:
+            self.e_master.setText(p)
+            self.reload()
+
+    def _browse_out(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(self, "出力先フォルダ/カード",
+                                                       self.e_out.text())
+        if p:
+            self.e_out.setText(p)
+
+    def _master_table(self):
+        path = self.e_master.text().strip()
+        if not path:
+            return {}
+        try:
+            with open(path, "r", encoding="cp932", errors="replace") as f:
+                return nc_param.parse_param_backup(f.read())
+        except Exception:
+            return {}
+
+    def reload(self):
+        """CSVから現在の型式の変更を読み、表に表示する。"""
+        self._changes = []
+        model = self.e_model.text().strip()
+        csv_path = self.e_csv.text().strip()
+        if not model or not csv_path:
+            self.table.setRowCount(0)
+            self.lbl.setText("型式と変更表CSVを指定してください。")
+            return
+        try:
+            allc = nc_param.load_changes(csv_path)
+        except Exception as e:
+            self.table.setRowCount(0)
+            self.lbl.setText(f"変更表CSVを読めません: {e}")
+            return
+        self._changes = nc_param.changes_for_model(allc, model)
+        rows = nc_param.checklist_rows(self._changes, self._master_table())
+        self.table.setRowCount(len(rows))
+        for i, (num, axis, old, new, note) in enumerate(rows):
+            for j, val in enumerate((num, axis, old, new, note)):
+                it = QtWidgets.QTableWidgetItem(str(val))
+                if j == 3:
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+                self.table.setItem(i, j, it)
+        self.table.resizeColumnsToContents()
+        if self._changes:
+            self.lbl.setText(f"型式『{model}』の変更点数: {len(self._changes)} 件")
+        else:
+            self.lbl.setText(f"型式『{model}』に一致する変更がCSVにありません。")
+
+    def _basename(self):
+        from .ncsend import _safe_component
+        name = _safe_component(self.e_model.text().strip() or self.machine or "param")
+        return name or "param"
+
+    def save_checklist(self):
+        if not self._ensure_changes():
+            return
+        text = nc_param.format_checklist(
+            self.e_model.text().strip(), self._changes, self._master_table(),
+            date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"))
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "確認表を保存", f"{self._basename()}_パラメータ確認表.txt",
+            "テキスト (*.txt)")
+        if not p:
+            return
+        nc_param.save_checklist(p, text)
+        QtWidgets.QMessageBox.information(self, "保存", f"確認表を保存しました:\n{p}")
+
+    def save_param_file(self):
+        if not self._ensure_changes():
+            return
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "差分パラメータファイルを保存", f"{self._basename()}.prm",
+            "パラメータ (*.prm *.txt);;すべて (*.*)")
+        if not p:
+            return
+        nc_param.save_param_file(p, self._changes)
+        QtWidgets.QMessageBox.information(
+            self, "保存",
+            f"差分パラメータファイルを保存しました:\n{p}\n\n"
+            "※機械へ投入する前に、実機バックアップで書式を確認してください。")
+
+    def export_both(self):
+        """出力先（カード/LAN共有）へ 確認表＋差分ファイル を書き出す。"""
+        if not self._ensure_changes():
+            return
+        out = self.e_out.text().strip()
+        if not out:
+            QtWidgets.QMessageBox.warning(self, "出力", "出力先フォルダ/カードを指定してください")
+            return
+        from pathlib import Path
+        d = Path(out)
+        if not d.is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "出力", f"出力先が見つかりません（カード/共有が見えていない可能性）:\n{d}")
+            return
+        base = self._basename()
+        try:
+            chk = d / f"{base}_パラメータ確認表.txt"
+            prm = d / f"{base}.prm"
+            nc_param.save_checklist(chk, nc_param.format_checklist(
+                self.e_model.text().strip(), self._changes, self._master_table(),
+                date=QtCore.QDate.currentDate().toString("yyyy/MM/dd")))
+            nc_param.save_param_file(prm, self._changes)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "出力に失敗", str(e))
+            return
+        self._persist()
+        QtWidgets.QMessageBox.information(
+            self, "出力しました",
+            f"出力先に置きました:\n・{chk.name}\n・{prm.name}\n\n"
+            "機械側で PWE=1 にして、確認表を見ながら入力してください"
+            "（差分ファイルは書式確認後に使用）。")
+
+    def _ensure_changes(self):
+        if not self._changes:
+            QtWidgets.QMessageBox.warning(
+                self, "パラメータ", "出力する変更がありません（型式・CSVを確認）。")
+            return False
+        return True
+
+    def _persist(self):
+        try:
+            from .settings import save_settings
+            self.settings.update(dict(
+                param_change_csv=self.e_csv.text().strip(),
+                param_master_backup=self.e_master.text().strip(),
+                param_out_folder=self.e_out.text().strip(),
+            ))
+            save_settings(self.settings)
+        except Exception:
+            pass
 
 
 class ConditionRegistryDialog(QtWidgets.QDialog):
@@ -2549,6 +2787,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_program = QtWidgets.QPushButton("プログラム作成")
         self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
         self.b_program.clicked.connect(self.show_program_dialog)
+        self.b_param = QtWidgets.QPushButton("パラメータ")
+        self.b_param.setToolTip("製品ごとのパラメータ変更（差分）の確認表・差分ファイルを"
+                                "作ってカード/LANへ出力（機械への入力は人が実施）")
+        self.b_param.clicked.connect(self.show_param_dialog)
         self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
         self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
         self.b_pcorr.clicked.connect(self.show_pitch_correction)
@@ -2579,7 +2821,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.b_raw, self.b_past, self.b_analyze):
             toolbar.addWidget(b)
         toolbar.addSeparator()
-        for b in (self.b_cond, self.b_program, self.b_pcorr, self.b_alarm):
+        for b in (self.b_cond, self.b_program, self.b_param, self.b_pcorr, self.b_alarm):
             toolbar.addWidget(b)
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
@@ -4872,6 +5114,13 @@ class MainWindow(QtWidgets.QMainWindow):
         params["title"] = f"{model} {self.current_mode()}"
         params["machine"] = self.e_machine.text().strip()
         ProgramDialog(self, self.settings, params).exec()
+
+    def show_param_dialog(self):
+        """製品ごとのパラメータ変更（差分）の確認表・差分ファイルを作るダイアログ。"""
+        dlg = ParamDialog(self, self.settings,
+                          model=self.e_model.text().strip(),
+                          machine=self.e_machine.text().strip())
+        dlg.exec()
 
     # ----- 印刷 -----
 

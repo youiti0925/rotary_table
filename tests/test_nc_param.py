@@ -13,6 +13,14 @@ RWE-200,1825,1,9000,別仕様
 RTT-315,1825,1,8500,後勝ちで上書き
 """
 
+# 制御（MELDAS/FANUC）列つきの例。同じ製品で制御ごとに番号が違う。
+SAMPLE_CSV_CTRL = """型式,制御,番号,軸,変更値,メモ
+RTT-301DA,MELDAS-60,2003,,1304,減速比
+RTT-301DA,MELDAS-800,2206,,1304,減速比
+RTT-301DA,FANUC,1820,1,100,CMR
+RTT-301DA,,3,,共通,全制御共通の行
+"""
+
 
 class TestParseChanges(unittest.TestCase):
     def setUp(self):
@@ -23,8 +31,8 @@ class TestParseChanges(unittest.TestCase):
 
     def test_blank_rows_skipped_and_last_wins(self):
         rtt = self.changes["RTT-315"]
-        # 1825/軸1 は後勝ちで 8500、番号は重複しない
-        v = [c for c in rtt if c.key() == ("1825", "1")]
+        # 1825/軸1 は後勝ちで 8500、番号は重複しない（制御欄なし＝""）
+        v = [c for c in rtt if c.key() == ("", "1825", "1")]
         self.assertEqual(len(v), 1)
         self.assertEqual(v[0].value, "8500")
         # 1826, 3003 も読めている
@@ -77,6 +85,38 @@ class TestChecklist(unittest.TestCase):
         for num in ("1825", "1826", "3003"):
             self.assertIn(num, text)
         self.assertIn("変更点数: 3", text)
+
+
+class TestController(unittest.TestCase):
+    def setUp(self):
+        self.ch = P.parse_changes(SAMPLE_CSV_CTRL)
+
+    def test_controllers_listed(self):
+        ctrls = P.controllers_for_model(self.ch, "RTT-301DA")
+        self.assertEqual(ctrls, ["MELDAS-60", "MELDAS-800", "FANUC"])
+
+    def test_filter_by_controller_includes_common(self):
+        # MELDAS-60 を選ぶと、MELDAS-60 の行＋制御空欄(共通)の行
+        got = P.changes_for_model(self.ch, "RTT-301DA", controller="MELDAS-60")
+        nums = sorted(c.number for c in got)
+        self.assertEqual(nums, ["2003", "3"])  # 2003(MELDAS-60) + 3(共通)
+
+    def test_filter_fanuc(self):
+        got = P.changes_for_model(self.ch, "RTT-301DA", controller="FANUC")
+        nums = sorted(c.number for c in got)
+        self.assertEqual(nums, ["1820", "3"])
+
+    def test_no_controller_returns_all(self):
+        got = P.changes_for_model(self.ch, "RTT-301DA")
+        self.assertEqual(len(got), 4)
+
+    def test_csv_roundtrip_keeps_controller(self):
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "c.csv")
+        P.write_changes(path, self.ch)
+        again = P.load_changes(path)
+        got = P.changes_for_model(again, "RTT-301DA", controller="MELDAS-800")
+        self.assertEqual(sorted(c.number for c in got), ["2206", "3"])
 
 
 class TestParamFile(unittest.TestCase):

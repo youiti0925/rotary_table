@@ -1030,7 +1030,13 @@ class ParamDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         self.e_model = QtWidgets.QLineEdit(model)
         self.e_model.setPlaceholderText("型式（変更表CSVの『型式』と照合）")
+        self.e_model.editingFinished.connect(self.reload)
         form.addRow("型式", self.e_model)
+
+        self.cmb_ctrl = QtWidgets.QComboBox()
+        self.cmb_ctrl.setToolTip("MELDAS/FANUC など制御ごとに番号が違うため切替える")
+        self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
+        form.addRow("制御", self.cmb_ctrl)
 
         self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
         self.e_csv.setPlaceholderText("紙のパラメータ表をCSV化したファイル")
@@ -1047,8 +1053,9 @@ class ParamDialog(QtWidgets.QDialog):
         v.addLayout(form)
 
         hint = QtWidgets.QLabel(
-            "変更表CSVの列: 型式, 番号, 軸, 変更値, メモ（紙のパラメータ表を一度だけCSV化）。"
-            "型式を選ぶと該当製品の変更だけを出力します。")
+            "変更表CSVの列: 型式, 制御, 番号, 軸, 変更値, メモ（紙のパラメータ表を一度だけCSV化）。"
+            "MELDAS/FANUC など制御ごとに番号が違う場合は『制御』列で分けてください"
+            "（空欄＝全制御共通）。型式と制御を選ぶと該当ぶんだけ出力します。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#374151;")
         v.addWidget(hint)
@@ -1130,22 +1137,50 @@ class ParamDialog(QtWidgets.QDialog):
         except Exception:
             return {}
 
+    def _selected_controller(self):
+        """制御コンボの選択値（『（すべて）』のときは空文字＝全制御）。"""
+        data = self.cmb_ctrl.currentData()
+        return data or ""
+
+    def _on_ctrl_changed(self, *_):
+        self._apply_filter()
+
     def reload(self):
-        """CSVから現在の型式の変更を読み、表に表示する。"""
+        """CSVを読み直し、制御コンボを作り直してから表に反映する。"""
+        self._all = {}
+        csv_path = self.e_csv.text().strip()
+        if csv_path:
+            try:
+                self._all = nc_param.load_changes(csv_path)
+            except Exception as e:
+                self.table.setRowCount(0)
+                self.lbl.setText(f"変更表CSVを読めません: {e}")
+                self._changes = []
+                return
+        # 型式に対応する制御の一覧でコンボを作り直す（信号は止めて再帰を防ぐ）
+        model = self.e_model.text().strip()
+        ctrls = nc_param.controllers_for_model(self._all, model) if model else []
+        prev = self._selected_controller()
+        self.cmb_ctrl.blockSignals(True)
+        self.cmb_ctrl.clear()
+        self.cmb_ctrl.addItem("（すべて）", "")
+        for c in ctrls:
+            self.cmb_ctrl.addItem(c, c)
+        idx = self.cmb_ctrl.findData(prev)
+        self.cmb_ctrl.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_ctrl.blockSignals(False)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """選択中の型式・制御で変更を絞り、表に表示する。"""
         self._changes = []
         model = self.e_model.text().strip()
-        csv_path = self.e_csv.text().strip()
-        if not model or not csv_path:
+        if not model or not self.e_csv.text().strip():
             self.table.setRowCount(0)
             self.lbl.setText("型式と変更表CSVを指定してください。")
             return
-        try:
-            allc = nc_param.load_changes(csv_path)
-        except Exception as e:
-            self.table.setRowCount(0)
-            self.lbl.setText(f"変更表CSVを読めません: {e}")
-            return
-        self._changes = nc_param.changes_for_model(allc, model)
+        controller = self._selected_controller()
+        self._changes = nc_param.changes_for_model(self._all, model, controller or None)
         rows = nc_param.checklist_rows(self._changes, self._master_table())
         self.table.setRowCount(len(rows))
         for i, (num, axis, old, new, note) in enumerate(rows):
@@ -1155,28 +1190,36 @@ class ParamDialog(QtWidgets.QDialog):
                     it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
                 self.table.setItem(i, j, it)
         self.table.resizeColumnsToContents()
+        cname = controller or "全制御"
         if self._changes:
-            self.lbl.setText(f"型式『{model}』の変更点数: {len(self._changes)} 件")
+            self.lbl.setText(f"型式『{model}』／{cname}の変更点数: {len(self._changes)} 件")
         else:
-            self.lbl.setText(f"型式『{model}』に一致する変更がCSVにありません。")
+            self.lbl.setText(f"型式『{model}』／{cname}に一致する変更がCSVにありません。")
 
     def _basename(self):
         from .ncsend import _safe_component
-        name = _safe_component(self.e_model.text().strip() or self.machine or "param")
+        ctrl = self._selected_controller()
+        name = (self.e_model.text().strip() or self.machine or "param")
+        if ctrl:
+            name = f"{name}_{ctrl}"
+        name = _safe_component(name)
         return name or "param"
+
+    def _checklist_text(self):
+        return nc_param.format_checklist(
+            self.e_model.text().strip(), self._changes, self._master_table(),
+            date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
+            controller=self._selected_controller())
 
     def save_checklist(self):
         if not self._ensure_changes():
             return
-        text = nc_param.format_checklist(
-            self.e_model.text().strip(), self._changes, self._master_table(),
-            date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"))
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "確認表を保存", f"{self._basename()}_パラメータ確認表.txt",
             "テキスト (*.txt)")
         if not p:
             return
-        nc_param.save_checklist(p, text)
+        nc_param.save_checklist(p, self._checklist_text())
         QtWidgets.QMessageBox.information(self, "保存", f"確認表を保存しました:\n{p}")
 
     def save_param_file(self):
@@ -1187,11 +1230,11 @@ class ParamDialog(QtWidgets.QDialog):
             "パラメータ (*.prm *.txt);;すべて (*.*)")
         if not p:
             return
-        nc_param.save_param_file(p, self._changes)
+        nc_param.save_param_file(p, self._changes, controller=self._selected_controller())
         QtWidgets.QMessageBox.information(
             self, "保存",
             f"差分パラメータファイルを保存しました:\n{p}\n\n"
-            "※機械へ投入する前に、実機バックアップで書式を確認してください。")
+            "※機械へ投入する前に、その制御の実機バックアップで書式を確認してください。")
 
     def export_both(self):
         """出力先（カード/LAN共有）へ 確認表＋差分ファイル を書き出す。"""
@@ -1211,10 +1254,9 @@ class ParamDialog(QtWidgets.QDialog):
         try:
             chk = d / f"{base}_パラメータ確認表.txt"
             prm = d / f"{base}.prm"
-            nc_param.save_checklist(chk, nc_param.format_checklist(
-                self.e_model.text().strip(), self._changes, self._master_table(),
-                date=QtCore.QDate.currentDate().toString("yyyy/MM/dd")))
-            nc_param.save_param_file(prm, self._changes)
+            nc_param.save_checklist(chk, self._checklist_text())
+            nc_param.save_param_file(prm, self._changes,
+                                     controller=self._selected_controller())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "出力に失敗", str(e))
             return

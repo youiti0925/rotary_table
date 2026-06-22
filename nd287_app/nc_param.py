@@ -27,10 +27,11 @@ import re
 # 取り込みCSVの列名ゆらぎを吸収する（紙の表→CSV化を人がやる前提）
 _COL_ALIASES = {
     "model": ("型式", "機種", "品種", "製品", "model"),
+    "controller": ("制御", "制御装置", "nc", "版", "cnc", "controller"),
     "number": ("番号", "パラメータ", "パラメータ番号", "param", "no", "number"),
     "axis": ("軸", "軸番号", "axis"),
     "value": ("変更値", "値", "設定値", "value", "data"),
-    "note": ("メモ", "備考", "説明", "note", "memo"),
+    "note": ("メモ", "備考", "説明", "項目", "note", "memo"),
 }
 
 
@@ -48,11 +49,13 @@ def normalize_model(text: str) -> str:
 
 
 class ParamChange:
-    """1件の変更。number=パラメータ番号, axis=軸(無ければ ""), value=変更後の値。"""
+    """1件の変更。controller=制御(MELDAS-60/FANUC等。無ければ全制御共通),
+    number=パラメータ番号, axis=軸(無ければ ""), value=変更後の値。"""
 
-    __slots__ = ("number", "axis", "value", "note")
+    __slots__ = ("controller", "number", "axis", "value", "note")
 
-    def __init__(self, number, axis="", value="", note=""):
+    def __init__(self, number, axis="", value="", note="", controller=""):
+        self.controller = str(controller or "").strip()
         self.number = str(number).strip()
         self.axis = str(axis or "").strip()
         self.value = str(value).strip()
@@ -60,15 +63,16 @@ class ParamChange:
 
     def __eq__(self, other):
         return isinstance(other, ParamChange) and (
-            self.number, self.axis, self.value, self.note
-        ) == (other.number, other.axis, other.value, other.note)
+            self.controller, self.number, self.axis, self.value, self.note
+        ) == (other.controller, other.number, other.axis, other.value, other.note)
 
     def __repr__(self):
-        return f"ParamChange({self.number!r},{self.axis!r},{self.value!r},{self.note!r})"
+        return (f"ParamChange({self.number!r},{self.axis!r},{self.value!r},"
+                f"{self.note!r},ctrl={self.controller!r})")
 
     def key(self):
-        """同一パラメータ判定キー（番号＋軸）。"""
-        return (self.number, self.axis)
+        """同一パラメータ判定キー（制御＋番号＋軸）。"""
+        return (self.controller, self.number, self.axis)
 
 
 def parse_changes(text: str) -> dict:
@@ -97,7 +101,8 @@ def parse_changes(text: str) -> dict:
             continue
         model = cell(row, "model")
         change = ParamChange(number, cell(row, "axis"),
-                             cell(row, "value"), cell(row, "note"))
+                             cell(row, "value"), cell(row, "note"),
+                             controller=cell(row, "controller"))
         bucket = out.setdefault(model, [])
         # 同じ番号(＋軸)は後勝ちで置き換え
         for i, ex in enumerate(bucket):
@@ -118,26 +123,47 @@ def write_changes(path, changes: dict):
     """{型式: [ParamChange]} を CSV に保存（編集UIからの書き戻し用）。"""
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["型式", "番号", "軸", "変更値", "メモ"])
+        w.writerow(["型式", "制御", "番号", "軸", "変更値", "メモ"])
         for model, items in changes.items():
             for c in items:
-                w.writerow([model, c.number, c.axis, c.value, c.note])
+                w.writerow([model, c.controller, c.number, c.axis, c.value, c.note])
 
 
-def changes_for_model(changes: dict, model: str) -> list:
-    """型式（ゆらぎ吸収して照合）に対応する変更リストを返す。無ければ空。"""
+def _model_items(changes: dict, model: str) -> list:
+    """型式（ゆらぎ吸収して照合）に対応する変更リスト。無ければ空。"""
     target = normalize_model(model)
     if not target:
         return []
-    # 完全一致（正規化）→ 前方一致 の順で探す
-    for key, items in changes.items():
+    for key, items in changes.items():       # 完全一致（正規化）優先
         if normalize_model(key) == target:
             return list(items)
-    for key, items in changes.items():
+    for key, items in changes.items():       # 次に前方一致
         nk = normalize_model(key)
         if nk and (target.startswith(nk) or nk.startswith(target)):
             return list(items)
     return []
+
+
+def changes_for_model(changes: dict, model: str, controller=None) -> list:
+    """型式（＋指定があれば制御）に対応する変更リストを返す。
+
+    controller を指定した場合、制御が一致するもの＋制御欄が空（全制御共通）のものを
+    返す。指定なしなら全制御ぶんを返す。
+    """
+    items = _model_items(changes, model)
+    if controller:
+        c = normalize_model(controller)
+        items = [x for x in items if not x.controller or normalize_model(x.controller) == c]
+    return items
+
+
+def controllers_for_model(changes: dict, model: str) -> list:
+    """その型式で使われている制御名（重複なし・出現順）。UIの選択肢用。"""
+    seen = []
+    for x in _model_items(changes, model):
+        if x.controller and x.controller not in seen:
+            seen.append(x.controller)
+    return seen
 
 
 def parse_param_backup(text: str) -> dict:
@@ -171,13 +197,13 @@ def checklist_rows(changes: list, master: dict = None) -> list:
 
 
 def format_checklist(model: str, changes: list, master: dict = None,
-                     date: str = "", operator: str = "") -> str:
+                     date: str = "", operator: str = "", controller: str = "") -> str:
     """機械側での照合・入力用の確認表（テキスト）。これは書式リスクなし＝確実。"""
     rows = checklist_rows(changes, master)
     lines = [
-        "FANUC パラメータ変更 確認表",
-        f"型式: {model}    日付: {date}    担当: {operator}",
-        "※ 機械側で PWE=1 にして該当番号だけ入力。一部は電源再投入が必要。",
+        "パラメータ変更 確認表",
+        f"型式: {model}    制御: {controller or '―'}    日付: {date}    担当: {operator}",
+        "※ 機械側で書込許可にして該当番号だけ入力。一部は電源再投入が必要。",
         "-" * 56,
         f'{"番号":<8}{"軸":<4}{"旧値":>10}  →{"新値":>10}   メモ',
         "-" * 56,
@@ -189,14 +215,19 @@ def format_checklist(model: str, changes: list, master: dict = None,
     return "\n".join(lines)
 
 
-# ★ここから下（機械が読み込むファイルの書式）は機種依存。実サンプルで要検証。
-def format_param_file(changes: list, *, newline: str = "\r\n") -> str:
+# ★ここから下（機械が読み込むファイルの書式）は制御(FANUC/MELDAS)・機種で異なる。
+#   実サンプルで要検証。確定するまでは確認表（人が手入力）を使うこと。
+def format_param_file(changes: list, *, controller: str = "",
+                      newline: str = "\r\n") -> str:
     """差分パラメータファイル（変更する番号だけ）。汎用テキスト形（要検証）。
 
-    現状は「N<番号> P<値>」の一般形で出力する。機械が受け付ける厳密な書式は
-    機種で異なるため、実機バックアップ1個で確認してから投入すること。
+    現状は「N<番号> P<値>」の一般形＋制御名のコメントで出力する。FANUC と MELDAS
+    で受け付ける厳密な書式は異なるため、各制御の実機バックアップ1個で確認してから
+    投入すること（未確認のまま投入しない）。
     """
     out = ["%"]
+    if controller:
+        out.append(f"(CONTROLLER {controller} - VERIFY FORMAT WITH REAL BACKUP)")
     for c in changes:
         axis = f" A{c.axis}" if c.axis else ""
         out.append(f"N{c.number}{axis} P{c.value}")
@@ -204,9 +235,9 @@ def format_param_file(changes: list, *, newline: str = "\r\n") -> str:
     return newline.join(out) + newline
 
 
-def save_param_file(path, changes: list):
+def save_param_file(path, changes: list, controller: str = ""):
     with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
-        f.write(format_param_file(changes))
+        f.write(format_param_file(changes, controller=controller))
 
 
 def save_checklist(path, text: str):

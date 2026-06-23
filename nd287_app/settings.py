@@ -99,7 +99,10 @@ DEFAULTS = dict(
     # （列: 型式,番号,軸,変更値,メモ）。型式を選ぶと該当製品の変更だけを出力する。
     param_change_csv=r"マスタ/パラメータ変更表.csv",
     param_master_backup="",   # 任意: マスタ/バックアップ（旧値表示用、機種のバックアップ）
-    param_master_prm="",      # FANUC: マスタ .prm（これを元に Seiban 等を差替えて出力）
+    param_master_prm="",      # FANUC: 直接指定するBASIC .prm（フォルダ運用なら空でOK）
+    # 共有サーバ運用: BASIC(制御装置の基本パラメータ)と、Seiban対応の製品データの置き場所
+    param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
+    param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
     fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",

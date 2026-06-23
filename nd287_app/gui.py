@@ -105,6 +105,7 @@ from .settings import (
 from . import fanuc_alarms
 from . import nc_param
 from . import prm_format
+from . import fanuc_param
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1039,18 +1040,44 @@ class ParamDialog(QtWidgets.QDialog):
         self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
         form.addRow("制御", self.cmb_ctrl)
 
-        self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
-        self.e_csv.setPlaceholderText("紙のパラメータ表をCSV化したファイル")
-        form.addRow("変更表CSV", self._with_browse(self.e_csv, self._browse_csv))
-
         self.e_master = QtWidgets.QLineEdit(str(settings.get("param_master_backup", "")))
         self.e_master.setPlaceholderText("任意: マスタ/バックアップ（旧値表示用）")
         form.addRow("マスタ(任意)", self._with_browse(self.e_master, self._browse_master))
 
+        # 共有サーバの置き場所（フォルダ。指定すると下のファイル選択の既定位置になる）
+        self.e_basic_dir = QtWidgets.QLineEdit(str(settings.get("param_basic_dir", "")))
+        self.e_basic_dir.setPlaceholderText(r"BASICの置き場 例 \\server\param\BASIC")
+        form.addRow("BASICの場所",
+                    self._with_browse(self.e_basic_dir, self._browse_basic_dir))
+
         self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
-        self.e_master_prm.setPlaceholderText("FANUC: 制御装置のBASIC .prm（例 F30BASIC.PRM）")
+        self.e_master_prm.setPlaceholderText("使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
         form.addRow("BASIC(FANUC)",
                     self._with_browse(self.e_master_prm, self._browse_master_prm))
+
+        self.e_product_dir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
+        self.e_product_dir.setPlaceholderText(r"Seiban対応の製品データ置き場 例 \\server\param\製品")
+        form.addRow("製品データの場所",
+                    self._with_browse(self.e_product_dir, self._browse_product_dir))
+
+        prod_w = QtWidgets.QWidget()
+        prod_h = QtWidgets.QHBoxLayout(prod_w)
+        prod_h.setContentsMargins(0, 0, 0, 0)
+        self.e_product = QtWidgets.QLineEdit()
+        self.e_product.setPlaceholderText("Seibanに対応する製品データ（空＝変更表CSVを使用）")
+        prod_h.addWidget(self.e_product, 1)
+        b_find = QtWidgets.QPushButton("Seibanで探す")
+        b_find.setToolTip("製品データの場所から、Seiban を名前に含むファイルを探す")
+        b_find.clicked.connect(self.find_product)
+        prod_h.addWidget(b_find)
+        b_pp = QtWidgets.QPushButton("参照...")
+        b_pp.clicked.connect(self._browse_product)
+        prod_h.addWidget(b_pp)
+        form.addRow("製品データ", prod_w)
+
+        self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
+        self.e_csv.setPlaceholderText("製品データの代わりに使う変更表CSV（型式,制御,番号,変更値）")
+        form.addRow("変更表CSV", self._with_browse(self.e_csv, self._browse_csv))
 
         axis_row = QtWidgets.QHBoxLayout()
         axis_row.setContentsMargins(0, 0, 0, 0)
@@ -1128,11 +1155,53 @@ class ParamDialog(QtWidgets.QDialog):
         self.reload()
 
     def _browse_master_prm(self):
+        start = self.e_master_prm.text() or self.e_basic_dir.text()
         p, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "マスタ .prm（FANUC）", self.e_master_prm.text(),
-            "パラメータ (*.prm *.txt);;すべて (*.*)")
+            self, "BASIC .prm（FANUC）", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
         if p:
             self.e_master_prm.setText(p)
+
+    def _browse_basic_dir(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "BASICの場所（フォルダ）", self.e_basic_dir.text())
+        if p:
+            self.e_basic_dir.setText(p)
+
+    def _browse_product_dir(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "製品データの場所（フォルダ）", self.e_product_dir.text())
+        if p:
+            self.e_product_dir.setText(p)
+
+    def _browse_product(self):
+        start = self.e_product.text() or self.e_product_dir.text()
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "製品データ", start, "パラメータ/CSV (*.prm *.PRM *.csv *.txt);;すべて (*.*)")
+        if p:
+            self.e_product.setText(p)
+
+    def find_product(self):
+        """製品データの場所から、Seiban を名前に含むファイルを探して設定する。"""
+        from pathlib import Path
+        folder = self.e_product_dir.text().strip()
+        seiban = self.e_seiban.text().strip()
+        if not folder or not Path(folder).is_dir():
+            QtWidgets.QMessageBox.warning(self, "製品データ", "製品データの場所（フォルダ）を指定してください")
+            return
+        if not seiban:
+            QtWidgets.QMessageBox.warning(self, "製品データ", "Seiban を入力してください")
+            return
+        hits = [p for p in Path(folder).iterdir()
+                if p.is_file() and seiban in p.name]
+        if not hits:
+            QtWidgets.QMessageBox.warning(
+                self, "製品データ", f"『{seiban}』を名前に含むファイルが見つかりません:\n{folder}")
+            return
+        self.e_product.setText(str(hits[0]))
+        if len(hits) > 1:
+            QtWidgets.QMessageBox.information(
+                self, "製品データ",
+                f"{len(hits)}件見つかりました。先頭を使用:\n{hits[0].name}")
 
     def _with_browse(self, edit, slot):
         w = QtWidgets.QWidget()
@@ -1326,15 +1395,22 @@ class ParamDialog(QtWidgets.QDialog):
         if not seiban:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", "Seiban（受注伝票番号）を入力してください")
             return
-        values = {c.number: c.value for c in self._changes if c.number and c.value != ""}
-        if not values:
-            QtWidgets.QMessageBox.warning(
-                self, "FANUC .prm", "適用する製品データがありません（型式・制御・CSVを確認）。")
-            return
         try:
-            raw = Path(master_path).read_text(encoding="cp932", errors="replace")
+            # バイトで読んで cp932 デコード（改行 CRLF を文字どおり保持＝バイト一致のため。
+            # read_text だと改行が LF に変換され、出力で CRLF が失われてしまう）
+            raw = Path(master_path).read_bytes().decode("cp932", errors="replace")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
+            return
+        try:
+            values = self._product_values(raw)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "製品データ", f"製品データを読めません:\n{e}")
+            return
+        if not values:
+            QtWidgets.QMessageBox.warning(
+                self, "FANUC .prm",
+                "適用する製品データがありません（製品データ または 型式・制御・変更表CSV を確認）。")
             return
         prefix = self.cmb_prefix.currentData() or "T"
         fname = f"{prefix}{seiban}.prm"
@@ -1371,6 +1447,35 @@ class ParamDialog(QtWidgets.QDialog):
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
+    def _product_values(self, basic_text: str) -> dict:
+        """製品データ {番号: 値} を取得する。優先順位:
+        1) 指定された製品データファイル（FANUC .prm → BASICとdiffで抽出 /
+           ヘッダ＋CSV → 値一覧 / CSV → 型式・制御で絞った変更）
+        2) 無ければ 変更表CSV から選択中の型式・制御の変更
+        """
+        from pathlib import Path
+        path = self.e_product.text().strip()
+        if not path:
+            return {c.number: c.value for c in self._changes if c.number and c.value != ""}
+        text = Path(path).read_text(encoding="cp932", errors="replace")
+        if fanuc_param.looks_like_fanuc_prm(text):
+            # 完成済み製品ファイル → BASICとの差分が「その製品の変更値」
+            return {num: newv for (num, _lab, _old, newv) in
+                    fanuc_param.diff(basic_text, text) if newv is not None}
+        # ヘッダ＋CSV形式（System Version=… / "番号",…）
+        try:
+            doc = prm_format.parse_prm(text)
+            vals = {num: v for (num, v, _jp, _en) in prm_format.iter_params(doc) if v != ""}
+            if vals:
+                return vals
+        except Exception:
+            pass
+        # CSV（型式,制御,番号,変更値）
+        changes = nc_param.changes_for_model(
+            nc_param.parse_changes(text), self.e_model.text().strip(),
+            self._selected_controller() or None)
+        return {c.number: c.value for c in changes if c.number and c.value != ""}
+
     def _ensure_changes(self):
         if not self._changes:
             QtWidgets.QMessageBox.warning(
@@ -1385,6 +1490,8 @@ class ParamDialog(QtWidgets.QDialog):
                 param_change_csv=self.e_csv.text().strip(),
                 param_master_backup=self.e_master.text().strip(),
                 param_master_prm=self.e_master_prm.text().strip(),
+                param_basic_dir=self.e_basic_dir.text().strip(),
+                param_product_dir=self.e_product_dir.text().strip(),
                 param_out_folder=self.e_out.text().strip(),
             ))
             save_settings(self.settings)

@@ -1450,7 +1450,7 @@ class ParamDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
             return
         fname = out_path.name
-        note = (f"BASIC {Path(master_path).name} の A{axis} 軸を製品値に変更"
+        note = (f"BASIC {Path(master_path).name} の {nc_param.axis_name(axis)} 軸を製品値に変更"
                 if fmt == "fanuc" else f"{Path(master_path).name} を元に差替え")
         mode, eff = self._detect_mode(raw, values, axis)
         self._persist()
@@ -2054,7 +2054,7 @@ class ParamDBDialog(QtWidgets.QDialog):
             except Exception:
                 reg = "\n（履歴登録に失敗しました）"
         msg = (f"作成しました:\n・{out_path.name}\n"
-               f"（{Path(master).name} の A{axis} 軸へ {e.model}"
+               f"（{Path(master).name} の {nc_param.axis_name(axis)} 軸へ {e.model}"
                f"{'／' + e.mode + 'クロ' if e.mode else ''} の設定を適用）\n"
                f"値の反映: {len(values) - len(missing)} / {len(values)} 件{reg}")
         if missing:

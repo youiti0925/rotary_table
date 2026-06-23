@@ -3113,7 +3113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide = QtWidgets.QLabel("―")
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignCenter)
-        self.guide.setStyleSheet("padding:6px;")
+        self.guide.setStyleSheet("padding:1px 6px;")
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = QtWidgets.QLabel("")
@@ -3235,13 +3235,14 @@ class MainWindow(QtWidgets.QMainWindow):
         counts_row.addWidget(self.counts, 1)
         plots_widget.setMinimumHeight(240)
 
-        # 左カラム: ガイド → 測定情報/条件 → 操作バー → グラフ（残りを縦いっぱい）
+        # 左カラム: 測定情報/条件 → ガイド(ロード名/手順) → 操作バー → グラフ。
+        # ガイドは測定条件の下に置く（上端に置くと上の余白が詰められないため）。
         left_col = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left_col)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
-        lv.addWidget(self.guide, 0)
         lv.addLayout(top_left, 0)
+        lv.addWidget(self.guide, 0)         # ロード名・取込手順は測定条件の下に表示
         lv.addLayout(bar, 0)
         lv.addLayout(counts_row, 0)         # データ数（横いっぱい・必要なら折返し）
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
@@ -3254,7 +3255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.right_col = right_col = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(right_col)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(6)
+        rv.setSpacing(2)  # 3表を近づけて精度結果をコンパクトに
         rv.addWidget(self.table_series, 0)   # 精度PP・傾き
         rv.addWidget(self.table_series2, 0)  # 単一・隣接
         rv.addWidget(self.table_misc, 0)     # バックラッシ
@@ -4849,10 +4850,13 @@ class MainWindow(QtWidgets.QMainWindow):
         計算高となり、縦スクロールバー無しの表でも最終行が切れない。
         """
         table.resizeRowsToContents()
+        # 縦ヘッダの最小セクションを小さくして、明示した行高がスタイルに押し上げ
+        # られない（＝描画高＞計算高で末尾が切れる）ようにしておく
+        table.verticalHeader().setMinimumSectionSize(1)
         fm = table.fontMetrics()
-        floor = fm.height() + 12  # フォント基準の下限（スタイル差で潰れない余裕）
+        floor = fm.height() + 6  # 文字が収まる最低限＋わずかな余白（詰めすぎない）
         header_h = max(table.horizontalHeader().sizeHint().height(), floor)
-        height = header_h + 2 * table.frameWidth() + 6
+        height = header_h + 2 * table.frameWidth() + 4
         for r in range(table.rowCount()):
             rh = max(table.rowHeight(r), floor)
             table.setRowHeight(r, rh)  # 明示設定＝描画もこの高さ。測定との食い違い防止

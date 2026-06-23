@@ -1048,12 +1048,27 @@ class ParamDialog(QtWidgets.QDialog):
         form.addRow("マスタ(任意)", self._with_browse(self.e_master, self._browse_master))
 
         self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
-        self.e_master_prm.setPlaceholderText("FANUC: マスタ .prm（これを元に Seiban 等を差替えて出力）")
-        form.addRow("マスタ.prm(FANUC)",
+        self.e_master_prm.setPlaceholderText("FANUC: 制御装置のBASIC .prm（例 F30BASIC.PRM）")
+        form.addRow("BASIC(FANUC)",
                     self._with_browse(self.e_master_prm, self._browse_master_prm))
 
+        axis_row = QtWidgets.QHBoxLayout()
+        axis_row.setContentsMargins(0, 0, 0, 0)
+        self.cmb_axis = QtWidgets.QComboBox()
+        for n in (1, 2, 3, 4):
+            self.cmb_axis.addItem(f"A{n}（第{n}軸）", n)
+        self.cmb_axis.setCurrentIndex(3)  # 既定 A4
+        self.cmb_axis.setToolTip("容量(20A/40A…)で決まった、その制御装置で使う軸")
+        axis_row.addWidget(self.cmb_axis, 1)
+        axis_row.addWidget(QtWidgets.QLabel("頭文字"))
+        self.cmb_prefix = QtWidgets.QComboBox()
+        self.cmb_prefix.addItem("T（傾斜）", "T")
+        self.cmb_prefix.addItem("R（回転）", "R")
+        axis_row.addWidget(self.cmb_prefix)
+        form.addRow("対象軸", axis_row)
+
         self.e_seiban = QtWidgets.QLineEdit()
-        self.e_seiban.setPlaceholderText("受注伝票番号（ファイル名 <軸><Seiban>.prm に使用）")
+        self.e_seiban.setPlaceholderText("受注伝票番号（ファイル名 <頭文字><Seiban>.prm に使用）")
         form.addRow("Seiban", self.e_seiban)
 
         self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
@@ -1301,34 +1316,58 @@ class ParamDialog(QtWidgets.QDialog):
         out = self.e_out.text().strip()
         seiban = self.e_seiban.text().strip()
         if not master_path:
-            QtWidgets.QMessageBox.warning(self, "FANUC .prm", "マスタ.prm を指定してください")
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", "BASIC(.prm) を指定してください")
             return
         d = Path(out)
         if not out or not d.is_dir():
             QtWidgets.QMessageBox.warning(
                 self, "FANUC .prm", "出力先フォルダ/カードを指定してください（存在する場所）")
             return
-        try:
-            master = prm_format.load_prm(master_path)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"マスタ.prm を読めません:\n{e}")
+        if not seiban:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", "Seiban（受注伝票番号）を入力してください")
             return
         values = {c.number: c.value for c in self._changes if c.number and c.value != ""}
-        headers = {"Seiban": seiban} if seiban else {}
-        doc, missing = prm_format.generate(master, headers, values)
-        fname = prm_format.default_filename(doc)
-        try:
-            prm_format.save_prm(d / fname, doc)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+        if not values:
+            QtWidgets.QMessageBox.warning(
+                self, "FANUC .prm", "適用する製品データがありません（型式・制御・CSVを確認）。")
             return
+        try:
+            raw = Path(master_path).read_text(encoding="cp932", errors="replace")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
+            return
+        prefix = self.cmb_prefix.currentData() or "T"
+        fname = f"{prefix}{seiban}.prm"
+        if fanuc_param.looks_like_fanuc_prm(raw):
+            # N形式（実機ネイティブ）: BASICの「選んだ軸」だけを製品値へ。他は不変
+            axis = int(self.cmb_axis.currentData() or 4)
+            newtext, missing = fanuc_param.apply_product_values(raw, values, axis)
+            try:
+                (d / fname).write_text(newtext, encoding="cp932", errors="replace",
+                                       newline="")
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+                return
+            note = f"BASIC {Path(master_path).name} の A{axis} 軸を製品値に変更"
+        else:
+            # ヘッダ＋CSV形式（旧）: そのまま値・Seiban差替え
+            doc = prm_format.parse_prm(raw)
+            prm_format.header_set(doc, "Seiban", seiban)
+            missing = [n for n in values if prm_format.param_value(doc, n) is None]
+            prm_format.apply_values(doc, values)
+            try:
+                prm_format.save_prm(d / fname, doc)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+                return
+            note = f"{Path(master_path).name} を元に差替え"
         self._persist()
-        msg = (f"FANUC .prm を作成しました:\n・{fname}\n"
-               f"（マスタ {Path(master_path).name} を元に差替え）")
-        if values:
-            msg += f"\n値の差替え: {len(values) - len(missing)} 件"
+        msg = (f"FANUC .prm を作成しました:\n・{fname}\n（{note}）"
+               f"\n値の反映: {len(values) - len(missing)} / {len(values)} 件")
         if missing:
-            msg += f"\n⚠ マスタに無い番号（未反映）: {', '.join(missing)}"
+            msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
+            if len(missing) > 12:
+                msg += f" 他{len(missing) - 12}件"
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 

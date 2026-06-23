@@ -119,5 +119,36 @@ class TestDiff(unittest.TestCase):
         self.assertEqual(rebuilt, product)
 
 
+class TestApplyToAxis(unittest.TestCase):
+    def test_set_on_axis_uses_chosen_axis(self):
+        # 軸2を選んで 1825 を 2500 に → A2 だけ変わる、A4等は不変
+        new, ok = F.set_on_axis(SAMPLE, "1825", "2500", 2)
+        self.assertTrue(ok)
+        self.assertEqual(F.get_value(new, "1825", "A2"), "2500")
+        self.assertEqual(F.get_value(new, "1825", "A4"), "3000")
+
+    def test_set_on_axis_falls_back_to_single(self):
+        # 番号なしP の 00002 は軸が無い → 単一値へ反映
+        new, ok = F.set_on_axis(SAMPLE, "00002", "11111111", 3)
+        self.assertTrue(ok)
+        self.assertEqual(F.get_value(new, "00002"), "11111111")
+        # S1 の 00982 も軸が無い → S1 へ
+        new, ok = F.set_on_axis(SAMPLE, "00982", "1", 3)
+        self.assertTrue(ok)
+        self.assertEqual(F.get_value(new, "00982", "S1"), "1")
+
+    def test_apply_product_values_axis4(self):
+        # 製品の値を A4（回転軸）へ。工程「その軸のパラメータだけ変更」を再現
+        values = {"1825": "2500", "02020": "300", "00020": "8", "9999": "1"}
+        new, missing = F.apply_product_values(SAMPLE, values, 4)
+        self.assertEqual(missing, ["9999"])
+        self.assertEqual(F.get_value(new, "1825", "A4"), "2500")
+        self.assertEqual(F.get_value(new, "02020", "A4"), "300")
+        self.assertEqual(F.get_value(new, "00020"), "8")     # 単一値
+        # A1〜A3は不変（その軸だけ変える）
+        self.assertEqual(F.get_value(new, "1825", "A1"), "3000")
+        self.assertEqual(F.get_value(new, "02020", "A1"), "255")
+
+
 if __name__ == "__main__":
     unittest.main()

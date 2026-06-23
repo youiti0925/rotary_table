@@ -108,6 +108,33 @@ def apply_changes(text: str, changes) -> tuple:
     return text, missing
 
 
+def set_on_axis(text: str, number, value, axis_num) -> tuple:
+    """指定軸(A<axis_num>)の値を差し替える。軸が無いパラメータは単一値(L1/S1/T1/番号なし)へ。
+
+    工程: BASICの「その軸だけ」を製品値に変える、を実現する。戻り値 (新text, 成否)。
+    """
+    for label in (f"A{axis_num}", "L1", "S1", "T1", None):
+        new, ok = set_value(text, number, value, label)
+        if ok:
+            return new, True
+    return text, False
+
+
+def apply_product_values(text: str, values: dict, axis_num) -> tuple:
+    """製品の値 {番号: 値} を BASIC の指定軸へ一括反映する。
+
+    戻り値: (新テキスト, 反映できなかった番号のリスト)。番号は BASIC に無いもの。
+    """
+    missing = []
+    for number, value in values.items():
+        if value is None or str(value) == "":
+            continue
+        text, ok = set_on_axis(text, number, value, axis_num)
+        if not ok:
+            missing.append(str(number))
+    return text, missing
+
+
 def looks_like_fanuc_prm(text: str) -> bool:
     """先頭付近に N#####Q1… 形式があれば FANUCネイティブ.PRM とみなす。"""
     head = text.lstrip()

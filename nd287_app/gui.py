@@ -1428,7 +1428,7 @@ class ParamDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
             return
         try:
-            values = self._product_values(raw)
+            values, source = self._product_values(raw)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "製品データ", f"製品データを読めません:\n{e}")
             return
@@ -1463,43 +1463,76 @@ class ParamDialog(QtWidgets.QDialog):
                 return
             note = f"{Path(master_path).name} を元に差替え"
         self._persist()
+        # 製品データ（完成済み.prm）から抽出した「変更点」だけを変更表CSVへ登録し、
+        # 次回は同じ型式を製品データ無しでも作れるようにする（source=="diff" のときだけ）。
+        reg_msg = self._register_to_csv(values) if source == "diff" else ""
         msg = (f"FANUC .prm を作成しました:\n・{fname}\n（{note}）"
                f"\n値の反映: {len(values) - len(missing)} / {len(values)} 件")
         if missing:
             msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
             if len(missing) > 12:
                 msg += f" 他{len(missing) - 12}件"
+        msg += reg_msg
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
-    def _product_values(self, basic_text: str) -> dict:
-        """製品データ {番号: 値} を取得する。優先順位:
-        1) 指定された製品データファイル（FANUC .prm → BASICとdiffで抽出 /
-           ヘッダ＋CSV → 値一覧 / CSV → 型式・制御で絞った変更）
-        2) 無ければ 変更表CSV から選択中の型式・制御の変更
+    def _register_to_csv(self, values: dict) -> str:
+        """抽出した変更 {番号:値} を変更表CSVへ登録（upsert）し、結果メッセージを返す。
+
+        型式キーで登録する（紙のパラメータ表は型式ごと＝軸非依存なので 軸欄は空）。
+        型式または変更表CSVが未指定なら登録せず、その旨を返す。
+        """
+        model = self.e_model.text().strip()
+        csv_path = self.e_csv.text().strip()
+        if not model:
+            return "\n（型式が空のため、変更表CSVへの登録はスキップしました）"
+        if not csv_path:
+            return "\n（変更表CSVが未指定のため、登録はスキップしました）"
+        controller = self._selected_controller()
+        items = [nc_param.ParamChange(num, axis="", value=val, controller=controller)
+                 for num, val in values.items() if val != ""]
+        try:
+            added, updated = nc_param.register_changes(csv_path, model, items)
+        except Exception as e:
+            return f"\n⚠ 変更表CSVへの登録に失敗: {e}"
+        self.reload()  # 登録結果を画面の表へ反映
+        return (f"\n変更表CSVへ登録: 型式『{model}』 追加{added}・更新{updated}件"
+                f"\n（次回は製品データ無しでも型式から作れます）")
+
+    def _product_values(self, basic_text: str) -> tuple:
+        """製品データ {番号: 値} と、その取得元を返す。戻り値 (values, source)。
+
+        source: "diff"     完成済み.prm と BASIC の差分＝その製品の「変更点」
+                "headercsv" ヘッダ＋CSV形式の値一覧（変更点ではなく全値）
+                "csv"       製品データがCSV（型式・制御で絞った変更）
+                "changes"   製品データ無し → ③の変更表CSVの選択中の変更
+        変更表CSVへ登録してよいのは "diff"（本当の変更点）だけ。
         """
         from pathlib import Path
         path = self.e_product.text().strip()
         if not path:
-            return {c.number: c.value for c in self._changes if c.number and c.value != ""}
+            vals = {c.number: c.value for c in self._changes if c.number and c.value != ""}
+            return vals, "changes"
         text = Path(path).read_text(encoding="cp932", errors="replace")
         if fanuc_param.looks_like_fanuc_prm(text):
             # 完成済み製品ファイル → BASICとの差分が「その製品の変更値」
-            return {num: newv for (num, _lab, _old, newv) in
+            vals = {num: newv for (num, _lab, _old, newv) in
                     fanuc_param.diff(basic_text, text) if newv is not None}
-        # ヘッダ＋CSV形式（System Version=… / "番号",…）
+            return vals, "diff"
+        # ヘッダ＋CSV形式（System Version=… / "番号",…）。これは全値なので登録はしない
         try:
             doc = prm_format.parse_prm(text)
             vals = {num: v for (num, v, _jp, _en) in prm_format.iter_params(doc) if v != ""}
             if vals:
-                return vals
+                return vals, "headercsv"
         except Exception:
             pass
         # CSV（型式,制御,番号,変更値）
         changes = nc_param.changes_for_model(
             nc_param.parse_changes(text), self.e_model.text().strip(),
             self._selected_controller() or None)
-        return {c.number: c.value for c in changes if c.number and c.value != ""}
+        vals = {c.number: c.value for c in changes if c.number and c.value != ""}
+        return vals, "csv"
 
     def _ensure_changes(self):
         if not self._changes:

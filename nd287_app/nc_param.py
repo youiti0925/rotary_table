@@ -129,6 +129,55 @@ def write_changes(path, changes: dict):
                 w.writerow([model, c.controller, c.number, c.axis, c.value, c.note])
 
 
+def register_changes(path, model, items) -> tuple:
+    """型式 model の変更 items([ParamChange]) を CSV(path) へ upsert 登録する。
+
+    製品データ（完成済み.prm）から抽出した変更を変更表CSVに残し、次回は同じ型式を
+    製品データ無しでも作れるようにするための関数。
+
+    既存CSVを読み、同じ型式の中で key(制御＋番号＋軸) が一致する行は新しい値で
+    置き換え、無ければ追加する。他の型式・他の番号の行はそのまま（破壊しない）。
+    更新時、新しい行のメモが空なら既存のメモを残す。CSVが無ければ新規作成。
+    変化が無いときはファイルを書き換えない（並びやコメントを無駄に消さない）。
+    戻り値: (追加件数, 更新件数)。
+    """
+    from pathlib import Path
+    if not path or not model or not items:
+        return (0, 0)
+    existing = {}
+    if Path(path).exists():
+        try:
+            existing = load_changes(path)
+        except Exception:
+            existing = {}
+    target = normalize_model(model)
+    bucket_key = None
+    for k in existing:                       # 既存の同型式バケツ（正規化一致）を探す
+        if normalize_model(k) == target:
+            bucket_key = k
+            break
+    if bucket_key is None:
+        bucket_key = model
+    bucket = existing.setdefault(bucket_key, [])
+    added = updated = 0
+    for ch in items:
+        for i, ex in enumerate(bucket):
+            if ex.key() == ch.key():
+                if not ch.note and ex.note:  # 既存メモを消さない
+                    ch = ParamChange(ch.number, ch.axis, ch.value, ex.note, ch.controller)
+                if bucket[i] != ch:
+                    updated += 1
+                bucket[i] = ch
+                break
+        else:
+            bucket.append(ch)
+            added += 1
+    if added or updated:
+        write_changes(path, existing)
+    return (added, updated)
+
+
+
 def _model_items(changes: dict, model: str) -> list:
     """型式（ゆらぎ吸収して照合）に対応する変更リスト。無ければ空。"""
     target = normalize_model(model)

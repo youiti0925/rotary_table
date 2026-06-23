@@ -119,6 +119,72 @@ class TestController(unittest.TestCase):
         self.assertEqual(sorted(c.number for c in got), ["2206", "3"])
 
 
+class TestRegisterChanges(unittest.TestCase):
+    """製品データから抽出した変更を変更表CSVへ upsert 登録する。"""
+
+    def setUp(self):
+        import tempfile, os
+        self.path = os.path.join(tempfile.mkdtemp(), "reg.csv")
+
+    def test_creates_file_when_absent(self):
+        items = [P.ParamChange("1825", "", "2500", controller="FANUC"),
+                 P.ParamChange("2020", "", "300", controller="FANUC")]
+        added, updated = P.register_changes(self.path, "RTT-137", items)
+        self.assertEqual((added, updated), (2, 0))
+        again = P.load_changes(self.path)
+        got = {c.number: c.value for c in P.changes_for_model(again, "RTT-137")}
+        self.assertEqual(got, {"1825": "2500", "2020": "300"})
+
+    def test_upsert_updates_existing_value(self):
+        P.register_changes(self.path, "RTT-137",
+                           [P.ParamChange("1825", "", "2500", controller="FANUC")])
+        # 同じ型式・制御・番号を別の値で再登録 → 追加0・更新1、行は重複しない
+        added, updated = P.register_changes(
+            self.path, "RTT-137",
+            [P.ParamChange("1825", "", "9999", controller="FANUC")])
+        self.assertEqual((added, updated), (0, 1))
+        got = P.changes_for_model(P.load_changes(self.path), "RTT-137")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].value, "9999")
+
+    def test_no_write_when_unchanged(self):
+        items = [P.ParamChange("1825", "", "2500", controller="FANUC")]
+        P.register_changes(self.path, "RTT-137", items)
+        import os
+        mtime = os.path.getmtime(self.path)
+        added, updated = P.register_changes(self.path, "RTT-137", items)
+        self.assertEqual((added, updated), (0, 0))
+        # 変化が無ければ書き換えない（mtime据え置き）
+        self.assertEqual(os.path.getmtime(self.path), mtime)
+
+    def test_preserves_other_models(self):
+        P.write_changes(self.path, P.parse_changes(SAMPLE_CSV))
+        # 別型式を登録しても既存の RTT-315/RWE-200 は残る
+        P.register_changes(self.path, "NEW-1",
+                           [P.ParamChange("100", "", "1")])
+        again = P.load_changes(self.path)
+        self.assertEqual(set(again) >= {"RTT-315", "RWE-200", "NEW-1"}, True)
+        self.assertTrue(P.changes_for_model(again, "RTT-315"))
+
+    def test_update_keeps_existing_note_when_new_empty(self):
+        P.register_changes(self.path, "RTT-137",
+                           [P.ParamChange("1825", "", "2500", note="位置ゲイン",
+                                          controller="FANUC")])
+        # メモ無しで値だけ更新 → 既存メモは消えない
+        P.register_changes(self.path, "RTT-137",
+                           [P.ParamChange("1825", "", "9000", controller="FANUC")])
+        got = P.changes_for_model(P.load_changes(self.path), "RTT-137")[0]
+        self.assertEqual(got.value, "9000")
+        self.assertEqual(got.note, "位置ゲイン")
+
+    def test_skips_without_model_or_path(self):
+        self.assertEqual(P.register_changes(self.path, "", [P.ParamChange("1", "", "1")]),
+                         (0, 0))
+        self.assertEqual(P.register_changes("", "M", [P.ParamChange("1", "", "1")]),
+                         (0, 0))
+        self.assertEqual(P.register_changes(self.path, "M", []), (0, 0))
+
+
 class TestParamFile(unittest.TestCase):
     def test_diff_file_only_changed_params(self):
         ch = P.changes_for_model(P.parse_changes(SAMPLE_CSV), "RTT-315")

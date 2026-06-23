@@ -1029,44 +1029,37 @@ class ParamDialog(QtWidgets.QDialog):
         self.resize(720, 520)
         v = QtWidgets.QVBoxLayout(self)
 
-        form = QtWidgets.QFormLayout()
-        self.e_model = QtWidgets.QLineEdit(model)
-        self.e_model.setPlaceholderText("型式（変更表CSVの『型式』と照合）")
-        self.e_model.editingFinished.connect(self.reload)
-        form.addRow("型式", self.e_model)
+        # 画面を3つに分ける: ①場所(共有サーバ・一度だけ) ②今回の作業 ③任意/CSV運用。
+        # 各 self.e_* の参照名はそのまま（reload/find_product/make_prm から使うため）。
+        form_place = QtWidgets.QFormLayout()
+        form_job = QtWidgets.QFormLayout()
+        form_csv = QtWidgets.QFormLayout()
 
-        self.cmb_ctrl = QtWidgets.QComboBox()
-        self.cmb_ctrl.setToolTip("MELDAS/FANUC など制御ごとに番号が違うため切替える")
-        self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
-        form.addRow("制御", self.cmb_ctrl)
-
-        self.e_master = QtWidgets.QLineEdit(str(settings.get("param_master_backup", "")))
-        self.e_master.setPlaceholderText("任意: 確認表に『旧値』を出すための実機バックアップ。空でOK")
-        self.e_master.setToolTip("確認表で『旧値→新値』を見せたいときだけ指定する任意項目。"
-                                 ".prm の作成には不要")
-        form.addRow("旧値バックアップ(任意)",
-                    self._with_browse(self.e_master, self._browse_master))
-
-        # 共有サーバの置き場所（フォルダ。指定すると下のファイル選択の既定位置になる）
+        # --- ① 共有サーバの場所（最初に一度だけ設定すればOK） ---
         self.e_basic_dir = QtWidgets.QLineEdit(str(settings.get("param_basic_dir", "")))
         self.e_basic_dir.setPlaceholderText(r"BASIC(.prm)を置く共有フォルダ 例 \\server\param\BASIC")
         self.e_basic_dir.setToolTip("制御装置の基本パラメータ(BASIC)を置くフォルダ。"
                                     "一度入れれば下の「使うBASIC」選択の起点になる")
-        form.addRow("BASICの場所(フォルダ)",
-                    self._with_browse(self.e_basic_dir, self._browse_basic_dir))
-
-        self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
-        self.e_master_prm.setPlaceholderText("今回使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
-        self.e_master_prm.setToolTip("容量・空き軸で決まった制御装置の BASIC ファイル。これを元に作る")
-        form.addRow("使うBASIC",
-                    self._with_browse(self.e_master_prm, self._browse_master_prm))
+        form_place.addRow("BASICの場所(フォルダ)",
+                          self._with_browse(self.e_basic_dir, self._browse_basic_dir))
 
         self.e_product_dir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
         self.e_product_dir.setPlaceholderText(r"Seibanごとの製品データを置く共有フォルダ 例 \\server\param\製品")
         self.e_product_dir.setToolTip("受注伝票番号(Seiban)ごとの製品データを置くフォルダ。"
                                       "「Seibanで探す」がここから探す")
-        form.addRow("製品データの場所(フォルダ)",
-                    self._with_browse(self.e_product_dir, self._browse_product_dir))
+        form_place.addRow("製品データの場所(フォルダ)",
+                          self._with_browse(self.e_product_dir, self._browse_product_dir))
+
+        # --- ② 今回の作業（受注ごとに入れる） ---
+        self.e_seiban = QtWidgets.QLineEdit()
+        self.e_seiban.setPlaceholderText("受注伝票番号（ファイル名 <頭文字><Seiban>.prm に使用）")
+        form_job.addRow("Seiban", self.e_seiban)
+
+        self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
+        self.e_master_prm.setPlaceholderText("今回使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
+        self.e_master_prm.setToolTip("容量・空き軸で決まった制御装置の BASIC ファイル。これを元に作る")
+        form_job.addRow("使うBASIC",
+                        self._with_browse(self.e_master_prm, self._browse_master_prm))
 
         prod_w = QtWidgets.QWidget()
         prod_h = QtWidgets.QHBoxLayout(prod_w)
@@ -1081,11 +1074,7 @@ class ParamDialog(QtWidgets.QDialog):
         b_pp = QtWidgets.QPushButton("参照...")
         b_pp.clicked.connect(self._browse_product)
         prod_h.addWidget(b_pp)
-        form.addRow("製品データ", prod_w)
-
-        self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
-        self.e_csv.setPlaceholderText("製品データの代わりに使う変更表CSV（型式,制御,番号,変更値）")
-        form.addRow("変更表CSV", self._with_browse(self.e_csv, self._browse_csv))
+        form_job.addRow("製品データ", prod_w)
 
         axis_row = QtWidgets.QHBoxLayout()
         axis_row.setContentsMargins(0, 0, 0, 0)
@@ -1100,27 +1089,50 @@ class ParamDialog(QtWidgets.QDialog):
         self.cmb_prefix.addItem("T（傾斜）", "T")
         self.cmb_prefix.addItem("R（回転）", "R")
         axis_row.addWidget(self.cmb_prefix)
-        form.addRow("対象軸", axis_row)
-
-        self.e_seiban = QtWidgets.QLineEdit()
-        self.e_seiban.setPlaceholderText("受注伝票番号（ファイル名 <頭文字><Seiban>.prm に使用）")
-        form.addRow("Seiban", self.e_seiban)
+        form_job.addRow("対象軸", axis_row)
 
         self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
                                              or settings.get("nc_send_folder", "")))
         self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有 \\192.168.0.10\nc）")
-        form.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
-        v.addLayout(form)
+        form_job.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
+
+        # --- ③ 任意・変更表CSV運用（製品データが無いときに使う） ---
+        self.e_model = QtWidgets.QLineEdit(model)
+        self.e_model.setPlaceholderText("型式（変更表CSVの『型式』と照合）")
+        self.e_model.editingFinished.connect(self.reload)
+        form_csv.addRow("型式", self.e_model)
+
+        self.cmb_ctrl = QtWidgets.QComboBox()
+        self.cmb_ctrl.setToolTip("MELDAS/FANUC など制御ごとに番号が違うため切替える")
+        self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
+        form_csv.addRow("制御", self.cmb_ctrl)
+
+        self.e_csv = QtWidgets.QLineEdit(str(settings.get("param_change_csv", "")))
+        self.e_csv.setPlaceholderText("製品データの代わりに使う変更表CSV（型式,制御,番号,変更値）")
+        form_csv.addRow("変更表CSV", self._with_browse(self.e_csv, self._browse_csv))
+
+        self.e_master = QtWidgets.QLineEdit(str(settings.get("param_master_backup", "")))
+        self.e_master.setPlaceholderText("任意: 確認表に『旧値』を出すための実機バックアップ。空でOK")
+        self.e_master.setToolTip("確認表で『旧値→新値』を見せたいときだけ指定する任意項目。"
+                                 ".prm の作成には不要")
+        form_csv.addRow("旧値バックアップ(任意)",
+                        self._with_browse(self.e_master, self._browse_master))
+
+        for title, inner in (
+            ("① 共有サーバの場所（最初に一度だけ設定すればOK）", form_place),
+            ("② 今回の作業（受注ごとに入れる）", form_job),
+            ("③ 任意・変更表CSV運用（製品データが無いときに使う）", form_csv),
+        ):
+            box = QtWidgets.QGroupBox(title)
+            box.setLayout(inner)
+            v.addWidget(box)
 
         hint = QtWidgets.QLabel(
-            "使い方:  ① Seiban（受注伝票番号）を入れる  ② 使うBASIC(.prm＝制御装置の"
-            "基本パラメータ)を選ぶ  ③ 製品データを選ぶ（「Seibanで探す」で自動検索）  "
-            "④ 対象軸と頭文字（傾斜T／回転R）を選ぶ  ⑤「FANUC .prm 作成」。\n"
-            "・「○○の場所」＝共有サーバのフォルダ。最初に一度入れておけば、"
-            "ファイル選択や「Seibanで探す」の起点になります（毎回入れ直す必要なし）。\n"
-            "・「旧値バックアップ」と「変更表CSV」は任意。製品データ（完成済み.prm）が"
-            "あればCSVは不要です。製品データが無いときだけ、紙の表をCSV化した変更表CSV"
-            "（列: 型式, 制御, 番号, 軸, 変更値, メモ）を使います。")
+            "流れ:  Seiban を入れて「Seibanで探す」→ 使うBASIC を選ぶ → 対象軸と頭文字"
+            "（傾斜T／回転R）を選ぶ → 出力先を確認 →「FANUC .prm 作成」。\n"
+            "・製品データ（完成済み.prm）があれば、それと BASIC の差分を自動で当てます。"
+            "無いときだけ ③ の変更表CSV（列: 型式, 制御, 番号, 軸, 変更値, メモ）を使います。\n"
+            "・実機への入力は人が行います（PWE=1。番号により電源再投入が必要）。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#374151;")
         v.addWidget(hint)

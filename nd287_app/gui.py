@@ -104,6 +104,7 @@ from .settings import (
 )
 from . import fanuc_alarms
 from . import nc_param
+from . import prm_format
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1046,6 +1047,15 @@ class ParamDialog(QtWidgets.QDialog):
         self.e_master.setPlaceholderText("任意: マスタ/バックアップ（旧値表示用）")
         form.addRow("マスタ(任意)", self._with_browse(self.e_master, self._browse_master))
 
+        self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
+        self.e_master_prm.setPlaceholderText("FANUC: マスタ .prm（これを元に Seiban 等を差替えて出力）")
+        form.addRow("マスタ.prm(FANUC)",
+                    self._with_browse(self.e_master_prm, self._browse_master_prm))
+
+        self.e_seiban = QtWidgets.QLineEdit()
+        self.e_seiban.setPlaceholderText("受注伝票番号（ファイル名 <軸><Seiban>.prm に使用）")
+        form.addRow("Seiban", self.e_seiban)
+
         self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
                                              or settings.get("nc_send_folder", "")))
         self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有 \\192.168.0.10\nc）")
@@ -1084,18 +1094,30 @@ class ParamDialog(QtWidgets.QDialog):
         b_file = QtWidgets.QPushButton("差分ファイルを保存")
         b_file.clicked.connect(self.save_param_file)
         b_both = QtWidgets.QPushButton("出力先へ両方出す")
-        b_both.setObjectName("primary")
         b_both.clicked.connect(self.export_both)
+        b_prm = QtWidgets.QPushButton("FANUC .prm 作成→出力先")
+        b_prm.setObjectName("primary")
+        b_prm.setToolTip("マスタ.prm を元に Seiban と一部の値を差し替えて "
+                         "<軸><Seiban>.prm を出力先へ作成（FANUC）")
+        b_prm.clicked.connect(self.make_prm)
         b_close = QtWidgets.QPushButton("閉じる")
         b_close.clicked.connect(self.accept)
-        for b in (b_reload, b_check, b_file, b_both):
+        for b in (b_reload, b_check, b_file, b_both, b_prm):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(b_close)
         v.addLayout(row)
 
+        self._all = {}
         self._changes = []
         self.reload()
+
+    def _browse_master_prm(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "マスタ .prm（FANUC）", self.e_master_prm.text(),
+            "パラメータ (*.prm *.txt);;すべて (*.*)")
+        if p:
+            self.e_master_prm.setText(p)
 
     def _with_browse(self, edit, slot):
         w = QtWidgets.QWidget()
@@ -1226,15 +1248,16 @@ class ParamDialog(QtWidgets.QDialog):
         if not self._ensure_changes():
             return
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "差分パラメータファイルを保存", f"{self._basename()}.prm",
-            "パラメータ (*.prm *.txt);;すべて (*.*)")
+            self, "差分（参考）を保存", f"{self._basename()}_差分参考.txt",
+            "テキスト (*.txt);;すべて (*.*)")
         if not p:
             return
         nc_param.save_param_file(p, self._changes, controller=self._selected_controller())
         QtWidgets.QMessageBox.information(
             self, "保存",
-            f"差分パラメータファイルを保存しました:\n{p}\n\n"
-            "※機械へ投入する前に、その制御の実機バックアップで書式を確認してください。")
+            f"差分（参考・要検証）を保存しました:\n{p}\n\n"
+            "※これは汎用形の参考ファイルです。FANUCはマスタ.prmから"
+            "「FANUC .prm 作成」で実ファイルを作ってください。")
 
     def export_both(self):
         """出力先（カード/LAN共有）へ 確認表＋差分ファイル を書き出す。"""
@@ -1253,7 +1276,7 @@ class ParamDialog(QtWidgets.QDialog):
         base = self._basename()
         try:
             chk = d / f"{base}_パラメータ確認表.txt"
-            prm = d / f"{base}.prm"
+            prm = d / f"{base}_差分参考.txt"
             nc_param.save_checklist(chk, self._checklist_text())
             nc_param.save_param_file(prm, self._changes,
                                      controller=self._selected_controller())
@@ -1266,6 +1289,48 @@ class ParamDialog(QtWidgets.QDialog):
             f"出力先に置きました:\n・{chk.name}\n・{prm.name}\n\n"
             "機械側で PWE=1 にして、確認表を見ながら入力してください"
             "（差分ファイルは書式確認後に使用）。")
+
+    def make_prm(self):
+        """FANUC: マスタ.prm を元に Seiban と一部の値を差し替えて出力先へ作成する。
+
+        マスタの構造はそのまま（書式バイト一致）。値はCSVの選択中の変更を反映し、
+        ファイル名は <Axis><Seiban>.prm（マスタの Axis＝T等＋入力した Seiban）。
+        """
+        from pathlib import Path
+        master_path = self.e_master_prm.text().strip()
+        out = self.e_out.text().strip()
+        seiban = self.e_seiban.text().strip()
+        if not master_path:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", "マスタ.prm を指定してください")
+            return
+        d = Path(out)
+        if not out or not d.is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "FANUC .prm", "出力先フォルダ/カードを指定してください（存在する場所）")
+            return
+        try:
+            master = prm_format.load_prm(master_path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"マスタ.prm を読めません:\n{e}")
+            return
+        values = {c.number: c.value for c in self._changes if c.number and c.value != ""}
+        headers = {"Seiban": seiban} if seiban else {}
+        doc, missing = prm_format.generate(master, headers, values)
+        fname = prm_format.default_filename(doc)
+        try:
+            prm_format.save_prm(d / fname, doc)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+            return
+        self._persist()
+        msg = (f"FANUC .prm を作成しました:\n・{fname}\n"
+               f"（マスタ {Path(master_path).name} を元に差替え）")
+        if values:
+            msg += f"\n値の差替え: {len(values) - len(missing)} 件"
+        if missing:
+            msg += f"\n⚠ マスタに無い番号（未反映）: {', '.join(missing)}"
+        msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     def _ensure_changes(self):
         if not self._changes:
@@ -1280,6 +1345,7 @@ class ParamDialog(QtWidgets.QDialog):
             self.settings.update(dict(
                 param_change_csv=self.e_csv.text().strip(),
                 param_master_backup=self.e_master.text().strip(),
+                param_master_prm=self.e_master_prm.text().strip(),
                 param_out_folder=self.e_out.text().strip(),
             ))
             save_settings(self.settings)

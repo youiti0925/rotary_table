@@ -236,6 +236,19 @@ class TestEntries(unittest.TestCase):
         self.assertEqual(P.controller_from_basic("/x/F30BASIC.PRM"), "F30")
         self.assertEqual(P.controller_from_basic("F31BASIC.prm"), "F31")
 
+    def test_creation_log_append(self):
+        import os, tempfile
+        log = os.path.join(tempfile.mkdtemp(), "log.csv")
+        P.append_log(log, {"日時": "2026/06/23 10:00", "型式": "RTT-137",
+                           "Seiban": "50013078", "出力ファイル": "T50013078.prm"})
+        P.append_log(log, {"日時": "2026/06/23 11:00", "型式": "RWE-200",
+                           "出力ファイル": "R12345.prm"})
+        rows = P.read_log(log)
+        self.assertEqual(rows[0], P.LOG_HEADER)         # ヘッダ
+        self.assertEqual(len(rows), 3)                  # ヘッダ＋2件（追記）
+        self.assertEqual(rows[1][P.LOG_HEADER.index("型式")], "RTT-137")
+        self.assertEqual(rows[2][P.LOG_HEADER.index("出力ファイル")], "R12345.prm")
+
     def test_axis_name_number(self):
         # 第1〜6軸 = X,Y,Z,A,B,C（第4軸が回転/傾斜の A 軸）
         self.assertEqual([P.axis_name(n) for n in range(1, 7)],

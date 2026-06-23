@@ -56,6 +56,53 @@ def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
     return out, missing, fmt
 
 
+def header_info(text: str) -> dict:
+    """ヘッダ＋CSV形式(.prm)からヘッダ情報を取り出す。N形式や非対応なら空 dict。
+
+    返すキー: motor(Motor Model), motor_no(Motor Number), direction(Direction),
+    gear(Gear Rate)。DBへ保存する付加情報。
+    """
+    if fanuc_param.looks_like_fanuc_prm(text):
+        return {}
+    try:
+        doc = prm_format.parse_prm(text)
+    except Exception:
+        return {}
+    out = {
+        "motor": prm_format.header_get(doc, "Motor Model", ""),
+        "motor_no": prm_format.header_get(doc, "Motor Number", ""),
+        "direction": prm_format.header_get(doc, "Direction", ""),
+        "gear": prm_format.header_get(doc, "Gear Rate", "").lstrip("'"),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def preview_rows(raw: str, values: dict, axis: int) -> list:
+    """作成前プレビュー用の [(番号, 旧値, 新値)]。旧値は BASIC(raw) のその軸の値。
+
+    N形式は指定軸(A<axis>)の値、ヘッダ＋CSV形式は番号の値を「旧値」とする。
+    """
+    is_fanuc = fanuc_param.looks_like_fanuc_prm(raw)
+    doc = None
+    if not is_fanuc:
+        try:
+            doc = prm_format.parse_prm(raw)
+        except Exception:
+            doc = None
+    rows = []
+    for num, newv in values.items():
+        if newv == "":
+            continue
+        if is_fanuc:
+            old = fanuc_param.get_value(raw, num, f"A{axis}")
+            if old is None:
+                old = fanuc_param.get_value(raw, num)
+        else:
+            old = prm_format.param_value(doc, num) if doc else None
+        rows.append((str(num), "" if old is None else str(old), str(newv)))
+    return rows
+
+
 def detect_mode(raw: str, values: dict, axis: int, *, number="1815", bit=1,
                 full_when=1) -> tuple:
     """変更後の実効 1815 値からクローズドループ種別を判定する。

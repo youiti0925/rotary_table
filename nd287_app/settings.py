@@ -109,6 +109,8 @@ DEFAULTS = dict(
     closed_loop_number="1815",
     closed_loop_bit=1,
     closed_loop_full=1,
+    # パラメータ作成ログ（追記式の厳密な履歴）。作成のたびに1行追記する。
+    param_log_csv=r"マスタ/パラメータ作成ログ.csv",
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
     fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提

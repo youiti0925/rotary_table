@@ -31,7 +31,10 @@ _COL_ALIASES = {
     "kind": ("種別", "回転傾斜", "傾斜回転", "kind", "type"),
     "controller": ("制御", "制御装置", "nc", "版", "cnc", "controller"),
     "mode": ("モード", "ループ", "クローズド", "semi/full", "mode", "loop"),
-    "motor": ("モーター", "モータ", "モータ型式", "motor"),
+    "motor": ("モーター", "モータ", "モータ型式", "motor model", "motor"),
+    "motor_no": ("モーター番号", "モータ番号", "motor number", "motor no"),
+    "direction": ("方向", "回転方向", "direction"),
+    "gear": ("ギア比", "ギヤ比", "減速比", "gear rate", "gear"),
     "basic": ("使用basic", "basic", "ベース", "使用ベーシック"),
     "number": ("番号", "パラメータ", "パラメータ番号", "param", "no", "number"),
     "axis": ("軸", "軸番号", "axis"),
@@ -158,8 +161,9 @@ def write_changes(path, changes: dict):
 # 製品データ差分／吸い出し差分／手入力 のどれからでも登録でき、検索・編集・削除・
 # リピート作成ができる。制御/軸/Seiban が違えば別エントリ＝作成履歴になる。
 
-ENTRY_HEADER = ["ID", "型式", "種別", "モード", "モーター", "制御", "軸",
-                "Seiban", "登録日", "使用BASIC", "番号", "変更値", "メモ"]
+ENTRY_HEADER = ["ID", "型式", "種別", "モード", "モーター", "モーター番号", "方向",
+                "ギア比", "制御", "軸", "Seiban", "登録日", "使用BASIC",
+                "番号", "変更値", "メモ"]
 
 
 def _s(x) -> str:
@@ -169,16 +173,20 @@ def _s(x) -> str:
 class ParamEntry:
     """データベースの1件（登録済み構成）。items は [(番号, 値, メモ)]。"""
 
-    __slots__ = ("id", "model", "kind", "mode", "motor", "controller", "axis",
-                 "seiban", "date", "basic", "items")
+    __slots__ = ("id", "model", "kind", "mode", "motor", "motor_no", "direction",
+                 "gear", "controller", "axis", "seiban", "date", "basic", "items")
 
     def __init__(self, model="", kind="", mode="", motor="", controller="",
-                 axis="", seiban="", date="", basic="", items=None, id=""):
+                 axis="", seiban="", date="", basic="", items=None, id="",
+                 motor_no="", direction="", gear=""):
         self.id = _s(id)
         self.model = _s(model)
         self.kind = _s(kind)
         self.mode = _s(mode)
         self.motor = _s(motor)
+        self.motor_no = _s(motor_no)
+        self.direction = _s(direction)
+        self.gear = _s(gear)
         self.controller = _s(controller)
         self.axis = _s(axis)
         self.seiban = _s(seiban)
@@ -199,8 +207,9 @@ class ParamEntry:
                 self.axis, self.seiban)
 
     def _meta(self):
-        return (self.model, self.kind, self.mode, self.motor, self.controller,
-                self.axis, self.seiban, self.date, self.basic, self.items)
+        return (self.model, self.kind, self.mode, self.motor, self.motor_no,
+                self.direction, self.gear, self.controller, self.axis,
+                self.seiban, self.date, self.basic, self.items)
 
 
 def parse_entries(text: str) -> list:
@@ -231,7 +240,9 @@ def parse_entries(text: str) -> list:
         e = entries.get(ekey)
         if e is None:
             e = ParamEntry(model=model, kind=cell(row, "kind"), mode=cell(row, "mode"),
-                           motor=cell(row, "motor"), controller=cell(row, "controller"),
+                           motor=cell(row, "motor"), motor_no=cell(row, "motor_no"),
+                           direction=cell(row, "direction"), gear=cell(row, "gear"),
+                           controller=cell(row, "controller"),
                            axis=cell(row, "axis"), seiban=cell(row, "seiban"),
                            date=cell(row, "date"), basic=cell(row, "basic"),
                            id=cell(row, "id") if has_id else "")
@@ -270,8 +281,8 @@ def write_entries(path, entries: list):
         w = csv.writer(f)
         w.writerow(ENTRY_HEADER)
         for e in entries:
-            meta = [e.id, e.model, e.kind, e.mode, e.motor, e.controller, e.axis,
-                    e.seiban, e.date, e.basic]
+            meta = [e.id, e.model, e.kind, e.mode, e.motor, e.motor_no, e.direction,
+                    e.gear, e.controller, e.axis, e.seiban, e.date, e.basic]
             if e.items:
                 for (num, val, memo) in e.items:
                     w.writerow(meta + [num, val, memo])
@@ -315,6 +326,8 @@ def upsert_entry(path, entry: ParamEntry) -> tuple:
                 return (e.id, "unchanged")
             e.model, e.kind, e.mode, e.motor = (entry.model, entry.kind,
                                                 entry.mode, entry.motor)
+            e.motor_no, e.direction, e.gear = (entry.motor_no, entry.direction,
+                                               entry.gear)
             e.controller, e.axis, e.seiban = (entry.controller, entry.axis,
                                               entry.seiban)
             e.date, e.basic, e.items = entry.date, entry.basic, entry.items
@@ -394,6 +407,39 @@ def axis_number(name) -> int:
         return AXIS_NAMES.index(s) + 1
     m = re.search(r"(\d+)", s)
     return int(m.group(1)) if m else 0
+
+
+# ===== 作成ログ（追記式の厳密な履歴） =====
+LOG_HEADER = ["日時", "型式", "種別", "モード", "モーター", "制御", "軸",
+              "Seiban", "使用BASIC", "出力ファイル", "反映", "件数"]
+
+
+def append_log(path, fields: dict):
+    """作成ログに1行追記する（上書きしない厳密な履歴）。fields は LOG_HEADER のキー。"""
+    from pathlib import Path
+    if not path:
+        return
+    p = Path(path)
+    new = not p.exists()
+    if p.parent and not p.parent.exists():
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+    with open(p, "a", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(LOG_HEADER)
+        w.writerow([_s(fields.get(k, "")) for k in LOG_HEADER])
+
+
+def read_log(path) -> list:
+    """作成ログを [行リスト] で返す（先頭はヘッダ）。無ければ空。"""
+    from pathlib import Path
+    if not path or not Path(path).exists():
+        return []
+    with open(path, "r", encoding="cp932", errors="replace", newline="") as f:
+        return list(csv.reader(f))
 
 
 def kind_from_prefix(prefix: str) -> str:

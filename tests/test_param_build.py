@@ -47,6 +47,26 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(B.filename("R", "12345"), "R12345.prm")
 
 
+class TestPreviewAndHeader(unittest.TestCase):
+    def test_preview_rows_old_new(self):
+        # 1825/A4 を 2500 に。旧値はBASICの A4=3000... ここでは BASIC_N の A4 値
+        rows = B.preview_rows(BASIC_N, {"01825": "2500", "02020": "300"}, axis=4)
+        d = {n: (o, nw) for (n, o, nw) in rows}
+        self.assertEqual(d["01825"], ("3000", "2500"))
+        self.assertEqual(d["02020"], ("303", "300"))
+
+    def test_header_info_empty_for_fanuc(self):
+        self.assertEqual(B.header_info(BASIC_N), {})
+
+    def test_header_info_from_header_csv(self):
+        from tests.test_prm_format import SAMPLE_PRM
+        h = B.header_info(SAMPLE_PRM)
+        self.assertEqual(h.get("motor"), "αiS4/5000-B")
+        self.assertEqual(h.get("motor_no"), "A06B-2215-B000")
+        self.assertEqual(h.get("direction"), "CCW")
+        self.assertEqual(h.get("gear"), "1/36")   # 先頭の ' は除去
+
+
 class TestDetectMode(unittest.TestCase):
     def test_full_on_axis4(self):
         # A4 は #1=1 → フル、A1 は #1=0 → セミ（軸で違う）

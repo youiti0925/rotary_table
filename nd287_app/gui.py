@@ -19,6 +19,7 @@
 """
 
 from pathlib import Path
+import re
 import threading
 import time
 
@@ -1010,6 +1011,100 @@ class ProgramDialog(QtWidgets.QDialog):
         dlg.exec()
 
 
+def _log_param_creation(settings, **f):
+    """パラメータ作成のたびに作成ログ(追記式)へ1行残す。失敗は無視（作成は成功扱い）。"""
+    path = settings.get("param_log_csv", "")
+    if not path:
+        return
+    p = Path(path)
+    if not p.is_absolute():
+        from .settings import app_dir
+        p = app_dir() / p
+    try:
+        nc_param.append_log(p, {
+            "日時": QtCore.QDateTime.currentDateTime().toString("yyyy/MM/dd HH:mm"),
+            "型式": f.get("model", ""), "種別": f.get("kind", ""),
+            "モード": f.get("mode", ""), "モーター": f.get("motor", ""),
+            "制御": f.get("controller", ""), "軸": f.get("axis", ""),
+            "Seiban": f.get("seiban", ""), "使用BASIC": f.get("basic", ""),
+            "出力ファイル": f.get("out", ""), "反映": f.get("applied", ""),
+            "件数": f.get("total", "")})
+    except Exception:
+        pass
+
+
+class ParamLogDialog(QtWidgets.QDialog):
+    """作成ログ（追記式の履歴）の閲覧。読み取り専用の一覧表示。"""
+
+    def __init__(self, parent, log_path):
+        super().__init__(parent)
+        self.setWindowTitle("パラメータ作成ログ")
+        self.resize(900, 520)
+        v = QtWidgets.QVBoxLayout(self)
+        rows = nc_param.read_log(log_path)
+        if not rows:
+            v.addWidget(QtWidgets.QLabel(f"ログがありません:\n{log_path}"))
+        else:
+            header, body = rows[0], rows[1:]
+            body = list(reversed(body))      # 新しい順
+            t = QtWidgets.QTableWidget(len(body), len(header))
+            t.setHorizontalHeaderLabels(header)
+            t.verticalHeader().setVisible(False)
+            t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            for i, r in enumerate(body):
+                for j in range(len(header)):
+                    t.setItem(i, j, QtWidgets.QTableWidgetItem(r[j] if j < len(r) else ""))
+            t.resizeColumnsToContents()
+            t.horizontalHeader().setStretchLastSection(True)
+            v.addWidget(t, 1)
+            v.addWidget(QtWidgets.QLabel(f"{len(body)} 件　{log_path}"))
+        b = QtWidgets.QPushButton("閉じる"); b.clicked.connect(self.accept)
+        row = QtWidgets.QHBoxLayout(); row.addStretch(1); row.addWidget(b)
+        v.addLayout(row)
+
+
+class ParamPreviewDialog(QtWidgets.QDialog):
+    """作成前プレビュー: BASIC の旧値 → これから書き込む新値 を一覧で確認する。
+
+    入力ミス防止のため、書き込む前に「番号・旧値→新値」を見せて OK/中止を選ぶ。
+    旧値と新値が違う行を強調する。
+    """
+
+    def __init__(self, parent, rows, subtitle=""):
+        super().__init__(parent)
+        self.setWindowTitle("作成前プレビュー（旧値→新値）")
+        self.resize(520, 460)
+        v = QtWidgets.QVBoxLayout(self)
+        changed = sum(1 for (_n, o, nw) in rows if o != nw)
+        head = QtWidgets.QLabel(
+            (subtitle + "\n" if subtitle else "")
+            + f"全 {len(rows)} 件中 {changed} 件が BASIC と異なります。"
+              "内容を確認して『作成』を押してください。")
+        head.setWordWrap(True)
+        v.addWidget(head)
+        t = QtWidgets.QTableWidget(len(rows), 3)
+        t.setHorizontalHeaderLabels(["番号", "旧値(BASIC)", "新値"])
+        t.verticalHeader().setVisible(False)
+        t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        t.horizontalHeader().setStretchLastSection(True)
+        for i, (num, old, new) in enumerate(rows):
+            for j, text in enumerate((num, old, new)):
+                it = QtWidgets.QTableWidgetItem(text)
+                if old != new and j == 2:
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+                t.setItem(i, j, it)
+        t.resizeColumnsToContents()
+        t.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(t, 1)
+        bb = QtWidgets.QDialogButtonBox()
+        ok = bb.addButton("作成", QtWidgets.QDialogButtonBox.AcceptRole)
+        ok.setObjectName("primary")
+        bb.addButton("中止", QtWidgets.QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+
 class ParamDialog(QtWidgets.QDialog):
     """製品ごとのパラメータ変更（差分）の確認表・差分ファイルを作る。
 
@@ -1442,25 +1537,50 @@ class ParamDialog(QtWidgets.QDialog):
             return
         prefix = self.cmb_prefix.currentData() or "T"
         axis = int(self.cmb_axis.currentData() or 4)
+        # 作成前プレビュー（旧値→新値）。中止なら書き込まない
+        rows = param_build.preview_rows(raw, values, axis)
+        fname = param_build.filename(prefix, seiban)
+        if not ParamPreviewDialog(
+                self, rows,
+                subtitle=f"{self.e_model.text().strip() or '—'} → {fname}"
+                         f"（{nc_param.axis_name(axis)} 軸）").exec():
+            return
         try:
             newtext, missing, fmt = param_build.build_text(raw, values, axis, seiban)
-            out_path = d / param_build.filename(prefix, seiban)
+            out_path = d / fname
             param_build.write_text(out_path, newtext)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
             return
-        fname = out_path.name
         note = (f"BASIC {Path(master_path).name} の {nc_param.axis_name(axis)} 軸を製品値に変更"
                 if fmt == "fanuc" else f"{Path(master_path).name} を元に差替え")
         mode, eff = self._detect_mode(raw, values, axis)
         self._persist()
+        _log_param_creation(
+            self.settings, model=self.e_model.text().strip(),
+            kind=nc_param.kind_from_prefix(prefix), mode=mode,
+            controller=nc_param.controller_from_basic(master_path),
+            axis=nc_param.axis_name(axis), seiban=seiban,
+            basic=Path(master_path).name, out=fname,
+            applied=len(values) - len(missing), total=len(values))
         # 製品データ（完成済み.prm）から抽出した「変更点」だけをデータベースへ登録し、
         # 次回は同じ型式を製品データ無しでも作れるようにする（source=="diff" のときだけ）。
         reg_msg = ""
         if source == "diff":
+            # 製品データ/BASIC がヘッダ＋CSV形式ならヘッダ情報(方向・ギア比・モーター等)も拾う
+            hinfo = {}
+            ppath = self.e_product.text().strip()
+            try:
+                if ppath:
+                    hinfo = param_build.header_info(
+                        Path(ppath).read_text(encoding="cp932", errors="replace"))
+                if not hinfo:
+                    hinfo = param_build.header_info(raw)
+            except Exception:
+                hinfo = {}
             reg_msg = self._register_to_db(
                 values, mode=mode, seiban=seiban, axis=axis, prefix=prefix,
-                basic=Path(master_path).name)
+                basic=Path(master_path).name, header=hinfo)
         msg = (f"FANUC .prm を作成しました:\n・{fname}\n（{note}）"
                f"\n値の反映: {len(values) - len(missing)} / {len(values)} 件")
         if mode:
@@ -1482,10 +1602,11 @@ class ParamDialog(QtWidgets.QDialog):
             full_when=int(self.settings.get("closed_loop_full", 1)))
 
     def _register_to_db(self, values: dict, *, mode="", seiban="", axis="",
-                        prefix="", basic="") -> str:
+                        prefix="", basic="", header=None) -> str:
         """抽出した変更をデータベース（変更表CSV）へ1エントリとして登録し、結果文を返す。
 
         型式が空なら登録しない。制御は『使うBASIC』名から推定（無ければ制御プルダウン）。
+        header があれば モーター/方向/ギア比 等のヘッダ情報も保存する。
         """
         model = self.e_model.text().strip()
         csv_path = self.e_csv.text().strip()
@@ -1495,11 +1616,13 @@ class ParamDialog(QtWidgets.QDialog):
             return "\n（変更表CSVが未指定のため、登録はスキップしました）"
         controller = (nc_param.controller_from_basic(basic) if basic
                       else self._selected_controller())
+        h = header or {}
         entry = nc_param.ParamEntry(
             model=model, kind=nc_param.kind_from_prefix(prefix), mode=mode,
             controller=controller, axis=nc_param.axis_name(axis) if axis else "",
             seiban=seiban, date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
-            basic=basic,
+            basic=basic, motor=h.get("motor", ""), motor_no=h.get("motor_no", ""),
+            direction=h.get("direction", ""), gear=h.get("gear", ""),
             items=[(num, val, "") for num, val in values.items() if val != ""])
         try:
             eid, action = nc_param.upsert_entry(csv_path, entry)
@@ -1585,11 +1708,12 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
     KINDS = ["", "傾斜", "回転"]
     MODES = ["", "フル", "セミ"]
 
-    def __init__(self, parent, entry=None, defaults=None):
+    def __init__(self, parent, entry=None, defaults=None, existing=None):
         super().__init__(parent)
         self.setWindowTitle("エントリの入力／編集")
-        self.resize(560, 560)
+        self.resize(580, 620)
         self.result_entry = None
+        self._existing = existing or []     # 重複チェック用の既存エントリ
         defaults = defaults or {}
         v = QtWidgets.QVBoxLayout(self)
 
@@ -1600,6 +1724,12 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
         self.cmb_mode = QtWidgets.QComboBox(); self.cmb_mode.addItems(self.MODES)
         self.e_motor = QtWidgets.QLineEdit(entry.motor if entry else "")
         self.e_motor.setPlaceholderText("モーター型式（任意）")
+        self.e_motor_no = QtWidgets.QLineEdit(entry.motor_no if entry else "")
+        self.e_motor_no.setPlaceholderText("モーター番号（任意）")
+        self.e_direction = QtWidgets.QLineEdit(entry.direction if entry else "")
+        self.e_direction.setPlaceholderText("方向（任意）")
+        self.e_gear = QtWidgets.QLineEdit(entry.gear if entry else "")
+        self.e_gear.setPlaceholderText("ギア比（任意 例 1/36）")
         self.e_ctrl = QtWidgets.QLineEdit(entry.controller if entry else defaults.get("controller", ""))
         self.e_ctrl.setPlaceholderText("制御装置（例 F30）")
         self.cmb_axis = QtWidgets.QComboBox()
@@ -1617,6 +1747,11 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
         kr.addWidget(self.cmb_mode); kr.addWidget(QtWidgets.QLabel("軸")); kr.addWidget(self.cmb_axis)
         form.addRow("種別", kr)
         form.addRow("モーター", self.e_motor)
+        mr = QtWidgets.QHBoxLayout(); mr.setContentsMargins(0, 0, 0, 0)
+        mr.addWidget(self.e_motor_no, 1)
+        mr.addWidget(QtWidgets.QLabel("方向")); mr.addWidget(self.e_direction, 1)
+        mr.addWidget(QtWidgets.QLabel("ギア比")); mr.addWidget(self.e_gear, 1)
+        form.addRow("モーター番号", mr)
         form.addRow("制御装置", self.e_ctrl)
         form.addRow("Seiban", self.e_seiban)
         form.addRow("使用BASIC", self.e_basic)
@@ -1695,14 +1830,53 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
         if not items:
             QtWidgets.QMessageBox.warning(self, "入力", "番号と変更値を1件以上入れてください")
             return
-        self.result_entry = nc_param.ParamEntry(
+        # 形式チェック（番号は数字、値はビット列/数値らしいか）。怪しければ警告して続行可
+        bad = []
+        for (num, val, _m) in items:
+            if not re.fullmatch(r"\d{1,5}", num):
+                bad.append(f"番号『{num}』は数字ではありません")
+            elif val and not self._looks_value(val):
+                bad.append(f"番号 {num} の値『{val}』が数値/ビット列に見えません")
+        if bad:
+            msg = "次の入力を確認してください:\n・" + "\n・".join(bad[:8])
+            if len(bad) > 8:
+                msg += f"\n…他{len(bad) - 8}件"
+            msg += "\n\nこのまま登録しますか？"
+            if QtWidgets.QMessageBox.question(self, "入力チェック", msg) != \
+                    QtWidgets.QMessageBox.Yes:
+                return
+        entry = nc_param.ParamEntry(
             model=model, kind=self.cmb_kind.currentText(),
             mode=self.cmb_mode.currentText(), motor=self.e_motor.text().strip(),
+            motor_no=self.e_motor_no.text().strip(),
+            direction=self.e_direction.text().strip(), gear=self.e_gear.text().strip(),
             controller=self.e_ctrl.text().strip(), axis=self.cmb_axis.currentText(),
             seiban=self.e_seiban.text().strip(),
             date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
             basic=self.e_basic.text().strip(), items=items, id=self._entry_id)
+        # 重複（同じ 型式・モード・制御・軸・Seiban）が別IDで既にあれば確認
+        dup = next((e for e in self._existing
+                    if e.config_key() == entry.config_key() and e.id != self._entry_id), None)
+        if dup:
+            if QtWidgets.QMessageBox.question(
+                    self, "重複の確認",
+                    f"同じ構成（型式『{entry.model}』{('／'+entry.mode+'クロ') if entry.mode else ''}"
+                    f"／制御 {entry.controller or '—'}／{entry.axis or '—'} 軸"
+                    f"／Seiban {entry.seiban or '—'}）が既に登録されています（ID {dup.id}）。\n"
+                    "上書き更新しますか？") != QtWidgets.QMessageBox.Yes:
+                return
+        self.result_entry = entry
         self.accept()
+
+    @staticmethod
+    def _looks_value(v: str) -> bool:
+        """値がビット列(0/1) か 符号付き数値 らしいか。先頭の ' は許容。"""
+        s = v.lstrip("'").strip()
+        if not s:
+            return True
+        if re.fullmatch(r"[01]{1,8}", s):
+            return True
+        return bool(re.fullmatch(r"[-+]?\d+(\.\d+)?", s))
 
 
 class ParamDBDialog(QtWidgets.QDialog):
@@ -1714,8 +1888,8 @@ class ParamDBDialog(QtWidgets.QDialog):
     制御装置からの吸い出し差分登録もできる。セミ/フルは 1815 で判定して表示。
     """
 
-    COLS = ["ID", "型式", "種別", "モード", "モーター", "制御", "軸",
-            "Seiban", "登録日", "件数", "使用BASIC"]
+    COLS = ["ID", "型式", "種別", "モード", "モーター", "モーター番号", "方向",
+            "ギア比", "制御", "軸", "Seiban", "登録日", "件数", "使用BASIC"]
 
     def __init__(self, owner: "ParamDialog"):
         super().__init__(owner)
@@ -1774,7 +1948,8 @@ class ParamDBDialog(QtWidgets.QDialog):
         # --- エントリ操作 ---
         erow = QtWidgets.QHBoxLayout()
         for label, slot in (("新規入力…", self.new_entry), ("編集…", self.edit_entry),
-                            ("複製…", self.dup_entry), ("削除", self.delete_entry)):
+                            ("複製…", self.dup_entry), ("削除", self.delete_entry),
+                            ("作成ログ…", self.show_log)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(slot)
             erow.addWidget(b)
         erow.addStretch(1)
@@ -1871,8 +2046,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         self._rows = rows
         self.tbl.setRowCount(len(rows))
         for i, e in enumerate(rows):
-            cells = [e.id, e.model, e.kind, e.mode or "—", e.motor, e.controller,
-                     e.axis, e.seiban, e.date, str(e.count()), e.basic]
+            cells = [e.id, e.model, e.kind, e.mode or "—", e.motor, e.motor_no,
+                     e.direction, e.gear, e.controller, e.axis, e.seiban, e.date,
+                     str(e.count()), e.basic]
             for j, text in enumerate(cells):
                 it = QtWidgets.QTableWidgetItem(text)
                 if j == 3 and e.mode == "フル":
@@ -1958,7 +2134,8 @@ class ParamDBDialog(QtWidgets.QDialog):
             return
         dlg = ParamEntryEditDialog(self, defaults={
             "model": self.owner.e_model.text().strip(),
-            "controller": self.owner._selected_controller()})
+            "controller": self.owner._selected_controller()},
+            existing=self._entries)
         if dlg.exec() and dlg.result_entry:
             self._backup_csv()
             eid, action = nc_param.upsert_entry(self._csv_path(), dlg.result_entry)
@@ -1970,7 +2147,7 @@ class ParamDBDialog(QtWidgets.QDialog):
         if not e:
             QtWidgets.QMessageBox.warning(self, "編集", "エントリを選んでください")
             return
-        dlg = ParamEntryEditDialog(self, entry=e)
+        dlg = ParamEntryEditDialog(self, entry=e, existing=self._entries)
         if dlg.exec() and dlg.result_entry:
             self._backup_csv()
             nc_param.update_entry(self._csv_path(), dlg.result_entry)
@@ -1983,9 +2160,10 @@ class ParamDBDialog(QtWidgets.QDialog):
             return
         copy = nc_param.ParamEntry(
             model=e.model, kind=e.kind, mode=e.mode, motor=e.motor,
+            motor_no=e.motor_no, direction=e.direction, gear=e.gear,
             controller=e.controller, axis=e.axis, seiban="", basic=e.basic,
             items=list(e.items))      # idは空・Seiban空で新規あつかい
-        dlg = ParamEntryEditDialog(self, entry=copy)
+        dlg = ParamEntryEditDialog(self, entry=copy, existing=self._entries)
         if dlg.exec() and dlg.result_entry:
             self._backup_csv()
             nc_param.upsert_entry(self._csv_path(), dlg.result_entry)
@@ -2006,6 +2184,15 @@ class ParamDBDialog(QtWidgets.QDialog):
         self._backup_csv()
         nc_param.delete_entry(self._csv_path(), e.id)
         self.reload()
+
+    def show_log(self):
+        """作成ログ（追記式の厳密な履歴）を開く。"""
+        path = self.settings.get("param_log_csv", "")
+        p = Path(path)
+        if path and not p.is_absolute():
+            from .settings import app_dir
+            p = app_dir() / p
+        ParamLogDialog(self, str(p)).exec()
 
     # ----- リピート作成（作成すると履歴に登録） -----
     def make_from_entry(self):
@@ -2032,12 +2219,30 @@ class ParamDBDialog(QtWidgets.QDialog):
             return
         axis = int(self.cmb_axis.currentData() or 4)
         prefix = self.cmb_prefix.currentData() or "T"
+        # 作成前プレビュー（旧値→新値）。中止なら作らない
+        try:
+            raw = param_build.read_master(master)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{ex}")
+            return
+        rows = param_build.preview_rows(raw, values, axis)
+        fname = param_build.filename(prefix, seiban)
+        if not ParamPreviewDialog(
+                self, rows,
+                subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）").exec():
+            return
         try:
             out_path, missing, fmt = param_build.create_file(
                 master, out, values, axis=axis, prefix=prefix, seiban=seiban)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return
+        _log_param_creation(
+            self.settings, model=e.model, kind=nc_param.kind_from_prefix(prefix),
+            mode=e.mode, motor=e.motor,
+            controller=nc_param.controller_from_basic(master),
+            axis=nc_param.axis_name(axis), seiban=seiban, basic=Path(master).name,
+            out=out_path.name, applied=len(values) - len(missing), total=len(values))
         # 作成＝履歴登録（制御/軸/Seibanが変われば別エントリとして残る）
         reg = ""
         if self._csv_path():

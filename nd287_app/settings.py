@@ -104,6 +104,11 @@ DEFAULTS = dict(
     param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
     param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
+    # クローズドループ判定（DB表示用）。既定は FANUC 1815 #1(OPTx=別置検出器)=1 → フルクロ、
+    # 0 → セミクロ。機種でビット/番号が違うことがあるので変更可（生値表示と併用し人が確認）。
+    closed_loop_number="1815",
+    closed_loop_bit=1,
+    closed_loop_full=1,
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
     fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提

@@ -150,5 +150,31 @@ class TestApplyToAxis(unittest.TestCase):
         self.assertEqual(F.get_value(new, "02020", "A1"), "255")
 
 
+class TestClosedLoop(unittest.TestCase):
+    def test_bit_string_msb_first(self):
+        # FANUC表示 #7…#0。'00100000' は #5=1, #1=0 → セミ（既定 #1）
+        self.assertEqual(F.closed_loop_mode("00100000"), "セミ")
+        self.assertEqual(F.closed_loop_mode("'00100000"), "セミ")  # 先頭'除去
+        self.assertEqual(F.closed_loop_mode("00000010"), "フル")    # #1=1
+
+    def test_integer_value(self):
+        self.assertEqual(F.closed_loop_mode("2"), "フル")   # bit1=1
+        self.assertEqual(F.closed_loop_mode("0"), "セミ")
+        self.assertEqual(F.closed_loop_mode("3"), "フル")
+
+    def test_configurable_bit_and_polarity(self):
+        self.assertEqual(F.closed_loop_mode("00100000", bit=5), "フル")
+        self.assertEqual(F.closed_loop_mode("00000000", bit=1, full_when=0), "フル")
+
+    def test_unknown_value(self):
+        self.assertEqual(F.closed_loop_mode(""), "")
+        self.assertEqual(F.closed_loop_mode("abc"), "")
+
+    def test_effective_value(self):
+        # 変更にあればそれ、無ければBASICの値（ゼロ詰めゆらぎ吸収）
+        self.assertEqual(F.effective_value(SAMPLE, {"01825": "x"}, "1825", "A4"), "x")
+        self.assertEqual(F.effective_value(SAMPLE, {}, "1825", "A4"), "3000")
+
+
 if __name__ == "__main__":
     unittest.main()

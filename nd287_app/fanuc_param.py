@@ -174,3 +174,47 @@ def diff(master_text: str, other_text: str) -> list:
             changed.append((number, label, mv, ov))
     return changed
 
+
+def effective_value(master_text: str, values: dict, number, label: str = None):
+    """変更後の実効値を返す: values に number があればその値、無ければマスタ(BASIC)の値。
+
+    番号は5桁ゼロ詰めゆらぎを吸収して照合する（'1815'と'01815'を同一視）。
+    """
+    num = _norm_num(number)
+    for k, v in values.items():
+        if _norm_num(k) == num:
+            return v
+    return get_value(master_text, number, label)
+
+
+def _bit_of(value, bit: int):
+    """ビットパラメータ value の bit 番ビット(0/1)を返す。判別不能なら None。
+
+    value は '00100000' のようなビット列（FANUC表示=左がMSB #7…#0）でも、
+    10進整数の文字列でもよい。先頭の ' や " 空白は除去する。
+    """
+    s = str(value).strip().lstrip("'\"").strip()
+    if not s:
+        return None
+    if set(s) <= {"0", "1"} and len(s) > 1:   # ビット列（左がMSB）
+        s = s.zfill(bit + 1)
+        return 1 if s[len(s) - 1 - bit] == "1" else 0
+    try:
+        n = int(s, 10)
+    except ValueError:
+        return None
+    return (n >> bit) & 1
+
+
+def closed_loop_mode(value, bit: int = 1, full_when: int = 1) -> str:
+    """クローズドループ種別を返す: 'フル' / 'セミ' / ''（判別不能）。
+
+    既定は FANUC 1815 の #1(OPTx＝別置検出器)。1ならフルクローズ（別置スケール）、
+    0ならセミクローズ（モータ内蔵検出器）。機種で番号/ビットが違う場合に備えて
+    bit・full_when を引数化（設定から渡せる）。値の生表示と併用して人が確認する前提。
+    """
+    b = _bit_of(value, bit)
+    if b is None:
+        return ""
+    return "フル" if b == full_when else "セミ"
+

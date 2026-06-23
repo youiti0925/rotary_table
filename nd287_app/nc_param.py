@@ -28,10 +28,13 @@ import re
 _COL_ALIASES = {
     "model": ("型式", "機種", "品種", "製品", "model"),
     "controller": ("制御", "制御装置", "nc", "版", "cnc", "controller"),
+    "mode": ("モード", "ループ", "クローズド", "semi/full", "mode", "loop"),
     "number": ("番号", "パラメータ", "パラメータ番号", "param", "no", "number"),
     "axis": ("軸", "軸番号", "axis"),
     "value": ("変更値", "値", "設定値", "value", "data"),
     "note": ("メモ", "備考", "説明", "項目", "note", "memo"),
+    "seiban": ("seiban", "受注伝票番号", "受注伝票", "伝票番号", "製番"),
+    "date": ("登録日", "日付", "更新日", "date"),
 }
 
 
@@ -50,29 +53,41 @@ def normalize_model(text: str) -> str:
 
 class ParamChange:
     """1件の変更。controller=制御(MELDAS-60/FANUC等。無ければ全制御共通),
-    number=パラメータ番号, axis=軸(無ければ ""), value=変更後の値。"""
+    mode=クローズドループ種別(フル/セミ。1815等で判別。同番号でもセミ/フルで別物),
+    number=パラメータ番号, axis=軸(無ければ ""), value=変更後の値。
+    seiban/date は由来（登録元の受注伝票番号・登録日）でメタ情報。"""
 
-    __slots__ = ("controller", "number", "axis", "value", "note")
+    __slots__ = ("controller", "mode", "number", "axis", "value", "note",
+                 "seiban", "date")
 
-    def __init__(self, number, axis="", value="", note="", controller=""):
+    def __init__(self, number, axis="", value="", note="", controller="",
+                 mode="", seiban="", date=""):
         self.controller = str(controller or "").strip()
+        self.mode = str(mode or "").strip()
         self.number = str(number).strip()
         self.axis = str(axis or "").strip()
         self.value = str(value).strip()
         self.note = str(note or "").strip()
+        self.seiban = str(seiban or "").strip()
+        self.date = str(date or "").strip()
 
     def __eq__(self, other):
         return isinstance(other, ParamChange) and (
-            self.controller, self.number, self.axis, self.value, self.note
-        ) == (other.controller, other.number, other.axis, other.value, other.note)
+            self.controller, self.mode, self.number, self.axis, self.value,
+            self.note, self.seiban, self.date
+        ) == (other.controller, other.mode, other.number, other.axis,
+              other.value, other.note, other.seiban, other.date)
 
     def __repr__(self):
         return (f"ParamChange({self.number!r},{self.axis!r},{self.value!r},"
-                f"{self.note!r},ctrl={self.controller!r})")
+                f"{self.note!r},ctrl={self.controller!r},mode={self.mode!r})")
 
     def key(self):
-        """同一パラメータ判定キー（制御＋番号＋軸）。"""
-        return (self.controller, self.number, self.axis)
+        """同一パラメータ判定キー（制御＋モード＋番号＋軸）。
+
+        モードを含めるのが要点: セミクロとフルクロは同じ型式・同じ番号でも
+        値が違う別物なので、混ざらないよう別キーにする。"""
+        return (self.controller, self.mode, self.number, self.axis)
 
 
 def parse_changes(text: str) -> dict:
@@ -102,7 +117,9 @@ def parse_changes(text: str) -> dict:
         model = cell(row, "model")
         change = ParamChange(number, cell(row, "axis"),
                              cell(row, "value"), cell(row, "note"),
-                             controller=cell(row, "controller"))
+                             controller=cell(row, "controller"),
+                             mode=cell(row, "mode"),
+                             seiban=cell(row, "seiban"), date=cell(row, "date"))
         bucket = out.setdefault(model, [])
         # 同じ番号(＋軸)は後勝ちで置き換え
         for i, ex in enumerate(bucket):
@@ -123,10 +140,12 @@ def write_changes(path, changes: dict):
     """{型式: [ParamChange]} を CSV に保存（編集UIからの書き戻し用）。"""
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["型式", "制御", "番号", "軸", "変更値", "メモ"])
+        w.writerow(["型式", "制御", "モード", "番号", "軸", "変更値", "メモ",
+                    "Seiban", "登録日"])
         for model, items in changes.items():
             for c in items:
-                w.writerow([model, c.controller, c.number, c.axis, c.value, c.note])
+                w.writerow([model, c.controller, c.mode, c.number, c.axis,
+                            c.value, c.note, c.seiban, c.date])
 
 
 def register_changes(path, model, items) -> tuple:
@@ -163,8 +182,8 @@ def register_changes(path, model, items) -> tuple:
     for ch in items:
         for i, ex in enumerate(bucket):
             if ex.key() == ch.key():
-                if not ch.note and ex.note:  # 既存メモを消さない
-                    ch = ParamChange(ch.number, ch.axis, ch.value, ex.note, ch.controller)
+                if not ch.note and ex.note:  # 既存メモは消さない
+                    ch.note = ex.note
                 if bucket[i] != ch:
                     updated += 1
                 bucket[i] = ch
@@ -213,6 +232,91 @@ def controllers_for_model(changes: dict, model: str) -> list:
         if x.controller and x.controller not in seen:
             seen.append(x.controller)
     return seen
+
+
+# ===== パラメータ作成データベース（登録CSVを「集合」単位で扱う） =====
+# 1セット＝(型式, 制御, モード) で束ねた変更群。セミ/フルは別セットになる。
+
+class ParamSet:
+    """データベースの1件（登録された変更セット）。"""
+
+    __slots__ = ("model", "controller", "mode", "items", "seiban", "date")
+
+    def __init__(self, model, controller, mode, items, seiban="", date=""):
+        self.model = model
+        self.controller = controller
+        self.mode = mode
+        self.items = items            # [ParamChange]
+        self.seiban = seiban          # 代表（最新）の受注伝票番号
+        self.date = date              # 代表（最新）の登録日
+
+    def count(self):
+        return len(self.items)
+
+    def values(self):
+        """{番号: 値}（このセットを使って作成するときの変更値）。"""
+        return {c.number: c.value for c in self.items if c.number and c.value != ""}
+
+
+def list_sets(changes: dict) -> list:
+    """{型式:[ParamChange]} を (型式, 制御, モード) ごとの ParamSet 一覧にする。
+
+    一覧・検索・フィルタ用。seiban/date はセット内で最後に現れたものを代表とする。
+    並びは 型式→制御→モード。
+    """
+    groups = {}
+    order = []
+    for model, items in changes.items():
+        for c in items:
+            k = (model, c.controller, c.mode)
+            if k not in groups:
+                groups[k] = []
+                order.append(k)
+            groups[k].append(c)
+    sets = []
+    for k in order:
+        items = groups[k]
+        seiban = next((c.seiban for c in reversed(items) if c.seiban), "")
+        date = next((c.date for c in reversed(items) if c.date), "")
+        sets.append(ParamSet(k[0], k[1], k[2], items, seiban, date))
+    sets.sort(key=lambda s: (normalize_model(s.model), s.controller, s.mode))
+    return sets
+
+
+def changes_for_set(changes: dict, model: str, controller: str, mode: str) -> list:
+    """データベースの1セット（型式・制御・モードが一致）の変更リストを返す。"""
+    out = []
+    for c in _model_items(changes, model):
+        if (c.controller or "") == (controller or "") and (c.mode or "") == (mode or ""):
+            out.append(c)
+    return out
+
+
+def search_sets(sets: list, query: str = "", model: str = "", controller: str = "",
+                mode: str = "") -> list:
+    """セット一覧を検索・フィルタする。
+
+    query: 型式/制御/モード/Seiban/番号/メモ を横断する部分一致（空なら無視）。
+    model/controller/mode: それぞれ完全（型式は正規化）一致で絞る（空なら無視）。
+    """
+    q = (query or "").strip().lower()
+    mdl = normalize_model(model) if model else ""
+    out = []
+    for s in sets:
+        if mdl and normalize_model(s.model) != mdl:
+            continue
+        if controller and s.controller != controller:
+            continue
+        if mode and s.mode != mode:
+            continue
+        if q:
+            hay = " ".join([s.model, s.controller, s.mode, s.seiban, s.date]
+                           + [c.number for c in s.items]
+                           + [c.note for c in s.items]).lower()
+            if q not in hay:
+                continue
+        out.append(s)
+    return out
 
 
 def parse_param_backup(text: str) -> dict:

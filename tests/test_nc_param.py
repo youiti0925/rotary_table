@@ -31,8 +31,8 @@ class TestParseChanges(unittest.TestCase):
 
     def test_blank_rows_skipped_and_last_wins(self):
         rtt = self.changes["RTT-315"]
-        # 1825/軸1 は後勝ちで 8500、番号は重複しない（制御欄なし＝""）
-        v = [c for c in rtt if c.key() == ("", "1825", "1")]
+        # 1825/軸1 は後勝ちで 8500、番号は重複しない（制御""・モード""）
+        v = [c for c in rtt if c.key() == ("", "", "1825", "1")]
         self.assertEqual(len(v), 1)
         self.assertEqual(v[0].value, "8500")
         # 1826, 3003 も読めている
@@ -183,6 +183,67 @@ class TestRegisterChanges(unittest.TestCase):
         self.assertEqual(P.register_changes("", "M", [P.ParamChange("1", "", "1")]),
                          (0, 0))
         self.assertEqual(P.register_changes(self.path, "M", []), (0, 0))
+
+
+class TestDatabaseSets(unittest.TestCase):
+    """データベース（セット単位＝型式×制御×モード）の一覧・検索・セミ/フル区別。"""
+
+    def setUp(self):
+        import tempfile, os
+        self.path = os.path.join(tempfile.mkdtemp(), "db.csv")
+        # 同じ型式・同じ番号でも セミ/フル は別セット
+        P.register_changes(self.path, "RTT-137",
+                           [P.ParamChange("1825", "", "3000", controller="FANUC",
+                                          mode="フル", seiban="50013078", date="2026/06/23")])
+        P.register_changes(self.path, "RTT-137",
+                           [P.ParamChange("1825", "", "2000", controller="FANUC",
+                                          mode="セミ", seiban="50099999", date="2026/06/24")])
+        P.register_changes(self.path, "RWE-200",
+                           [P.ParamChange("2020", "", "265", controller="MELDAS",
+                                          mode="フル")])
+        self.changes = P.load_changes(self.path)
+
+    def test_semi_full_kept_separate(self):
+        # 同型式・同番号(1825)でも セミ/フル の2セットが共存する
+        sets = P.list_sets(self.changes)
+        rtt = [s for s in sets if P.normalize_model(s.model) == P.normalize_model("RTT-137")]
+        self.assertEqual({s.mode for s in rtt}, {"フル", "セミ"})
+        full = next(s for s in rtt if s.mode == "フル")
+        semi = next(s for s in rtt if s.mode == "セミ")
+        self.assertEqual(full.values()["1825"], "3000")
+        self.assertEqual(semi.values()["1825"], "2000")
+
+    def test_set_metadata(self):
+        sets = P.list_sets(self.changes)
+        full = next(s for s in sets
+                    if s.mode == "フル" and "137" in s.model)
+        self.assertEqual(full.seiban, "50013078")
+        self.assertEqual(full.date, "2026/06/23")
+        self.assertEqual(full.controller, "FANUC")
+
+    def test_changes_for_set(self):
+        semi = P.changes_for_set(self.changes, "RTT-137", "FANUC", "セミ")
+        self.assertEqual(len(semi), 1)
+        self.assertEqual(semi[0].value, "2000")
+
+    def test_search_by_query(self):
+        sets = P.list_sets(self.changes)
+        # Seiban で検索
+        self.assertEqual(len(P.search_sets(sets, "50099999")), 1)
+        # 番号で検索（1825 を含むセットは RTT-137 の2つ）
+        self.assertEqual(len(P.search_sets(sets, "1825")), 2)
+
+    def test_filter_by_mode_and_controller(self):
+        sets = P.list_sets(self.changes)
+        self.assertEqual(len(P.search_sets(sets, mode="セミ")), 1)
+        self.assertEqual(len(P.search_sets(sets, controller="MELDAS")), 1)
+        self.assertEqual(len(P.search_sets(sets, model="RTT-137", mode="フル")), 1)
+
+    def test_csv_roundtrip_keeps_mode(self):
+        again = P.load_changes(self.path)
+        semi = P.changes_for_set(again, "RTT-137", "FANUC", "セミ")
+        self.assertEqual(semi[0].mode, "セミ")
+        self.assertEqual(semi[0].value, "2000")
 
 
 class TestParamFile(unittest.TestCase):

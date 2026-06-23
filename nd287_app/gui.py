@@ -106,6 +106,7 @@ from . import fanuc_alarms
 from . import nc_param
 from . import prm_format
 from . import fanuc_param
+from . import param_build
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1167,9 +1168,13 @@ class ParamDialog(QtWidgets.QDialog):
         b_prm.setToolTip("マスタ.prm を元に Seiban と一部の値を差し替えて "
                          "<軸><Seiban>.prm を出力先へ作成（FANUC）")
         b_prm.clicked.connect(self.make_prm)
+        b_db = QtWidgets.QPushButton("パラメータDB…")
+        b_db.setToolTip("登録済みの変更を検索・フィルタし、リピート品を瞬時に作成"
+                        "（制御/軸の変更可）。セミ/フルも表示")
+        b_db.clicked.connect(self.open_db)
         b_close = QtWidgets.QPushButton("閉じる")
         b_close.clicked.connect(self.accept)
-        for b in (b_reload, b_check, b_file, b_both, b_prm):
+        for b in (b_reload, b_check, b_file, b_both, b_prm, b_db):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(b_close)
@@ -1421,9 +1426,7 @@ class ParamDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", "Seiban（受注伝票番号）を入力してください")
             return
         try:
-            # バイトで読んで cp932 デコード（改行 CRLF を文字どおり保持＝バイト一致のため。
-            # read_text だと改行が LF に変換され、出力で CRLF が失われてしまう）
-            raw = Path(master_path).read_bytes().decode("cp932", errors="replace")
+            raw = param_build.read_master(master_path)  # CRLFを保持して読む（バイト一致）
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
             return
@@ -1438,36 +1441,26 @@ class ParamDialog(QtWidgets.QDialog):
                 "適用する製品データがありません（製品データ または 型式・制御・変更表CSV を確認）。")
             return
         prefix = self.cmb_prefix.currentData() or "T"
-        fname = f"{prefix}{seiban}.prm"
-        if fanuc_param.looks_like_fanuc_prm(raw):
-            # N形式（実機ネイティブ）: BASICの「選んだ軸」だけを製品値へ。他は不変
-            axis = int(self.cmb_axis.currentData() or 4)
-            newtext, missing = fanuc_param.apply_product_values(raw, values, axis)
-            try:
-                (d / fname).write_text(newtext, encoding="cp932", errors="replace",
-                                       newline="")
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
-                return
-            note = f"BASIC {Path(master_path).name} の A{axis} 軸を製品値に変更"
-        else:
-            # ヘッダ＋CSV形式（旧）: そのまま値・Seiban差替え
-            doc = prm_format.parse_prm(raw)
-            prm_format.header_set(doc, "Seiban", seiban)
-            missing = [n for n in values if prm_format.param_value(doc, n) is None]
-            prm_format.apply_values(doc, values)
-            try:
-                prm_format.save_prm(d / fname, doc)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
-                return
-            note = f"{Path(master_path).name} を元に差替え"
+        axis = int(self.cmb_axis.currentData() or 4)
+        try:
+            newtext, missing, fmt = param_build.build_text(raw, values, axis, seiban)
+            out_path = d / param_build.filename(prefix, seiban)
+            param_build.write_text(out_path, newtext)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+            return
+        fname = out_path.name
+        note = (f"BASIC {Path(master_path).name} の A{axis} 軸を製品値に変更"
+                if fmt == "fanuc" else f"{Path(master_path).name} を元に差替え")
+        mode, eff = self._detect_mode(raw, values, axis)
         self._persist()
         # 製品データ（完成済み.prm）から抽出した「変更点」だけを変更表CSVへ登録し、
         # 次回は同じ型式を製品データ無しでも作れるようにする（source=="diff" のときだけ）。
-        reg_msg = self._register_to_csv(values) if source == "diff" else ""
+        reg_msg = self._register_to_csv(values, mode, seiban) if source == "diff" else ""
         msg = (f"FANUC .prm を作成しました:\n・{fname}\n（{note}）"
                f"\n値の反映: {len(values) - len(missing)} / {len(values)} 件")
+        if mode:
+            msg += f"\nクローズドループ: {mode}クロ（1815={eff}）"
         if missing:
             msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
             if len(missing) > 12:
@@ -1476,11 +1469,19 @@ class ParamDialog(QtWidgets.QDialog):
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
-    def _register_to_csv(self, values: dict) -> str:
+    def _detect_mode(self, raw, values, axis):
+        """設定の番号/ビットでクローズドループ種別を判定（'フル'/'セミ'/''）と実効値。"""
+        return param_build.detect_mode(
+            raw, values, axis,
+            number=self.settings.get("closed_loop_number", "1815"),
+            bit=int(self.settings.get("closed_loop_bit", 1)),
+            full_when=int(self.settings.get("closed_loop_full", 1)))
+
+    def _register_to_csv(self, values: dict, mode="", seiban="") -> str:
         """抽出した変更 {番号:値} を変更表CSVへ登録（upsert）し、結果メッセージを返す。
 
-        型式キーで登録する（紙のパラメータ表は型式ごと＝軸非依存なので 軸欄は空）。
-        型式または変更表CSVが未指定なら登録せず、その旨を返す。
+        型式＋制御＋モード(セミ/フル)をキーに登録する（紙のパラメータ表は型式ごと
+        ＝軸非依存なので 軸欄は空）。型式または変更表CSVが未指定なら登録せず、その旨を返す。
         """
         model = self.e_model.text().strip()
         csv_path = self.e_csv.text().strip()
@@ -1489,14 +1490,17 @@ class ParamDialog(QtWidgets.QDialog):
         if not csv_path:
             return "\n（変更表CSVが未指定のため、登録はスキップしました）"
         controller = self._selected_controller()
-        items = [nc_param.ParamChange(num, axis="", value=val, controller=controller)
+        today = QtCore.QDate.currentDate().toString("yyyy/MM/dd")
+        items = [nc_param.ParamChange(num, axis="", value=val, controller=controller,
+                                      mode=mode, seiban=seiban, date=today)
                  for num, val in values.items() if val != ""]
         try:
             added, updated = nc_param.register_changes(csv_path, model, items)
         except Exception as e:
             return f"\n⚠ 変更表CSVへの登録に失敗: {e}"
         self.reload()  # 登録結果を画面の表へ反映
-        return (f"\n変更表CSVへ登録: 型式『{model}』 追加{added}・更新{updated}件"
+        modestr = f"／{mode}クロ" if mode else ""
+        return (f"\n変更表CSV(DB)へ登録: 型式『{model}』{modestr} 追加{added}・更新{updated}件"
                 f"\n（次回は製品データ無しでも型式から作れます）")
 
     def _product_values(self, basic_text: str) -> tuple:
@@ -1541,6 +1545,12 @@ class ParamDialog(QtWidgets.QDialog):
             return False
         return True
 
+    def open_db(self):
+        """パラメータ作成データベース（登録済みCSVの検索・リピート作成）を開く。"""
+        self._persist()
+        ParamDBDialog(self).exec()
+        self.reload()  # DB側で登録が増えた場合に表へ反映
+
     def _persist(self):
         try:
             from .settings import save_settings
@@ -1555,6 +1565,344 @@ class ParamDialog(QtWidgets.QDialog):
             save_settings(self.settings)
         except Exception:
             pass
+
+
+class ParamDBDialog(QtWidgets.QDialog):
+    """パラメータ作成データベース。
+
+    登録済みの変更表CSVを「セット（型式×制御×モード）」単位で一覧・検索・フィルタし、
+    選んだセットからリピート品の .prm を瞬時に作成する（制御＝BASICや軸の変更も可）。
+    セミクロ/フルクロを表示（1815で判定。同型式・同番号でも別物として区別）。
+    制御装置から吸い出したパラメータを BASIC と差分して登録することもできる。
+    """
+
+    def __init__(self, owner: "ParamDialog"):
+        super().__init__(owner)
+        self.owner = owner
+        self.settings = owner.settings
+        self.setWindowTitle("パラメータ作成データベース")
+        self.resize(960, 620)
+        self._sets = []
+        v = QtWidgets.QVBoxLayout(self)
+
+        # --- 検索・フィルタ ---
+        filt = QtWidgets.QHBoxLayout()
+        self.e_search = QtWidgets.QLineEdit()
+        self.e_search.setPlaceholderText("検索（型式・制御・Seiban・番号・メモを横断）")
+        self.e_search.textChanged.connect(self._refresh_table)
+        filt.addWidget(self.e_search, 1)
+        filt.addWidget(QtWidgets.QLabel("制御"))
+        self.cmb_fctrl = QtWidgets.QComboBox()
+        self.cmb_fctrl.currentIndexChanged.connect(self._refresh_table)
+        filt.addWidget(self.cmb_fctrl)
+        filt.addWidget(QtWidgets.QLabel("モード"))
+        self.cmb_fmode = QtWidgets.QComboBox()
+        self.cmb_fmode.addItem("（すべて）", "")
+        self.cmb_fmode.addItem("フルクロ", "フル")
+        self.cmb_fmode.addItem("セミクロ", "セミ")
+        self.cmb_fmode.currentIndexChanged.connect(self._refresh_table)
+        filt.addWidget(self.cmb_fmode)
+        b_reload = QtWidgets.QPushButton("再読込")
+        b_reload.clicked.connect(self.reload)
+        filt.addWidget(b_reload)
+        v.addLayout(filt)
+
+        # --- セット一覧と、選択セットの中身 ---
+        split = QtWidgets.QHBoxLayout()
+        self.tbl = QtWidgets.QTableWidget(0, 6)
+        self.tbl.setHorizontalHeaderLabels(
+            ["型式", "制御", "モード", "件数", "Seiban", "登録日"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.itemSelectionChanged.connect(self._on_select)
+        split.addWidget(self.tbl, 3)
+
+        self.detail = QtWidgets.QTableWidget(0, 2)
+        self.detail.setHorizontalHeaderLabels(["番号", "変更値"])
+        self.detail.verticalHeader().setVisible(False)
+        self.detail.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.detail.horizontalHeader().setStretchLastSection(True)
+        split.addWidget(self.detail, 2)
+        v.addLayout(split, 1)
+
+        # --- リピート作成パネル（制御＝BASICや軸を変えて作れる） ---
+        box = QtWidgets.QGroupBox("選択したセットでリピート作成（制御＝BASIC・軸の変更可）")
+        f = QtWidgets.QFormLayout(box)
+        self.e_basic = QtWidgets.QLineEdit(str(owner.e_master_prm.text()))
+        self.e_basic.setPlaceholderText("使うBASIC .prm（別の制御装置にするなら差し替える）")
+        f.addRow("使うBASIC", owner._with_browse(self.e_basic, self._browse_basic))
+        axr = QtWidgets.QHBoxLayout()
+        axr.setContentsMargins(0, 0, 0, 0)
+        self.cmb_axis = QtWidgets.QComboBox()
+        for n in (1, 2, 3, 4):
+            self.cmb_axis.addItem(f"A{n}（第{n}軸）", n)
+        self.cmb_axis.setCurrentIndex(owner.cmb_axis.currentIndex())
+        axr.addWidget(self.cmb_axis, 1)
+        axr.addWidget(QtWidgets.QLabel("頭文字"))
+        self.cmb_prefix = QtWidgets.QComboBox()
+        self.cmb_prefix.addItem("T（傾斜）", "T")
+        self.cmb_prefix.addItem("R（回転）", "R")
+        self.cmb_prefix.setCurrentIndex(owner.cmb_prefix.currentIndex())
+        axr.addWidget(self.cmb_prefix)
+        f.addRow("対象軸", axr)
+        self.e_seiban = QtWidgets.QLineEdit()
+        self.e_seiban.setPlaceholderText("新しい受注伝票番号（出力名 <頭文字><Seiban>.prm）")
+        f.addRow("Seiban", self.e_seiban)
+        self.e_out = QtWidgets.QLineEdit(str(owner.e_out.text()))
+        self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有）")
+        f.addRow("出力先", owner._with_browse(self.e_out, self._browse_out))
+        v.addWidget(box)
+
+        # --- 制御装置からの吸い出し→差分登録（セミクロ等で製品データが無いとき） ---
+        dbox = QtWidgets.QGroupBox("制御装置から吸い出して差分だけ登録（セミ等で製品データ無しのとき）")
+        df = QtWidgets.QFormLayout(dbox)
+        self.e_dump = QtWidgets.QLineEdit()
+        self.e_dump.setPlaceholderText("機械から吸い出したパラメータファイル（.prm/.txt）")
+        df.addRow("吸い出しファイル", owner._with_browse(self.e_dump, self._browse_dump))
+        drow = QtWidgets.QHBoxLayout()
+        drow.setContentsMargins(0, 0, 0, 0)
+        self.e_dmodel = QtWidgets.QLineEdit(str(owner.e_model.text()))
+        self.e_dmodel.setPlaceholderText("型式")
+        drow.addWidget(QtWidgets.QLabel("型式"))
+        drow.addWidget(self.e_dmodel, 1)
+        self.e_dctrl = QtWidgets.QLineEdit(str(owner._selected_controller()))
+        self.e_dctrl.setPlaceholderText("制御（任意）")
+        drow.addWidget(QtWidgets.QLabel("制御"))
+        drow.addWidget(self.e_dctrl, 1)
+        self.e_dseiban = QtWidgets.QLineEdit()
+        self.e_dseiban.setPlaceholderText("Seiban（任意）")
+        drow.addWidget(QtWidgets.QLabel("Seiban"))
+        drow.addWidget(self.e_dseiban, 1)
+        df.addRow("登録先", drow)
+        v.addWidget(dbox)
+
+        self.lbl = QtWidgets.QLabel("")
+        v.addWidget(self.lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        b_make = QtWidgets.QPushButton("この設定で作成→出力先")
+        b_make.setObjectName("primary")
+        b_make.clicked.connect(self.make_from_set)
+        b_dump = QtWidgets.QPushButton("吸い出し差分を登録")
+        b_dump.clicked.connect(self.register_dump)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(b_make)
+        row.addWidget(b_dump)
+        row.addStretch(1)
+        row.addWidget(b_close)
+        v.addLayout(row)
+
+        self.reload()
+
+    # ----- データ読み込み・表示 -----
+    def _csv_path(self):
+        return self.owner.e_csv.text().strip()
+
+    def reload(self):
+        path = self._csv_path()
+        self._all = {}
+        if path:
+            try:
+                self._all = nc_param.load_changes(path)
+            except Exception as e:
+                self.lbl.setText(f"変更表CSVを読めません: {e}")
+        self._sets = nc_param.list_sets(self._all)
+        # 制御フィルタの選択肢を作り直す
+        prev = self.cmb_fctrl.currentData()
+        self.cmb_fctrl.blockSignals(True)
+        self.cmb_fctrl.clear()
+        self.cmb_fctrl.addItem("（すべて）", "")
+        for c in sorted({s.controller for s in self._sets if s.controller}):
+            self.cmb_fctrl.addItem(c, c)
+        i = self.cmb_fctrl.findData(prev)
+        self.cmb_fctrl.setCurrentIndex(i if i >= 0 else 0)
+        self.cmb_fctrl.blockSignals(False)
+        self._refresh_table()
+
+    def _filtered(self):
+        return nc_param.search_sets(
+            self._sets, self.e_search.text(),
+            controller=self.cmb_fctrl.currentData() or "",
+            mode=self.cmb_fmode.currentData() or "")
+
+    def _refresh_table(self):
+        rows = self._filtered()
+        self.tbl.setRowCount(len(rows))
+        for i, s in enumerate(rows):
+            cells = [s.model, s.controller, s.mode or "—", str(s.count()),
+                     s.seiban, s.date]
+            for j, text in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(text)
+                if j == 2 and s.mode == "フル":
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#1d4ed8")))
+                elif j == 2 and s.mode == "セミ":
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#b45309")))
+                self.tbl.setItem(i, j, it)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.lbl.setText(f"{len(rows)} 件（全 {len(self._sets)} セット）")
+        self.detail.setRowCount(0)
+
+    def _selected_set(self):
+        rows = self._filtered()
+        r = self.tbl.currentRow()
+        if 0 <= r < len(rows):
+            return rows[r]
+        return None
+
+    def _on_select(self):
+        s = self._selected_set()
+        self.detail.setRowCount(0)
+        if not s:
+            return
+        items = [c for c in s.items if c.number]
+        self.detail.setRowCount(len(items))
+        for i, c in enumerate(items):
+            self.detail.setItem(i, 0, QtWidgets.QTableWidgetItem(c.number))
+            self.detail.setItem(i, 1, QtWidgets.QTableWidgetItem(c.value))
+        # 型式・制御・Seiban を作成パネルに引き継ぐ
+        self.e_dmodel.setText(s.model)
+        if s.controller:
+            self.e_dctrl.setText(s.controller)
+
+    # ----- 参照ボタン -----
+    def _browse_basic(self):
+        start = self.e_basic.text() or self.owner.e_basic_dir.text()
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
+        if p:
+            self.e_basic.setText(p)
+
+    def _browse_out(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(self, "出力先", self.e_out.text())
+        if p:
+            self.e_out.setText(p)
+
+    def _browse_dump(self):
+        start = self.e_dump.text() or self.owner.e_product_dir.text()
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "吸い出しパラメータ", start,
+            "パラメータ (*.prm *.PRM *.txt *.csv);;すべて (*.*)")
+        if p:
+            self.e_dump.setText(p)
+
+    # ----- リピート作成 -----
+    def make_from_set(self):
+        from pathlib import Path
+        s = self._selected_set()
+        if not s:
+            QtWidgets.QMessageBox.warning(self, "作成", "セットを選んでください")
+            return
+        master = self.e_basic.text().strip()
+        out = self.e_out.text().strip()
+        seiban = self.e_seiban.text().strip()
+        if not master:
+            QtWidgets.QMessageBox.warning(self, "作成", "使うBASIC を指定してください")
+            return
+        if not out or not Path(out).is_dir():
+            QtWidgets.QMessageBox.warning(self, "作成", "出力先（存在するフォルダ）を指定してください")
+            return
+        if not seiban:
+            QtWidgets.QMessageBox.warning(self, "作成", "Seiban（受注伝票番号）を入力してください")
+            return
+        values = s.values()
+        if not values:
+            QtWidgets.QMessageBox.warning(self, "作成", "このセットに変更値がありません")
+            return
+        axis = int(self.cmb_axis.currentData() or 4)
+        prefix = self.cmb_prefix.currentData() or "T"
+        try:
+            out_path, missing, fmt = param_build.create_file(
+                master, out, values, axis=axis, prefix=prefix, seiban=seiban)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "作成に失敗", str(e))
+            return
+        msg = (f"作成しました:\n・{out_path.name}\n"
+               f"（{Path(master).name} の A{axis} 軸へ {s.model}"
+               f"{'／' + s.mode + 'クロ' if s.mode else ''} の設定を適用）\n"
+               f"値の反映: {len(values) - len(missing)} / {len(values)} 件")
+        if missing:
+            msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
+        msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        QtWidgets.QMessageBox.information(self, "作成しました", msg)
+
+    # ----- 吸い出し→差分登録 -----
+    def register_dump(self):
+        from pathlib import Path
+        dump = self.e_dump.text().strip()
+        master = self.e_basic.text().strip()
+        model = self.e_dmodel.text().strip()
+        if not dump or not Path(dump).is_file():
+            QtWidgets.QMessageBox.warning(self, "登録", "吸い出しファイルを指定してください")
+            return
+        if not master or not Path(master).is_file():
+            QtWidgets.QMessageBox.warning(self, "登録", "比較する BASIC を指定してください")
+            return
+        if not model:
+            QtWidgets.QMessageBox.warning(self, "登録", "型式を入力してください")
+            return
+        if not self._csv_path():
+            QtWidgets.QMessageBox.warning(self, "登録", "変更表CSV（保存先）が未指定です")
+            return
+        try:
+            basic = param_build.read_master(master)
+            dumptext = Path(dump).read_bytes().decode("cp932", errors="replace")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "登録", f"読み込みに失敗:\n{e}")
+            return
+        if not fanuc_param.looks_like_fanuc_prm(dumptext) or \
+                not fanuc_param.looks_like_fanuc_prm(basic):
+            QtWidgets.QMessageBox.warning(
+                self, "登録",
+                "N形式（実機ネイティブ）の吸い出し＋BASICで差分を取ります。"
+                "形式が一致しているか確認してください。")
+            return
+        changed = [(num, newv) for (num, _lab, _old, newv)
+                   in fanuc_param.diff(basic, dumptext) if newv is not None]
+        if not changed:
+            QtWidgets.QMessageBox.information(self, "登録", "BASICとの差分はありませんでした")
+            return
+        values = {num: val for num, val in changed}
+        # モードは吸い出し側の実効1815から判定（全軸見て1つでもフルならフル寄り）
+        mode = self._dump_mode(dumptext)
+        controller = self.e_dctrl.text().strip()
+        seiban = self.e_dseiban.text().strip()
+        today = QtCore.QDate.currentDate().toString("yyyy/MM/dd")
+        items = [nc_param.ParamChange(num, axis="", value=val, controller=controller,
+                                      mode=mode, seiban=seiban, date=today)
+                 for num, val in values.items() if val != ""]
+        try:
+            added, updated = nc_param.register_changes(self._csv_path(), model, items)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "登録に失敗", str(e))
+            return
+        self.reload()
+        QtWidgets.QMessageBox.information(
+            self, "登録しました",
+            f"型式『{model}』{'／' + mode + 'クロ' if mode else ''} に "
+            f"差分 {len(values)} 件を登録（追加{added}・更新{updated}）。\n"
+            f"差分は BASIC {Path(master).name} との比較で自動抽出しました。")
+
+    def _dump_mode(self, dumptext):
+        """吸い出しの1815からモード判定。番号/ビットは設定に従う。"""
+        number = self.settings.get("closed_loop_number", "1815")
+        bit = int(self.settings.get("closed_loop_bit", 1))
+        full = int(self.settings.get("closed_loop_full", 1))
+        # いずれかの軸が「フル」ならフル、判定できた中にフルが無くセミがあればセミ
+        modes = []
+        for ax in ("A1", "A2", "A3", "A4", "L1", None):
+            val = fanuc_param.get_value(dumptext, number, ax)
+            if val is not None:
+                modes.append(fanuc_param.closed_loop_mode(val, bit, full))
+        if "フル" in modes:
+            return "フル"
+        if "セミ" in modes:
+            return "セミ"
+        return ""
 
 
 class ConditionRegistryDialog(QtWidgets.QDialog):

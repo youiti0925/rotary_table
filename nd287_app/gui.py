@@ -1041,23 +1041,31 @@ class ParamDialog(QtWidgets.QDialog):
         form.addRow("制御", self.cmb_ctrl)
 
         self.e_master = QtWidgets.QLineEdit(str(settings.get("param_master_backup", "")))
-        self.e_master.setPlaceholderText("任意: マスタ/バックアップ（旧値表示用）")
-        form.addRow("マスタ(任意)", self._with_browse(self.e_master, self._browse_master))
+        self.e_master.setPlaceholderText("任意: 確認表に『旧値』を出すための実機バックアップ。空でOK")
+        self.e_master.setToolTip("確認表で『旧値→新値』を見せたいときだけ指定する任意項目。"
+                                 ".prm の作成には不要")
+        form.addRow("旧値バックアップ(任意)",
+                    self._with_browse(self.e_master, self._browse_master))
 
         # 共有サーバの置き場所（フォルダ。指定すると下のファイル選択の既定位置になる）
         self.e_basic_dir = QtWidgets.QLineEdit(str(settings.get("param_basic_dir", "")))
-        self.e_basic_dir.setPlaceholderText(r"BASICの置き場 例 \\server\param\BASIC")
-        form.addRow("BASICの場所",
+        self.e_basic_dir.setPlaceholderText(r"BASIC(.prm)を置く共有フォルダ 例 \\server\param\BASIC")
+        self.e_basic_dir.setToolTip("制御装置の基本パラメータ(BASIC)を置くフォルダ。"
+                                    "一度入れれば下の「使うBASIC」選択の起点になる")
+        form.addRow("BASICの場所(フォルダ)",
                     self._with_browse(self.e_basic_dir, self._browse_basic_dir))
 
         self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
-        self.e_master_prm.setPlaceholderText("使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
-        form.addRow("BASIC(FANUC)",
+        self.e_master_prm.setPlaceholderText("今回使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
+        self.e_master_prm.setToolTip("容量・空き軸で決まった制御装置の BASIC ファイル。これを元に作る")
+        form.addRow("使うBASIC",
                     self._with_browse(self.e_master_prm, self._browse_master_prm))
 
         self.e_product_dir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
-        self.e_product_dir.setPlaceholderText(r"Seiban対応の製品データ置き場 例 \\server\param\製品")
-        form.addRow("製品データの場所",
+        self.e_product_dir.setPlaceholderText(r"Seibanごとの製品データを置く共有フォルダ 例 \\server\param\製品")
+        self.e_product_dir.setToolTip("受注伝票番号(Seiban)ごとの製品データを置くフォルダ。"
+                                      "「Seibanで探す」がここから探す")
+        form.addRow("製品データの場所(フォルダ)",
                     self._with_browse(self.e_product_dir, self._browse_product_dir))
 
         prod_w = QtWidgets.QWidget()
@@ -1105,9 +1113,14 @@ class ParamDialog(QtWidgets.QDialog):
         v.addLayout(form)
 
         hint = QtWidgets.QLabel(
-            "変更表CSVの列: 型式, 制御, 番号, 軸, 変更値, メモ（紙のパラメータ表を一度だけCSV化）。"
-            "MELDAS/FANUC など制御ごとに番号が違う場合は『制御』列で分けてください"
-            "（空欄＝全制御共通）。型式と制御を選ぶと該当ぶんだけ出力します。")
+            "使い方:  ① Seiban（受注伝票番号）を入れる  ② 使うBASIC(.prm＝制御装置の"
+            "基本パラメータ)を選ぶ  ③ 製品データを選ぶ（「Seibanで探す」で自動検索）  "
+            "④ 対象軸と頭文字（傾斜T／回転R）を選ぶ  ⑤「FANUC .prm 作成」。\n"
+            "・「○○の場所」＝共有サーバのフォルダ。最初に一度入れておけば、"
+            "ファイル選択や「Seibanで探す」の起点になります（毎回入れ直す必要なし）。\n"
+            "・「旧値バックアップ」と「変更表CSV」は任意。製品データ（完成済み.prm）が"
+            "あればCSVは不要です。製品データが無いときだけ、紙の表をCSV化した変更表CSV"
+            "（列: 型式, 制御, 番号, 軸, 変更値, メモ）を使います。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#374151;")
         v.addWidget(hint)
@@ -3092,13 +3105,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = QtWidgets.QLabel("")
-        # 受信点数はグラフのすぐ上に大きく出す（例 ホイール CW 3/36）
+        # 受信点数はグラフのすぐ上に大きく出す（例 ホイール CW 3/36）。
+        # 系列が4つ（ホイール/ウォーム×CW/CCW）あると横に長いので、専用行に置いて
+        # 横幅をいっぱい使えるようにし、足りなければ折返して切れないようにする。
         self.counts.setStyleSheet(
             "color:#1d4ed8; padding:2px 6px; font-weight:bold; font-size:13pt;")
-        live_row = QtWidgets.QHBoxLayout()
-        live_row.addWidget(self.live)
-        live_row.addStretch(1)
-        live_row.addWidget(self.counts)
+        self.counts.setWordWrap(True)
 
         # ===== グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ）=====
         self.plot_wheel = pg.PlotWidget(title="ホイール")
@@ -3205,7 +3217,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.b_zoom)          # グラフ拡大（全モードで常に表示）
         bar.addWidget(self.live)
         bar.addStretch(1)
-        bar.addWidget(self.counts)
+        # データ数はバーに詰めず専用行へ（バーのボタンと幅を取り合って切れないように）
+        counts_row = QtWidgets.QHBoxLayout()
+        counts_row.setContentsMargins(2, 0, 2, 0)
+        counts_row.addWidget(self.counts, 1)
         plots_widget.setMinimumHeight(240)
 
         # 左カラム: ガイド → 測定情報/条件 → 操作バー → グラフ（残りを縦いっぱい）
@@ -3216,6 +3231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addWidget(self.guide, 0)
         lv.addLayout(top_left, 0)
         lv.addLayout(bar, 0)
+        lv.addLayout(counts_row, 0)         # データ数（横いっぱい・必要なら折返し）
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
 
         # 右カラム（縦長）: 精度PP・傾き → 単一・隣接 → バックラッシ を上下に積み、
@@ -3516,8 +3532,9 @@ class MainWindow(QtWidgets.QMainWindow):
             wf = w.font()
             wf.setPointSize(base + 1)
             w.setFont(wf)
-        # フォント変更後に右カラム幅を実寸へ合わせ直す
-        QtCore.QTimer.singleShot(0, self._fit_right_col_width)
+        # フォント変更後に右カラムの幅と各表の高さを実寸へ合わせ直す
+        # （幅だけだと、行が新フォントで高くなったとき固定高が足りず最終行が切れる）
+        QtCore.QTimer.singleShot(0, self._shrink_result_tables)
 
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
@@ -4813,12 +4830,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_misc_table(rows)
 
     def _fit_table_height(self, table):
-        """全行が見える高さに固定する（空でもヘッダ分だけ＝場所を食わない）。"""
+        """全行が確実に見える高さに固定する（空でもヘッダ分だけ＝場所を食わない）。
+
+        各行の高さを明示設定してから、その合計を固定高にする。こうすると OS や
+        フォント（実機の游ゴシック等）で行が測定時より高く描画されても、描画高＝
+        計算高となり、縦スクロールバー無しの表でも最終行が切れない。
+        """
         table.resizeRowsToContents()
-        height = table.horizontalHeader().sizeHint().height() + 2 * table.frameWidth() + 4
+        fm = table.fontMetrics()
+        floor = fm.height() + 12  # フォント基準の下限（スタイル差で潰れない余裕）
+        header_h = max(table.horizontalHeader().sizeHint().height(), floor)
+        height = header_h + 2 * table.frameWidth() + 6
         for r in range(table.rowCount()):
-            rh = table.rowHeight(r)
-            height += rh if rh > 0 else table.sizeHintForRow(r)
+            rh = max(table.rowHeight(r), floor)
+            table.setRowHeight(r, rh)  # 明示設定＝描画もこの高さ。測定との食い違い防止
+            height += rh
         table.setFixedHeight(height)
 
     def _shrink_result_tables(self):

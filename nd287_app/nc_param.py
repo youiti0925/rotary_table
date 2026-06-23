@@ -26,9 +26,13 @@ import re
 
 # 取り込みCSVの列名ゆらぎを吸収する（紙の表→CSV化を人がやる前提）
 _COL_ALIASES = {
+    "id": ("id", "番号id", "entry", "エントリ", "登録id"),
     "model": ("型式", "機種", "品種", "製品", "model"),
+    "kind": ("種別", "回転傾斜", "傾斜回転", "kind", "type"),
     "controller": ("制御", "制御装置", "nc", "版", "cnc", "controller"),
     "mode": ("モード", "ループ", "クローズド", "semi/full", "mode", "loop"),
+    "motor": ("モーター", "モータ", "モータ型式", "motor"),
+    "basic": ("使用basic", "basic", "ベース", "使用ベーシック"),
     "number": ("番号", "パラメータ", "パラメータ番号", "param", "no", "number"),
     "axis": ("軸", "軸番号", "axis"),
     "value": ("変更値", "値", "設定値", "value", "data"),
@@ -148,52 +152,263 @@ def write_changes(path, changes: dict):
                             c.value, c.note, c.seiban, c.date])
 
 
-def register_changes(path, model, items) -> tuple:
-    """型式 model の変更 items([ParamChange]) を CSV(path) へ upsert 登録する。
+# ===== パラメータ作成データベース（エントリ単位） =====
+# 1エントリ＝1つの登録済み構成: 型式・種別(傾斜/回転)・モード(フル/セミ)・モーター・
+# 制御・軸・Seiban・登録日・使用BASIC ＋ 変更パラメータ一覧[(番号,値,メモ)]。
+# 製品データ差分／吸い出し差分／手入力 のどれからでも登録でき、検索・編集・削除・
+# リピート作成ができる。制御/軸/Seiban が違えば別エントリ＝作成履歴になる。
 
-    製品データ（完成済み.prm）から抽出した変更を変更表CSVに残し、次回は同じ型式を
-    製品データ無しでも作れるようにするための関数。
+ENTRY_HEADER = ["ID", "型式", "種別", "モード", "モーター", "制御", "軸",
+                "Seiban", "登録日", "使用BASIC", "番号", "変更値", "メモ"]
 
-    既存CSVを読み、同じ型式の中で key(制御＋番号＋軸) が一致する行は新しい値で
-    置き換え、無ければ追加する。他の型式・他の番号の行はそのまま（破壊しない）。
-    更新時、新しい行のメモが空なら既存のメモを残す。CSVが無ければ新規作成。
-    変化が無いときはファイルを書き換えない（並びやコメントを無駄に消さない）。
-    戻り値: (追加件数, 更新件数)。
-    """
+
+def _s(x) -> str:
+    return str(x if x is not None else "").strip()
+
+
+class ParamEntry:
+    """データベースの1件（登録済み構成）。items は [(番号, 値, メモ)]。"""
+
+    __slots__ = ("id", "model", "kind", "mode", "motor", "controller", "axis",
+                 "seiban", "date", "basic", "items")
+
+    def __init__(self, model="", kind="", mode="", motor="", controller="",
+                 axis="", seiban="", date="", basic="", items=None, id=""):
+        self.id = _s(id)
+        self.model = _s(model)
+        self.kind = _s(kind)
+        self.mode = _s(mode)
+        self.motor = _s(motor)
+        self.controller = _s(controller)
+        self.axis = _s(axis)
+        self.seiban = _s(seiban)
+        self.date = _s(date)
+        self.basic = _s(basic)
+        self.items = [(_s(n), _s(v), _s(m)) for (n, v, m) in (items or []) if _s(n)]
+
+    def count(self):
+        return len(self.items)
+
+    def values(self):
+        """{番号: 値}（作成に使う変更値）。"""
+        return {n: v for (n, v, _m) in self.items if n and v != ""}
+
+    def config_key(self):
+        """重複判定キー。制御・軸・Seiban が違えば別エントリ（履歴として残す）。"""
+        return (normalize_model(self.model), self.mode, self.controller,
+                self.axis, self.seiban)
+
+    def _meta(self):
+        return (self.model, self.kind, self.mode, self.motor, self.controller,
+                self.axis, self.seiban, self.date, self.basic, self.items)
+
+
+def parse_entries(text: str) -> list:
+    """CSVテキスト → [ParamEntry]。ID列があればIDで束ね、無ければ旧CSVとみなして
+    (型式,制御,モード) で1エントリにまとめて移行する。"""
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return []
+    header = [_norm_header(c) for c in rows[0]]
+    idx = {name: header.index(name) for name in set(header) if name in _COL_ALIASES}
+    has_id = "id" in idx
+
+    def cell(row, name):
+        i = idx.get(name)
+        return row[i].strip() if i is not None and i < len(row) else ""
+
+    entries, order = {}, []
+    for row in rows[1:]:
+        if not any(c.strip() for c in row):
+            continue
+        model = cell(row, "model")
+        if has_id and cell(row, "id"):
+            ekey = ("id", cell(row, "id"))
+        else:                                  # 旧CSV: 型式×制御×モードで1件に集約
+            ekey = ("auto", normalize_model(model),
+                    cell(row, "controller"), cell(row, "mode"))
+        e = entries.get(ekey)
+        if e is None:
+            e = ParamEntry(model=model, kind=cell(row, "kind"), mode=cell(row, "mode"),
+                           motor=cell(row, "motor"), controller=cell(row, "controller"),
+                           axis=cell(row, "axis"), seiban=cell(row, "seiban"),
+                           date=cell(row, "date"), basic=cell(row, "basic"),
+                           id=cell(row, "id") if has_id else "")
+            entries[ekey] = e
+            order.append(ekey)
+        num = cell(row, "number")
+        if num:
+            e.items.append((num, cell(row, "value"), cell(row, "note")))
+    return [entries[k] for k in order]
+
+
+def _ensure_ids(entries: list) -> list:
+    """ID が無いエントリ（旧CSV移行ぶん）に連番IDを振る。"""
+    used = {e.id for e in entries if e.id}
+    n = 0
+    for e in entries:
+        if not e.id:
+            n += 1
+            while f"{n:04d}" in used:
+                n += 1
+            e.id = f"{n:04d}"
+            used.add(e.id)
+    return entries
+
+
+def _next_id(entries: list) -> str:
+    mx = 0
+    for e in entries:
+        if e.id.isdigit():
+            mx = max(mx, int(e.id))
+    return f"{mx + 1:04d}"
+
+
+def write_entries(path, entries: list):
+    with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(ENTRY_HEADER)
+        for e in entries:
+            meta = [e.id, e.model, e.kind, e.mode, e.motor, e.controller, e.axis,
+                    e.seiban, e.date, e.basic]
+            if e.items:
+                for (num, val, memo) in e.items:
+                    w.writerow(meta + [num, val, memo])
+            else:
+                w.writerow(meta + ["", "", ""])
+
+
+def load_entries(path) -> list:
     from pathlib import Path
-    if not path or not model or not items:
-        return (0, 0)
-    existing = {}
-    if Path(path).exists():
-        try:
-            existing = load_changes(path)
-        except Exception:
-            existing = {}
-    target = normalize_model(model)
-    bucket_key = None
-    for k in existing:                       # 既存の同型式バケツ（正規化一致）を探す
-        if normalize_model(k) == target:
-            bucket_key = k
-            break
-    if bucket_key is None:
-        bucket_key = model
-    bucket = existing.setdefault(bucket_key, [])
-    added = updated = 0
-    for ch in items:
-        for i, ex in enumerate(bucket):
-            if ex.key() == ch.key():
-                if not ch.note and ex.note:  # 既存メモは消さない
-                    ch.note = ex.note
-                if bucket[i] != ch:
-                    updated += 1
-                bucket[i] = ch
-                break
-        else:
-            bucket.append(ch)
-            added += 1
-    if added or updated:
-        write_changes(path, existing)
-    return (added, updated)
+    if not path or not Path(path).exists():
+        return []
+    with open(path, "r", encoding="cp932", errors="replace", newline="") as f:
+        entries = parse_entries(f.read())
+    return _ensure_ids(entries)
+
+
+def save_entries(path, entries: list):
+    write_entries(path, entries)
+
+
+def get_entry(entries: list, entry_id: str):
+    for e in entries:
+        if e.id == entry_id:
+            return e
+    return None
+
+
+def upsert_entry(path, entry: ParamEntry) -> tuple:
+    """エントリを登録（upsert）。同一構成(config_key)があれば更新、無ければ追加。
+
+    戻り値: (id, 'added'/'updated'/'unchanged')。変化が無ければファイルを書かない。
+    """
+    if not path or not entry or not entry.items:
+        return ("", "unchanged")
+    entries = load_entries(path)
+    for e in entries:
+        if e.config_key() == entry.config_key():
+            entry.id = e.id
+            same = e._meta() == entry._meta()
+            if same:
+                return (e.id, "unchanged")
+            e.model, e.kind, e.mode, e.motor = (entry.model, entry.kind,
+                                                entry.mode, entry.motor)
+            e.controller, e.axis, e.seiban = (entry.controller, entry.axis,
+                                              entry.seiban)
+            e.date, e.basic, e.items = entry.date, entry.basic, entry.items
+            save_entries(path, entries)
+            return (e.id, "updated")
+    entry.id = _next_id(entries)
+    entries.append(entry)
+    save_entries(path, entries)
+    return (entry.id, "added")
+
+
+def update_entry(path, entry: ParamEntry) -> bool:
+    """ID 指定でエントリを丸ごと置き換える（編集用）。"""
+    entries = load_entries(path)
+    for i, e in enumerate(entries):
+        if e.id == entry.id:
+            entries[i] = entry
+            save_entries(path, entries)
+            return True
+    return False
+
+
+def delete_entry(path, entry_id: str) -> bool:
+    """ID 指定でエントリを削除する。削除できたら True。"""
+    entries = load_entries(path)
+    kept = [e for e in entries if e.id != entry_id]
+    if len(kept) != len(entries):
+        save_entries(path, kept)
+        return True
+    return False
+
+
+def search_entries(entries: list, query: str = "", model: str = "",
+                   controller: str = "", mode: str = "", kind: str = "") -> list:
+    """エントリ一覧を検索・フィルタ。query は横断部分一致、他は一致で絞る（空は無視）。"""
+    q = (query or "").strip().lower()
+    mdl = normalize_model(model) if model else ""
+    out = []
+    for e in entries:
+        if mdl and normalize_model(e.model) != mdl:
+            continue
+        if controller and e.controller != controller:
+            continue
+        if mode and e.mode != mode:
+            continue
+        if kind and e.kind != kind:
+            continue
+        if q:
+            hay = " ".join([e.model, e.kind, e.mode, e.motor, e.controller,
+                            e.axis, e.seiban, e.date, e.basic]
+                           + [n for (n, _v, _m) in e.items]
+                           + [m for (_n, _v, m) in e.items]).lower()
+            if q not in hay:
+                continue
+        out.append(e)
+    return out
+
+
+# 軸の表示名（第1〜6軸 = X,Y,Z,A,B,C）。FANUCネイティブ.PRM 内部のセグメント名は
+# A1〜A4（A＝軸の意味＋軸番号）だが、画面表示・DBは X/Y/Z/A/B/C を使う。
+AXIS_NAMES = ["X", "Y", "Z", "A", "B", "C"]
+
+
+def axis_name(num) -> str:
+    """軸番号(1〜6) → 表示名(X/Y/Z/A/B/C)。範囲外はそのまま文字列化。"""
+    try:
+        n = int(num)
+    except (TypeError, ValueError):
+        return _s(num)
+    return AXIS_NAMES[n - 1] if 1 <= n <= len(AXIS_NAMES) else str(num)
+
+
+def axis_number(name) -> int:
+    """表示名(X/Y/Z/A/B/C) または 'A4'/'4' → 軸番号(1〜6)。不明なら 0。"""
+    s = _s(name).upper()
+    if s in AXIS_NAMES:
+        return AXIS_NAMES.index(s) + 1
+    m = re.search(r"(\d+)", s)
+    return int(m.group(1)) if m else 0
+
+
+def kind_from_prefix(prefix: str) -> str:
+    """頭文字 T/R → 種別 傾斜/回転。"""
+    p = _s(prefix).upper()
+    return {"T": "傾斜", "R": "回転"}.get(p, "")
+
+
+def controller_from_basic(basic_path) -> str:
+    """BASICファイル名から制御装置名を推定（'F30BASIC.PRM' → 'F30'）。"""
+    from pathlib import Path
+    stem = Path(str(basic_path)).stem.upper()
+    if stem.endswith("BASIC"):
+        stem = stem[:-len("BASIC")]
+    return stem.strip(" _-") or _s(basic_path)
 
 
 
@@ -232,91 +447,6 @@ def controllers_for_model(changes: dict, model: str) -> list:
         if x.controller and x.controller not in seen:
             seen.append(x.controller)
     return seen
-
-
-# ===== パラメータ作成データベース（登録CSVを「集合」単位で扱う） =====
-# 1セット＝(型式, 制御, モード) で束ねた変更群。セミ/フルは別セットになる。
-
-class ParamSet:
-    """データベースの1件（登録された変更セット）。"""
-
-    __slots__ = ("model", "controller", "mode", "items", "seiban", "date")
-
-    def __init__(self, model, controller, mode, items, seiban="", date=""):
-        self.model = model
-        self.controller = controller
-        self.mode = mode
-        self.items = items            # [ParamChange]
-        self.seiban = seiban          # 代表（最新）の受注伝票番号
-        self.date = date              # 代表（最新）の登録日
-
-    def count(self):
-        return len(self.items)
-
-    def values(self):
-        """{番号: 値}（このセットを使って作成するときの変更値）。"""
-        return {c.number: c.value for c in self.items if c.number and c.value != ""}
-
-
-def list_sets(changes: dict) -> list:
-    """{型式:[ParamChange]} を (型式, 制御, モード) ごとの ParamSet 一覧にする。
-
-    一覧・検索・フィルタ用。seiban/date はセット内で最後に現れたものを代表とする。
-    並びは 型式→制御→モード。
-    """
-    groups = {}
-    order = []
-    for model, items in changes.items():
-        for c in items:
-            k = (model, c.controller, c.mode)
-            if k not in groups:
-                groups[k] = []
-                order.append(k)
-            groups[k].append(c)
-    sets = []
-    for k in order:
-        items = groups[k]
-        seiban = next((c.seiban for c in reversed(items) if c.seiban), "")
-        date = next((c.date for c in reversed(items) if c.date), "")
-        sets.append(ParamSet(k[0], k[1], k[2], items, seiban, date))
-    sets.sort(key=lambda s: (normalize_model(s.model), s.controller, s.mode))
-    return sets
-
-
-def changes_for_set(changes: dict, model: str, controller: str, mode: str) -> list:
-    """データベースの1セット（型式・制御・モードが一致）の変更リストを返す。"""
-    out = []
-    for c in _model_items(changes, model):
-        if (c.controller or "") == (controller or "") and (c.mode or "") == (mode or ""):
-            out.append(c)
-    return out
-
-
-def search_sets(sets: list, query: str = "", model: str = "", controller: str = "",
-                mode: str = "") -> list:
-    """セット一覧を検索・フィルタする。
-
-    query: 型式/制御/モード/Seiban/番号/メモ を横断する部分一致（空なら無視）。
-    model/controller/mode: それぞれ完全（型式は正規化）一致で絞る（空なら無視）。
-    """
-    q = (query or "").strip().lower()
-    mdl = normalize_model(model) if model else ""
-    out = []
-    for s in sets:
-        if mdl and normalize_model(s.model) != mdl:
-            continue
-        if controller and s.controller != controller:
-            continue
-        if mode and s.mode != mode:
-            continue
-        if q:
-            hay = " ".join([s.model, s.controller, s.mode, s.seiban, s.date]
-                           + [c.number for c in s.items]
-                           + [c.note for c in s.items]).lower()
-            if q not in hay:
-                continue
-        out.append(s)
-    return out
 
 
 def parse_param_backup(text: str) -> dict:

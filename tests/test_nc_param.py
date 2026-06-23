@@ -119,131 +119,132 @@ class TestController(unittest.TestCase):
         self.assertEqual(sorted(c.number for c in got), ["2206", "3"])
 
 
-class TestRegisterChanges(unittest.TestCase):
-    """製品データから抽出した変更を変更表CSVへ upsert 登録する。"""
-
-    def setUp(self):
-        import tempfile, os
-        self.path = os.path.join(tempfile.mkdtemp(), "reg.csv")
-
-    def test_creates_file_when_absent(self):
-        items = [P.ParamChange("1825", "", "2500", controller="FANUC"),
-                 P.ParamChange("2020", "", "300", controller="FANUC")]
-        added, updated = P.register_changes(self.path, "RTT-137", items)
-        self.assertEqual((added, updated), (2, 0))
-        again = P.load_changes(self.path)
-        got = {c.number: c.value for c in P.changes_for_model(again, "RTT-137")}
-        self.assertEqual(got, {"1825": "2500", "2020": "300"})
-
-    def test_upsert_updates_existing_value(self):
-        P.register_changes(self.path, "RTT-137",
-                           [P.ParamChange("1825", "", "2500", controller="FANUC")])
-        # 同じ型式・制御・番号を別の値で再登録 → 追加0・更新1、行は重複しない
-        added, updated = P.register_changes(
-            self.path, "RTT-137",
-            [P.ParamChange("1825", "", "9999", controller="FANUC")])
-        self.assertEqual((added, updated), (0, 1))
-        got = P.changes_for_model(P.load_changes(self.path), "RTT-137")
-        self.assertEqual(len(got), 1)
-        self.assertEqual(got[0].value, "9999")
-
-    def test_no_write_when_unchanged(self):
-        items = [P.ParamChange("1825", "", "2500", controller="FANUC")]
-        P.register_changes(self.path, "RTT-137", items)
-        import os
-        mtime = os.path.getmtime(self.path)
-        added, updated = P.register_changes(self.path, "RTT-137", items)
-        self.assertEqual((added, updated), (0, 0))
-        # 変化が無ければ書き換えない（mtime据え置き）
-        self.assertEqual(os.path.getmtime(self.path), mtime)
-
-    def test_preserves_other_models(self):
-        P.write_changes(self.path, P.parse_changes(SAMPLE_CSV))
-        # 別型式を登録しても既存の RTT-315/RWE-200 は残る
-        P.register_changes(self.path, "NEW-1",
-                           [P.ParamChange("100", "", "1")])
-        again = P.load_changes(self.path)
-        self.assertEqual(set(again) >= {"RTT-315", "RWE-200", "NEW-1"}, True)
-        self.assertTrue(P.changes_for_model(again, "RTT-315"))
-
-    def test_update_keeps_existing_note_when_new_empty(self):
-        P.register_changes(self.path, "RTT-137",
-                           [P.ParamChange("1825", "", "2500", note="位置ゲイン",
-                                          controller="FANUC")])
-        # メモ無しで値だけ更新 → 既存メモは消えない
-        P.register_changes(self.path, "RTT-137",
-                           [P.ParamChange("1825", "", "9000", controller="FANUC")])
-        got = P.changes_for_model(P.load_changes(self.path), "RTT-137")[0]
-        self.assertEqual(got.value, "9000")
-        self.assertEqual(got.note, "位置ゲイン")
-
-    def test_skips_without_model_or_path(self):
-        self.assertEqual(P.register_changes(self.path, "", [P.ParamChange("1", "", "1")]),
-                         (0, 0))
-        self.assertEqual(P.register_changes("", "M", [P.ParamChange("1", "", "1")]),
-                         (0, 0))
-        self.assertEqual(P.register_changes(self.path, "M", []), (0, 0))
+def _entry(model, mode="", controller="", axis="", seiban="", kind="", motor="",
+           date="", basic="", items=None):
+    return P.ParamEntry(model=model, mode=mode, controller=controller, axis=axis,
+                        seiban=seiban, kind=kind, motor=motor, date=date, basic=basic,
+                        items=items or [])
 
 
-class TestDatabaseSets(unittest.TestCase):
-    """データベース（セット単位＝型式×制御×モード）の一覧・検索・セミ/フル区別。"""
+class TestEntries(unittest.TestCase):
+    """エントリ単位のデータベース: 登録(upsert)・履歴・編集・削除・検索・移行。"""
 
     def setUp(self):
         import tempfile, os
         self.path = os.path.join(tempfile.mkdtemp(), "db.csv")
-        # 同じ型式・同じ番号でも セミ/フル は別セット
-        P.register_changes(self.path, "RTT-137",
-                           [P.ParamChange("1825", "", "3000", controller="FANUC",
-                                          mode="フル", seiban="50013078", date="2026/06/23")])
-        P.register_changes(self.path, "RTT-137",
-                           [P.ParamChange("1825", "", "2000", controller="FANUC",
-                                          mode="セミ", seiban="50099999", date="2026/06/24")])
-        P.register_changes(self.path, "RWE-200",
-                           [P.ParamChange("2020", "", "265", controller="MELDAS",
-                                          mode="フル")])
-        self.changes = P.load_changes(self.path)
 
-    def test_semi_full_kept_separate(self):
-        # 同型式・同番号(1825)でも セミ/フル の2セットが共存する
-        sets = P.list_sets(self.changes)
-        rtt = [s for s in sets if P.normalize_model(s.model) == P.normalize_model("RTT-137")]
-        self.assertEqual({s.mode for s in rtt}, {"フル", "セミ"})
-        full = next(s for s in rtt if s.mode == "フル")
-        semi = next(s for s in rtt if s.mode == "セミ")
-        self.assertEqual(full.values()["1825"], "3000")
-        self.assertEqual(semi.values()["1825"], "2000")
+    def test_add_and_roundtrip_all_columns(self):
+        e = _entry("RTT-137", mode="フル", controller="F30", axis="A4",
+                   seiban="50013078", kind="傾斜", motor="αiS4", date="2026/06/23",
+                   basic="F30BASIC.PRM",
+                   items=[("1825", "2500", "位置ゲイン"), ("2020", "300", "")])
+        eid, action = P.upsert_entry(self.path, e)
+        self.assertEqual(action, "added")
+        got = P.get_entry(P.load_entries(self.path), eid)
+        self.assertEqual((got.model, got.mode, got.controller, got.axis, got.seiban,
+                          got.kind, got.motor, got.basic),
+                         ("RTT-137", "フル", "F30", "A4", "50013078", "傾斜",
+                          "αiS4", "F30BASIC.PRM"))
+        self.assertEqual(got.values(), {"1825": "2500", "2020": "300"})
+        self.assertEqual(got.items[0][2], "位置ゲイン")
 
-    def test_set_metadata(self):
-        sets = P.list_sets(self.changes)
-        full = next(s for s in sets
-                    if s.mode == "フル" and "137" in s.model)
-        self.assertEqual(full.seiban, "50013078")
-        self.assertEqual(full.date, "2026/06/23")
-        self.assertEqual(full.controller, "FANUC")
+    def test_semi_full_separate_entries(self):
+        P.upsert_entry(self.path, _entry("RTT-137", mode="フル", controller="F30",
+                                         axis="A4", items=[("1815", "00000010", "")]))
+        P.upsert_entry(self.path, _entry("RTT-137", mode="セミ", controller="F30",
+                                         axis="A4", items=[("1815", "00000000", "")]))
+        es = P.load_entries(self.path)
+        self.assertEqual(len(es), 2)
+        self.assertEqual({e.mode for e in es}, {"フル", "セミ"})
 
-    def test_changes_for_set(self):
-        semi = P.changes_for_set(self.changes, "RTT-137", "FANUC", "セミ")
-        self.assertEqual(len(semi), 1)
-        self.assertEqual(semi[0].value, "2000")
+    def test_history_by_axis_and_seiban(self):
+        # 同じ型式・モード・制御でも 軸 や Seiban が違えば別エントリ＝履歴
+        P.upsert_entry(self.path, _entry("RTT-137", mode="フル", controller="F30",
+                                         axis="A4", seiban="A", items=[("1825", "2500", "")]))
+        P.upsert_entry(self.path, _entry("RTT-137", mode="フル", controller="F31",
+                                         axis="A2", seiban="B", items=[("1825", "2500", "")]))
+        self.assertEqual(len(P.load_entries(self.path)), 2)
 
-    def test_search_by_query(self):
-        sets = P.list_sets(self.changes)
-        # Seiban で検索
-        self.assertEqual(len(P.search_sets(sets, "50099999")), 1)
-        # 番号で検索（1825 を含むセットは RTT-137 の2つ）
-        self.assertEqual(len(P.search_sets(sets, "1825")), 2)
+    def test_upsert_updates_same_config(self):
+        P.upsert_entry(self.path, _entry("RTT-137", mode="フル", controller="F30",
+                                         axis="A4", seiban="A", items=[("1825", "2500", "")]))
+        eid, action = P.upsert_entry(self.path, _entry(
+            "RTT-137", mode="フル", controller="F30", axis="A4", seiban="A",
+            items=[("1825", "9999", "")]))
+        self.assertEqual(action, "updated")
+        es = P.load_entries(self.path)
+        self.assertEqual(len(es), 1)
+        self.assertEqual(es[0].values()["1825"], "9999")
 
-    def test_filter_by_mode_and_controller(self):
-        sets = P.list_sets(self.changes)
-        self.assertEqual(len(P.search_sets(sets, mode="セミ")), 1)
-        self.assertEqual(len(P.search_sets(sets, controller="MELDAS")), 1)
-        self.assertEqual(len(P.search_sets(sets, model="RTT-137", mode="フル")), 1)
+    def test_unchanged_no_write(self):
+        import os
+        e = _entry("RTT-137", mode="フル", controller="F30", axis="A4", seiban="A",
+                   date="2026/06/23", items=[("1825", "2500", "")])
+        P.upsert_entry(self.path, e)
+        mtime = os.path.getmtime(self.path)
+        _, action = P.upsert_entry(self.path, _entry(
+            "RTT-137", mode="フル", controller="F30", axis="A4", seiban="A",
+            date="2026/06/23", items=[("1825", "2500", "")]))
+        self.assertEqual(action, "unchanged")
+        self.assertEqual(os.path.getmtime(self.path), mtime)
 
-    def test_csv_roundtrip_keeps_mode(self):
-        again = P.load_changes(self.path)
-        semi = P.changes_for_set(again, "RTT-137", "FANUC", "セミ")
-        self.assertEqual(semi[0].mode, "セミ")
-        self.assertEqual(semi[0].value, "2000")
+    def test_delete(self):
+        eid, _ = P.upsert_entry(self.path, _entry("RTT-137", items=[("1", "1", "")]))
+        P.upsert_entry(self.path, _entry("RWE-200", items=[("2", "2", "")]))
+        self.assertTrue(P.delete_entry(self.path, eid))
+        es = P.load_entries(self.path)
+        self.assertEqual([e.model for e in es], ["RWE-200"])
+        self.assertFalse(P.delete_entry(self.path, "zzzz"))
+
+    def test_update_entry_by_id(self):
+        eid, _ = P.upsert_entry(self.path, _entry("RTT-137", mode="フル",
+                                                  items=[("1825", "2500", "")]))
+        e = P.get_entry(P.load_entries(self.path), eid)
+        e.motor = "αiS8"
+        e.items = [("1825", "2500", ""), ("1826", "8", "")]
+        self.assertTrue(P.update_entry(self.path, e))
+        got = P.get_entry(P.load_entries(self.path), eid)
+        self.assertEqual(got.motor, "αiS8")
+        self.assertEqual(got.count(), 2)
+
+    def test_search_and_filter(self):
+        P.upsert_entry(self.path, _entry("RTT-137", mode="フル", controller="F30",
+                                         kind="傾斜", seiban="50013078",
+                                         items=[("1825", "2500", "")]))
+        P.upsert_entry(self.path, _entry("RTT-137", mode="セミ", controller="F30",
+                                         kind="傾斜", items=[("1825", "2000", "")]))
+        P.upsert_entry(self.path, _entry("RWE-200", mode="フル", controller="F31",
+                                         kind="回転", items=[("2020", "265", "")]))
+        es = P.load_entries(self.path)
+        self.assertEqual(len(P.search_entries(es, "50013078")), 1)
+        self.assertEqual(len(P.search_entries(es, mode="セミ")), 1)
+        self.assertEqual(len(P.search_entries(es, kind="回転")), 1)
+        self.assertEqual(len(P.search_entries(es, controller="F30")), 2)
+        self.assertEqual(len(P.search_entries(es, "1825")), 2)
+
+    def test_migrates_old_csv_without_id(self):
+        # 旧スキーマ(IDなし)のCSVも (型式×制御×モード) でエントリ化して読める
+        P.write_changes(self.path, P.parse_changes(SAMPLE_CSV_CTRL))
+        es = P.load_entries(self.path)
+        self.assertTrue(all(e.id for e in es))  # IDが振られている
+        models = {e.model for e in es}
+        self.assertIn("RTT-301DA", models)
+
+    def test_helpers(self):
+        self.assertEqual(P.kind_from_prefix("T"), "傾斜")
+        self.assertEqual(P.kind_from_prefix("R"), "回転")
+        self.assertEqual(P.controller_from_basic("/x/F30BASIC.PRM"), "F30")
+        self.assertEqual(P.controller_from_basic("F31BASIC.prm"), "F31")
+
+    def test_axis_name_number(self):
+        # 第1〜6軸 = X,Y,Z,A,B,C（第4軸が回転/傾斜の A 軸）
+        self.assertEqual([P.axis_name(n) for n in range(1, 7)],
+                         ["X", "Y", "Z", "A", "B", "C"])
+        self.assertEqual(P.axis_number("A"), 4)
+        self.assertEqual(P.axis_number("X"), 1)
+        self.assertEqual(P.axis_number("C"), 6)
+        self.assertEqual(P.axis_number("A4"), 4)  # 'A4'/'4' も許容
+        self.assertEqual(P.axis_number(""), 0)
 
 
 class TestParamFile(unittest.TestCase):

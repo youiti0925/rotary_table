@@ -3899,6 +3899,11 @@ class MainWindow(QtWidgets.QMainWindow):
         b_load.clicked.connect(self.load)
         b_settings.clicked.connect(self.open_settings)
         b_help.clicked.connect(self.show_help)
+        # ロード名・取込手順は最上部ツールバーの「アラーム」の右に出す（場所を取らない）
+        self.guide = QtWidgets.QLabel("―")
+        self.guide.setObjectName("guide")
+        self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+        self.guide.setStyleSheet("padding:1px 10px;")
         toolbar = QtWidgets.QToolBar("操作")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
@@ -3916,6 +3921,8 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addSeparator()
         for b in (self.b_cond, self.b_program, self.b_param, self.b_pcorr, self.b_alarm):
             toolbar.addWidget(b)
+        toolbar.addSeparator()
+        toolbar.addWidget(self.guide)        # ロード名・取込手順（アラームの右）
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                              QtWidgets.QSizePolicy.Preferred)
@@ -3923,11 +3930,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(b_settings)
         toolbar.addWidget(b_help)
 
-        # ===== ガイドと受信値・データ数 =====
-        self.guide = QtWidgets.QLabel("―")
-        self.guide.setObjectName("guide")
-        self.guide.setAlignment(QtCore.Qt.AlignCenter)
-        self.guide.setStyleSheet("padding:1px 6px;")
+        # ===== 受信値・データ数 =====
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = QtWidgets.QLabel("")
@@ -4049,14 +4052,13 @@ class MainWindow(QtWidgets.QMainWindow):
         counts_row.addWidget(self.counts, 1)
         plots_widget.setMinimumHeight(240)
 
-        # 左カラム: 測定情報/条件 → ガイド(ロード名/手順) → 操作バー → グラフ。
-        # ガイドは測定条件の下に置く（上端に置くと上の余白が詰められないため）。
+        # 左カラム: 測定情報/条件 → 操作バー → データ数 → グラフ。
+        # （ロード名/取込手順のガイドは最上部ツールバーへ移したのでここには置かない）
         left_col = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left_col)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
         lv.addLayout(top_left, 0)
-        lv.addWidget(self.guide, 0)         # ロード名・取込手順は測定条件の下に表示
         lv.addLayout(bar, 0)
         lv.addLayout(counts_row, 0)         # データ数（横いっぱい・必要なら折返し）
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
@@ -4075,6 +4077,16 @@ class MainWindow(QtWidgets.QMainWindow):
         rv.addWidget(self.table_misc, 0)     # バックラッシ
         rv.addStretch(1)                     # 表は上に寄せ、余白は下へ
 
+        # 精度結果は必ずスクロール領域に入れる。フォント/DPI/OSで内容が縦に伸びても
+        # 縦スクロールで全行（任意誤差・主点精度・バックラッシ）に必ず到達できる＝
+        # どんな環境でも切れない（固定高さの当てずっぽうに依存しない根本対策）。
+        self.right_scroll = QtWidgets.QScrollArea()
+        self.right_scroll.setWidget(right_col)
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.right_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+
         # 左（条件＋グラフ）と右（精度結果の縦長列）を横に並べる。右カラムの幅は
         # フォントに合わせて固定し（apply_ui_fonts で設定）、実機のフォントが大きく
         # ても数値やバックラッシ値が切れない。余りはすべて左（グラフ）が使う。
@@ -4083,7 +4095,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ph.setContentsMargins(6, 4, 6, 6)
         ph.setSpacing(8)
         ph.addWidget(left_col, 1)           # グラフ側が残り幅をすべて使う
-        ph.addWidget(right_col, 0)          # 右は精度結果の縦長列（フォント連動の固定幅）
+        ph.addWidget(self.right_scroll, 0)  # 右は精度結果（スクロール付き縦長列）
         self.setCentralWidget(page)
         self.apply_ui_fonts()
         # 表示後に各表の高さを中身（行数）に合わせる
@@ -5685,14 +5697,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_right_col_width()
 
     def _fit_right_col_width(self):
-        """右カラム幅を精度表（系列＋数値2列）の中身ぶんに合わせる。
+        """右スクロール領域の幅を精度表（系列＋数値2列）の中身ぶんに合わせる。
 
-        全列 ResizeToContents なので、各列は中身ぶんの幅。その合計に右カラムを
-        合わせると、数値セルが無駄に大きくならず、右端に余白も出ない。バックラッシ
-        表は全幅1行（必要なら折返し）なので幅決定には使わない。グラフが残り幅を使う。
+        全列 ResizeToContents なので各列は中身ぶんの幅。その合計＋縦スクロールバー幅を
+        スクロール領域に与えると、数値セルが無駄に大きくならず、縦スクロールバーが
+        出ても表が隠れない。バックラッシ表は全幅1行なので幅決定には使わない。
         """
-        rc = getattr(self, "right_col", None)
-        if rc is None:
+        sc = getattr(self, "right_scroll", None)
+        if sc is None:
             return
         need = 0
         for t in (self.table_series, self.table_series2):
@@ -5704,7 +5716,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 s += t.columnWidth(c)
             need = max(need, s)
         if need > 0:
-            rc.setFixedWidth(max(220, min(need, 480)))
+            sbw = sc.verticalScrollBar().sizeHint().width() or 16
+            sc.setFixedWidth(max(220, min(need, 480)) + sbw + 2)
 
     def fill_misc_table(self, rows):
         # バックラッシ表は「項目＋値」を1行まるごと（全列結合）で表示する。

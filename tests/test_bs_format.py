@@ -81,6 +81,26 @@ class TestParseRealFile(unittest.TestCase):
         self.assertEqual(regenerated, self.text)
 
 
+class TestFullRealFile(unittest.TestCase):
+    """実物の完全な 260976K.BS（回転分割・全61行）がバイト一致で往復すること"""
+
+    FULL = Path(__file__).parent / "fixtures" / "260976K.bs"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.FULL.read_text(encoding="utf-8")
+        cls.doc = parse_bs(cls.text)
+
+    def test_header(self):
+        self.assertEqual(self.doc["model"], "RW-250R")
+        self.assertEqual(self.doc["spec_min"], 10.0)
+        self.assertEqual(self.doc["spec_max"], 24.0)
+
+    def test_roundtrip_byte_identical(self):
+        # 読み込み→書き出しで実物と完全一致（ロード→セーブで崩れない）
+        self.assertEqual(format_bs(self.doc, newline="\n"), self.text)
+
+
 class TestConversion(unittest.TestCase):
     """アプリの測定データ形式との相互変換"""
 

@@ -3691,31 +3691,12 @@ class MainWindow(QtWidgets.QMainWindow):
             v.addLayout(row)
             return box
 
-        # 評価範囲1・2は横に並べる（縦積みで右に空白を作らない）
+        # 評価範囲1・2は横に並べる（縦積みで右に空白を作らない）。
+        # ホイールの開始/終了角度は「ホイール」群（刻みの真下）へ移したのでここには置かない。
         ranges_h.addWidget(range_block(self.c_r1, self.e_r1s, self.e_r1e),
                            0, QtCore.Qt.AlignTop)
         ranges_h.addWidget(range_block(self.c_r2, self.e_r2s, self.e_r2e),
                            0, QtCore.Qt.AlignTop)
-        # ホイールの開始/終了角度も同じ横帯に並べる（ホイール群から移して縦を詰める）
-        self.l_wstart2 = QtWidgets.QLabel("開始角度")
-        self.l_wend2 = QtWidgets.QLabel("終了角度")
-        wr_head = QtWidgets.QLabel("ホイール範囲")
-        _wf = wr_head.font(); _wf.setBold(True); wr_head.setFont(_wf)
-        wr_head.setStyleSheet("background:#e3e9f2; padding:2px 6px;")
-        wrange = QtWidgets.QWidget()
-        wrv = QtWidgets.QVBoxLayout(wrange)
-        wrv.setContentsMargins(0, 0, 0, 0)
-        wrv.setSpacing(2)
-        wrv.addWidget(wr_head)
-        wrow = QtWidgets.QHBoxLayout()
-        wrow.setContentsMargins(12, 0, 0, 0)
-        wrow.setSpacing(4)
-        wrow.addWidget(self.l_wstart2)
-        wrow.addWidget(self.e_wstart)
-        wrow.addWidget(self.l_wend2)
-        wrow.addWidget(self.e_wend)
-        wrv.addLayout(wrow)
-        ranges_h.addWidget(wrange, 0, QtCore.Qt.AlignTop)
         ranges_h.addStretch(1)
         for check in (self.c_r1, self.c_r2):
             check.toggled.connect(self.refresh_results)
@@ -3757,10 +3738,16 @@ class MainWindow(QtWidgets.QMainWindow):
         wg.setContentsMargins(0, 0, 0, 0)
         wg.setHorizontalSpacing(8)
         wg.setVerticalSpacing(3)
-        # 開始/終了角度は評価範囲の横帯へ移したので、ここは刻みだけ
+        # 傾斜分割では 刻み の真下に 開始/終了角度 を置く（刻みと範囲を近くに）
         wg.addWidget(cond_header("ホイール"), 0, 0, 1, 4)
         wg.addWidget(QtWidgets.QLabel("刻み"), 1, 0)
         wg.addWidget(self.e_wheel, 1, 1)
+        self.l_wstart2 = QtWidgets.QLabel("開始角度")
+        self.l_wend2 = QtWidgets.QLabel("終了角度")
+        wg.addWidget(self.l_wstart2, 2, 0)
+        wg.addWidget(self.e_wstart, 2, 1)
+        wg.addWidget(self.l_wend2, 2, 2)
+        wg.addWidget(self.e_wend, 2, 3)
         wg.setColumnStretch(4, 1)
 
         # ウォーム群

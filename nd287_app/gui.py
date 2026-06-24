@@ -3921,12 +3921,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = QtWidgets.QLabel("")
-        # 受信点数はグラフのすぐ上に大きく出す（例 ホイール CW 3/36）。
-        # 系列が4つ（ホイール/ウォーム×CW/CCW）あると横に長いので、専用行に置いて
-        # 横幅をいっぱい使えるようにし、足りなければ折返して切れないようにする。
+        # 受信点数はグラフ拡大ボタンの右に小さめで出す（例 ホイール CW 3/36）。
+        # 4系列で横に長くなるので、フォントは控えめ(9pt)にして場所を取らない。
         self.counts.setStyleSheet(
-            "color:#1d4ed8; padding:2px 6px; font-weight:bold; font-size:13pt;")
-        self.counts.setWordWrap(True)
+            "color:#1d4ed8; padding:2px 6px; font-weight:bold; font-size:9pt;")
 
         # ===== グラフ（分割: 左ホイール/右ウォーム 7:3。再現性: 左のみ）=====
         self.plot_wheel = pg.PlotWidget(title="ホイール")
@@ -4025,21 +4023,20 @@ class MainWindow(QtWidgets.QMainWindow):
         top_left.addStretch(1)
 
         # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
+        # データ数はグラフ拡大ボタンのすぐ右に小さめで置く（左カラム内なので精度結果に被らない）。
+        self.counts.setWordWrap(False)
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(2, 0, 2, 0)
         bar.setSpacing(10)
         bar.addWidget(ops_group)
         bar.addWidget(self.corr_bar)        # 補正前/後（分割系のみ表示）
         bar.addWidget(self.b_zoom)          # グラフ拡大（全モードで常に表示）
+        bar.addWidget(self.counts)          # データ数（グラフ拡大の右・小さめ）
         bar.addWidget(self.live)
         bar.addStretch(1)
-        # データ数はバーに詰めず専用行へ（バーのボタンと幅を取り合って切れないように）
-        counts_row = QtWidgets.QHBoxLayout()
-        counts_row.setContentsMargins(2, 0, 2, 0)
-        counts_row.addWidget(self.counts, 1)
         plots_widget.setMinimumHeight(240)
 
-        # 左カラム: 測定情報/条件 → 操作バー → データ数 → グラフ。
+        # 左カラム: 測定情報/条件 → 操作バー(データ数を含む) → グラフ。
         # （ロード名/取込手順のガイドは最上部ツールバーへ移したのでここには置かない）
         left_col = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left_col)
@@ -4047,7 +4044,6 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.setSpacing(4)
         lv.addLayout(top_left, 0)
         lv.addLayout(bar, 0)
-        lv.addLayout(counts_row, 0)         # データ数（横いっぱい・必要なら折返し）
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
 
         # 右カラム（縦長）: 精度PP・傾き → 単一・隣接 → バックラッシ を上下に積み、

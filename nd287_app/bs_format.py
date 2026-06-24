@@ -228,10 +228,14 @@ def data_to_doc(data, summary, *, model, date, operator, temperature,
                 deviation_sec([p[0] for p in ordered], [p[1] for p in ordered])
                 if ordered else []
             )
+            # 主点グリッド: n=主点ステップ（例 30°主点・10°刻みなら3）、
+            # points=主点数（総区間 n_points をステップで割った数）。旧アプリ準拠。
+            main_step = max(int(step), 1)
+            main_points = n_points // main_step if main_step else n_points
             doc["series"][section] = dict(
-                interval=int(round(pitch * 10000)),
-                n=1,
-                points=n_points,
+                interval=int(round(pitch * main_step * 10000)),  # 主点グリッド間隔
+                n=main_step,
+                points=main_points,
                 slope=_ascending_slope(meas_targets, meas),
                 acc1=_half_round(pp_step(devs, step)),
                 acc2=_half_round(slope_corrected_pp(devs)),

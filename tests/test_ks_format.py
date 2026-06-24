@@ -80,6 +80,20 @@ class TestTiltAccuracyParity(unittest.TestCase):
         self.assertEqual((acc["ccw"]["h"], acc["ccw"]["w"], acc["ccw"]["total"]),
                          (7.0, 4.5, 11.5))
 
+    def test_detrend_flags_default_is_legacy(self):
+        # 既定（detrend_h=False, detrend_w=True）は旧アプリ・.KS と同じ
+        acc = tilt_accuracy(self.data, detrend_h=False, detrend_w=True)
+        self.assertEqual(acc["cw"]["total"], 20.0)
+        self.assertEqual(acc["ccw"]["total"], 20.0)
+
+    def test_before_after_differ(self):
+        # 補正前(素H+素W) と 補正後(補正H+補正W) で任意誤差が変わる（画面トグル連動）
+        before = tilt_accuracy(self.data, detrend_h=False, detrend_w=False)
+        after = tilt_accuracy(self.data, detrend_h=True, detrend_w=True)
+        self.assertEqual(before["ccw"]["total"], 19.5)   # 素15.5 + 素4.0
+        self.assertEqual(after["ccw"]["total"], 20.5)    # 補正16.0 + 補正4.5
+        self.assertNotEqual(before["ccw"]["total"], after["ccw"]["total"])
+
     def test_data_series(self):
         self.assertEqual(len(self.data["wheel_cw"][0]), 73)
         self.assertEqual(self.data["wheel_cw"][0][0], -180.0)

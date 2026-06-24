@@ -172,11 +172,14 @@ def _devs(targets, measured):
     return deviation_sec([p[0] for p in pairs], [p[1] for p in pairs])
 
 
-def tilt_accuracy(data, range_=None) -> dict:
+def tilt_accuracy(data, range_=None, *, detrend_h=False, detrend_w=True) -> dict:
     """傾斜分割の精度評価（261166ITYで旧アプリと一致を確認した式）
 
     range_: (開始角度, 終了角度) を渡すとホイールをその範囲だけで評価する
             （客先要求による部分抜き出し評価）。ウォームは常に全範囲。
+    detrend_h / detrend_w: 各精度を傾き補正後PPで計算するか。既定は旧アプリ・.KS
+            互換（H=素のPP、W=傾き補正後PP）。画面の補正前/後トグルに合わせるときは
+            両方 False（補正前＝素）／両方 True（補正後＝傾き補正）で呼ぶ。
     返り値: {"cw": {"h":…, "w":…, "total":…}, "ccw": {...}}
     """
     result = {}
@@ -192,9 +195,9 @@ def tilt_accuracy(data, range_=None) -> dict:
         w_dev = _devs(*data.get(w_key, ([], [])))
         entry = {}
         if h_dev is not None and len(h_dev) >= 2:
-            entry["h"] = _half_round(pp(h_dev))           # 精度H: 素のPP
+            entry["h"] = _half_round(detrended_pp(h_dev) if detrend_h else pp(h_dev))
         if w_dev is not None and len(w_dev) >= 2:
-            entry["w"] = _half_round(detrended_pp(w_dev))  # 精度W: 傾き補正後PP
+            entry["w"] = _half_round(detrended_pp(w_dev) if detrend_w else pp(w_dev))
         if "h" in entry and "w" in entry:
             entry["total"] = entry["h"] + entry["w"]  # 任意誤差 = H + W
         result[dirn] = entry

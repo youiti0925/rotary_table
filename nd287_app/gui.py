@@ -5524,7 +5524,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 上の表＝精度PP＋傾き。単一値の主点精度・任意誤差もこちら（精度なので）
         extra = [("― 主点精度（1/N）―", self.main_grid_rows())]
         if self.is_tilt():
-            extra.append(("― 任意誤差（精度=H+W）―", self.tilt_accuracy_rows()))
+            # 画面の任意誤差は補正前/後トグルに連動（ホイール/ウォームPPと同じ基準）
+            extra.append(("― 任意誤差（精度=H+W）―",
+                          self.tilt_accuracy_rows(corrected=self.show_corrected)))
         self._render_metric_table(self.table_series, PP_SLOPE_HEADERS, build(0, 3, extra))
         # 下の表＝単一誤差＋隣接誤差
         self._render_metric_table(self.table_series2, SINGLE_ADJ_HEADERS, build(1, 2))
@@ -5605,8 +5607,18 @@ class MainWindow(QtWidgets.QMainWindow):
                          f'{pp(devs[::step]):.1f}"'))
         return rows
 
-    def tilt_accuracy_rows(self):
-        """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）"""
+    def tilt_accuracy_rows(self, corrected=None):
+        """傾斜分割の任意誤差評価（精度 = ホイール精度 + ウォーム精度）。
+
+        corrected=None: 旧アプリ・.KS と同じ固定式（素H＋傾き補正W）。印刷・保存・記録用。
+        corrected=False: 画面の補正前（素H＋素W）。
+        corrected=True : 画面の補正後（傾き補正H＋傾き補正W）。
+        画面の補正前/後トグルに合わせると、ホイール/ウォームPPと同じ基準になる。
+        """
+        if corrected is None:
+            dh, dw = False, True       # 旧アプリ・.KS 互換（固定）
+        else:
+            dh = dw = bool(corrected)  # 画面の補正前/後トグルに連動
         specs = [("全範囲", None)]
         if self.c_r1.isChecked():
             specs.append(("範囲1", (self.e_r1s.value(), self.e_r1e.value())))
@@ -5614,7 +5626,7 @@ class MainWindow(QtWidgets.QMainWindow):
             specs.append(("範囲2", (self.e_r2s.value(), self.e_r2e.value())))
         rows = []
         for label, range_ in specs:
-            acc = tilt_accuracy(self.data, range_=range_)
+            acc = tilt_accuracy(self.data, range_=range_, detrend_h=dh, detrend_w=dw)
             for dirn, jp in (("cw", "正"), ("ccw", "逆")):
                 entry = acc.get(dirn, {})
                 if "total" in entry:

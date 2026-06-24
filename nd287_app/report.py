@@ -27,6 +27,7 @@ def _canonical_metrics():
     for label in ("ホイール", "ウォーム"):
         order.append(f"{label}BL MIN")
         order.append(f"{label}BL MAX")
+    order += ["任意誤差 CW", "任意誤差 CCW"]   # 傾斜分割（精度=H+W）
     order += ["再現性CW", "再現性CCW", "再現性総合"]
     return order
 
@@ -319,8 +320,10 @@ def record_from_ks(path):
             metrics[key] = arr[idx]
     put("ホイール CW 精度PP", acc_cw, 0)
     put("ウォーム CW 精度PP", acc_cw, 1)
+    put("任意誤差 CW", acc_cw, 2)          # 精度=H+W（傾斜分割の任意誤差）
     put("ホイール CCW 精度PP", acc_ccw, 0)
     put("ウォーム CCW 精度PP", acc_ccw, 1)
+    put("任意誤差 CCW", acc_ccw, 2)
     mn = min3[0] if min3 else None
     mx = max3[0] if max3 else None
     if mn is not None and mx is not None:

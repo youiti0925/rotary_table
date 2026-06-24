@@ -37,6 +37,7 @@ from .analysis import (
     band_for_temp,
     composite_backlash_minmax,
     composite_backlash_at_zero,
+    adjacent_peak,
     deviation_sec,
     pp,
     repeatability_summary,
@@ -148,6 +149,36 @@ def _legend_html(pairs):
     """[(名前, 色)] → 色つき●つきの凡例HTML。"""
     return "　".join(
         f'<span style="color:{c};">●</span> {name}' for name, c in pairs)
+
+
+def mark_adjacent_peak(plot, t, d, spec=None, with_label=True):
+    """系列(t,d)の「隣接誤差が最大の点」にひし形マーク＋値ラベルを付ける。
+
+    規格(spec)超えなら赤、規格内なら紫。グラフ上で「隣接が外れている場所はここ」
+    を示す。戻り値: 追加したプロット要素のリスト（消すときに使う）。
+    """
+    import numpy as _np
+    if spec is None:
+        spec = ADJACENT_SPEC
+    t = _np.asarray(t, dtype=float)
+    d = _np.asarray(d, dtype=float)
+    if len(d) < 3:
+        return []
+    peak = adjacent_peak(d)
+    if peak is None:
+        return []
+    idx, val = peak
+    x, y = float(t[idx]), float(d[idx])
+    over = spec is not None and val > spec
+    color = "#dc2626" if over else "#7c3aed"
+    items = [plot.plot([x], [y], pen=None, symbol="d", symbolSize=15,
+                       symbolBrush=color, symbolPen=pg.mkPen("k", width=1))]
+    if with_label:
+        txt = pg.TextItem(f'隣接 {val:.1f}"', color=color, anchor=(0.5, 1.4))
+        txt.setPos(x, y)
+        plot.addItem(txt)
+        items.append(txt)
+    return items
 
 
 BAUDRATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
@@ -3099,6 +3130,7 @@ class AnalysisDialog(QtWidgets.QDialog):
                     target = (self.single_plot_wheel if key.startswith("wheel")
                               else self.single_plot_worm)
                     target.plot(ser[0], ser[1], **style)
+                    mark_adjacent_peak(target, ser[0], ser[1])  # 隣接最大の位置を表示
                     pair = (SERIES_LABELS.get(key, key), colors.get(key, "#333"))
                     (wheel_leg if key.startswith("wheel") else worm_leg).append(pair)
             self.single_legend_wheel.setText(_legend_html(wheel_leg))
@@ -3398,6 +3430,7 @@ class GraphZoomDialog(QtWidgets.QDialog):
                 if ser and ser[0]:
                     target = wheel if key.startswith("wheel") else worm
                     target.plot(ser[0], ser[1], name=SERIES_LABELS.get(key, key), **st)
+                    mark_adjacent_peak(target, ser[0], ser[1])  # 隣接最大の位置を表示
             row = QtWidgets.QHBoxLayout()
             row.addWidget(wheel, 7)
             if not win.is_tilt() or any(devs.get(k) and devs[k][0]
@@ -4059,6 +4092,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_zoom = QtWidgets.QPushButton("グラフ拡大")
         self.b_zoom.setToolTip("グラフを画面いっぱいに拡大表示する")
         self.b_zoom.clicked.connect(self.show_graph_zoom)
+        # 隣接誤差が最大の位置をグラフ上にマーク（◆）するトグル
+        self.b_adjmark = QtWidgets.QPushButton("隣接位置")
+        self.b_adjmark.setCheckable(True)
+        self.b_adjmark.setChecked(True)
+        self.b_adjmark.setToolTip("各系列の隣接誤差が最大の点をグラフ上に◆で示す")
+        self.b_adjmark.toggled.connect(lambda _: self.redraw())
+        self._adj_items = []
         # グラフ拡大は corr_bar に入れず、下のバーへ（全モードで常に表示）
 
         # ===== 全体レイアウト（左＝条件＋グラフ / 右＝精度結果の縦長列）=====
@@ -4086,6 +4126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(ops_group)
         bar.addWidget(self.corr_bar)        # 補正前/後（分割系のみ表示）
         bar.addWidget(self.b_zoom)          # グラフ拡大（全モードで常に表示）
+        bar.addWidget(self.b_adjmark)       # 隣接位置マークの表示トグル
         bar.addWidget(self.counts)          # データ数（グラフ拡大の右・小さめ）
         bar.addWidget(self.live)
         bar.addStretch(1)
@@ -5417,6 +5458,24 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 curve.setData([], [])
         self._update_main_markers(devs)
+        self._update_adjacent_markers(devs)
+
+    def _update_adjacent_markers(self, devs):
+        """各系列の隣接誤差が最大の点を◆でマーク（トグルON時）。本画面は値ラベル無し。"""
+        for plot, it in getattr(self, "_adj_items", []):
+            try:
+                plot.removeItem(it)
+            except Exception:
+                pass
+        self._adj_items = []
+        if not self.b_adjmark.isChecked():
+            return
+        for key, ser in (devs or {}).items():
+            if not ser or len(ser[0]) < 3:
+                continue
+            plot = self.plot_wheel if key.startswith("wheel") else self.plot_worm
+            for it in mark_adjacent_peak(plot, ser[0], ser[1], with_label=False):
+                self._adj_items.append((plot, it))
 
     def _update_main_markers(self, devs):
         """主点（1/N）の点だけを大きいマーカーで重ねる。主点評価Nに追従。"""

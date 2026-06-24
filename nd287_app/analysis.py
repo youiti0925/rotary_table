@@ -93,6 +93,29 @@ def adjacent(dev):
     return float(np.abs(np.diff(s)).max()) if len(s) >= 2 else 0.0
 
 
+def adjacent_peak(dev):
+    """隣接誤差(突起)が最大になる点の (index, 値[秒])。点が3未満なら None。
+
+    突起は3点 dev[i-1], dev[i], dev[i+1] の山/谷で、中心の点 i に現れる。
+    グラフ上で「ここが隣接の最大」を指すための位置に使う。
+    """
+    s = step_errors(dev)
+    if len(s) < 2:
+        return None
+    d = np.abs(np.diff(s))           # d[j] は中心点 j+1 の突起の大きさ
+    j = int(np.argmax(d))
+    return (j + 1, float(d[j]))
+
+
+def single_peak(dev):
+    """単一誤差が最大になるステップの (始点index, 終点index, 値[秒])。無ければ None。"""
+    s = step_errors(dev)
+    if len(s) < 1:
+        return None
+    i = int(np.argmax(np.abs(s)))
+    return (i, i + 1, float(abs(s[i])))
+
+
 def slope(dev):
     """傾き[秒] = 終了角度の偏差 - 開始角度の偏差（測定順）
 

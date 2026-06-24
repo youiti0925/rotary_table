@@ -44,6 +44,15 @@ class TestDeviation(unittest.TestCase):
         self.assertAlmostEqual(adjacent([1.0, 0.0, -2.0]), 1.0)
         self.assertEqual(adjacent([5.0, 6.0]), 0.0)
 
+    def test_adjacent_peak_location(self):
+        from nd287_app.analysis import adjacent_peak, single_peak
+        # steps +4,-6 → 突起10" は中心点(index1)に出る
+        self.assertEqual(adjacent_peak([0.0, 4.0, -2.0]), (1, 10.0))
+        # 点が3未満なら None
+        self.assertIsNone(adjacent_peak([5.0, 6.0]))
+        # 単一誤差最大は -6 のステップ（index1→2）、値6
+        self.assertEqual(single_peak([0.0, 4.0, -2.0]), (1, 2, 6.0))
+
     def test_slope(self):
         # 傾き = 終了の偏差 - 開始の偏差（測定順）
         self.assertAlmostEqual(slope([1.0, 0.0, -2.0]), -3.0)

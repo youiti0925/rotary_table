@@ -130,6 +130,12 @@ class TestCompositeBacklash(unittest.TestCase):
         mm = self.calc(self.data, range_=(-30.0, 90.0))
         self.assertEqual((self.disp(mm[1]), self.disp(mm[0])), (20.2, 9.4))
 
+    def test_backlash_at_zero(self):
+        # 0°位置の総合バックラッシ（回転=実測値に合わせる補正の基準値）。
+        # 0°合わせの定義上＝ウォーム0°位置のバックラッシ。
+        from nd287_app.analysis import composite_backlash_at_zero
+        self.assertAlmostEqual(composite_backlash_at_zero(self.data), 15.0, places=1)
+
 
 class TestKsSave(unittest.TestCase):
     """アプリの測定データ → .KS 書き出し"""

@@ -292,3 +292,19 @@ def composite_backlash_minmax(data, range_=None):
     if not values:
         return None
     return (float(min(values)), float(max(values)))
+
+
+def composite_backlash_at_zero(data):
+    """総合バックラッシの 0°位置の値[秒]（補正前）。
+
+    0°合わせの定義上、0°位置の総合バックラッシ＝ウォーム0°位置のバックラッシ
+    （composite_backlash_minmax の導出より）。バックラッシ手動補正で「回転＝
+    0°位置のバックラッシ量を実測値に合わせる」ときの基準『今の値』に使う。
+    計算不能なら None。
+    """
+    worm = _paired_backlash(data, "worm")
+    if not worm:
+        return None
+    # ウォームの 0°位置（|t| 最小）の点のバックラッシ
+    t0 = min(range(len(worm)), key=lambda i: abs(worm[i][0]))
+    return float(worm[t0][1])

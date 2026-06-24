@@ -36,6 +36,7 @@ from .analysis import (
     adjacent,
     band_for_temp,
     composite_backlash_minmax,
+    composite_backlash_at_zero,
     deviation_sec,
     pp,
     repeatability_summary,
@@ -3690,8 +3691,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_blcorr.setDecimals(2)
         self.e_blcorr.setSuffix(' "')
         self.e_blcorr.setToolTip(
-            "実際のメカ的な隙間が測定結果と差がある場合の補正値。\n"
-            "測定結果に対して何秒多いか（+）少ないか（−）を入力して補正適用"
+            "0°位置のバックラッシ量を実測に合わせる補正（CCWを上下に平行移動）。\n"
+            "回転: 0°位置の実測値を入力（例 今10\"・実測15\"→「15」と入力）。0=補正なし。\n"
+            "傾斜: 減らす量を入力（例 今20\"・実測12\"→「8」と入力＝8\"減）。\n"
+            "入力後『補正適用』。判定・保存も補正後の値になります。"
         )
         self.b_corr = QtWidgets.QPushButton("補正適用")
         self.b_corr.setEnabled(False)
@@ -5329,12 +5332,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_guide()
 
     def apply_correction(self):
-        """バックラッシ手動補正を確定し、結果と合否判定を再計算する"""
-        self.applied_blcorr = self.e_blcorr.value()
+        """バックラッシ手動補正を確定し、結果と合否判定を再計算する。
+
+        補正欄の意味はモードで異なる（旧アプリ準拠）:
+          回転 … 入力＝0°位置の実測バックラッシ量。0°位置がその値になるよう全体をシフト
+                 （シフト量 = 入力 − 現在の0°位置バックラッシ）。0入力＝補正なし。
+          傾斜 … 入力＝減らす量。全体をその分だけ下げる（シフト量 = −入力）。
+        いずれも CCW を上下に平行移動するのと同じで、確定後は applied_blcorr に
+        「実シフト量」を入れて以降の計算（summarize・総合BL・保存）で共通に足す。
+        """
+        field = self.e_blcorr.value()
+        if not field:
+            self.applied_blcorr = 0.0
+        elif self.is_tilt():
+            self.applied_blcorr = -field                       # 傾斜: 入れた分だけ減らす
+        else:
+            b0 = composite_backlash_at_zero(self.data)         # 回転: 0°位置を実測値へ
+            self.applied_blcorr = field - b0 if b0 is not None else field
         self.finish()
-        if self.applied_blcorr:
+        if field:
+            mode = "傾斜（減算）" if self.is_tilt() else "回転（0°位置を実測値に）"
             self.statusBar().showMessage(
-                f"バックラッシ補正 {self.applied_blcorr:+.2f}\" を適用しました"
+                f"バックラッシ補正 {mode}: 入力{field:+.2f}\" → "
+                f"シフト{self.applied_blcorr:+.2f}\" を適用"
             )
         else:
             self.statusBar().showMessage("バックラッシ補正を解除しました（補正0）")

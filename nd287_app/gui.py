@@ -123,6 +123,32 @@ CURVE_STYLES = {
     ),
 }
 
+def _legend_label():
+    """グラフの上に出す色つき凡例ラベル（グラフ内に置かずカーブに被らせない）。"""
+    lab = QtWidgets.QLabel()
+    lab.setTextFormat(QtCore.Qt.RichText)
+    lab.setAlignment(QtCore.Qt.AlignCenter)
+    lab.setStyleSheet("padding:0 6px;")
+    return lab
+
+
+def _plot_box(legend, plot):
+    """[凡例ラベル(上) ＋ グラフ] を縦に積んだ小箱。"""
+    box = QtWidgets.QWidget()
+    bv = QtWidgets.QVBoxLayout(box)
+    bv.setContentsMargins(0, 0, 0, 0)
+    bv.setSpacing(0)
+    bv.addWidget(legend, 0)
+    bv.addWidget(plot, 1)
+    return box
+
+
+def _legend_html(pairs):
+    """[(名前, 色)] → 色つき●つきの凡例HTML。"""
+    return "　".join(
+        f'<span style="color:{c};">●</span> {name}' for name, c in pairs)
+
+
 BAUDRATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 
 META_KEYS = {
@@ -2549,7 +2575,7 @@ class PastDataDialog(QtWidgets.QDialog):
         top.addWidget(QtWidgets.QLabel("上限"))
         self.e_count = QtWidgets.QSpinBox()
         self.e_count.setRange(1, 2000)
-        self.e_count.setValue(max(int(win.settings.get("recent_count") or 10), 50))
+        self.e_count.setValue(int(win.settings.get("recent_count") or 5))
         self.e_count.setSuffix(" 件")
         top.addWidget(self.e_count)
         b_search = QtWidgets.QPushButton("検索")
@@ -2769,7 +2795,7 @@ class AnalysisDialog(QtWidgets.QDialog):
         top.addWidget(QtWidgets.QLabel("上限"))
         self.sp_count = QtWidgets.QSpinBox()
         self.sp_count.setRange(1, 2000)
-        self.sp_count.setValue(max(int(self.win.settings.get("recent_count") or 10), 50))
+        self.sp_count.setValue(int(self.win.settings.get("recent_count") or 5))
         self.sp_count.setSuffix(" 件")
         top.addWidget(self.sp_count)
         b_search = QtWidgets.QPushButton("検索")
@@ -2808,6 +2834,17 @@ class AnalysisDialog(QtWidgets.QDialog):
         opt.addStretch(1)
         v.addLayout(opt)
 
+        # 出力ボタンは上に置く（下だと画面に収まらず見えないことがあるため）
+        btns = QtWidgets.QHBoxLayout()
+        for label, slot in (("CSV出力", self.export_compare_csv),
+                            ("Excel出力", self.export_compare_xlsx),
+                            ("印刷", self.print_compare)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        btns.addStretch(1)
+        v.addLayout(btns)
+
         self.cmp_table = QtWidgets.QTableWidget(0, 0)
         self.cmp_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
         self.cmp_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
@@ -2818,16 +2855,6 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.cmp_plot.setLabel("left", "値", units='"')
         self.cmp_plot.getAxis("left").enableAutoSIPrefix(False)
         v.addWidget(self.cmp_plot, 2)
-
-        btns = QtWidgets.QHBoxLayout()
-        btns.addStretch(1)
-        for label, slot in (("CSV出力", self.export_compare_csv),
-                            ("Excel出力", self.export_compare_xlsx),
-                            ("印刷", self.print_compare)):
-            b = QtWidgets.QPushButton(label)
-            b.clicked.connect(slot)
-            btns.addWidget(b)
-        v.addLayout(btns)
         return w
 
     def reload_compare(self, *args):
@@ -3003,33 +3030,45 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.single_meta.setStyleSheet("font-weight:bold;")
         self.single_meta.setWordWrap(True)
         v.addWidget(self.single_meta)
-        self.single_plot = pg.PlotWidget()
-        self.single_plot.addLegend(offset=(10, 10))
-        self.single_plot.setLabel("bottom", "指令角度", units="°")
-        self.single_plot.setLabel("left", "偏差", units='"')
-        self.single_plot.showGrid(x=True, y=True, alpha=0.3)
-        for axis in ("left", "bottom"):
-            self.single_plot.getAxis(axis).enableAutoSIPrefix(False)
-        v.addWidget(self.single_plot, 3)
-        self.single_table = QtWidgets.QTableWidget(0, 2)
-        self.single_table.setHorizontalHeaderLabels(["項目", "値"])
-        self.single_table.horizontalHeader().setStretchLastSection(True)
-        self.single_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
-        v.addWidget(self.single_table, 2)
+        # 出力ボタンは上に（下だと画面に収まらず見えないことがある）
         btns = QtWidgets.QHBoxLayout()
-        btns.addStretch(1)
         for label, slot in (("CSV出力", self.export_single_csv),
                             ("Excel出力", self.export_single_xlsx),
                             ("印刷", self.print_single)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(slot)
             btns.addWidget(b)
+        btns.addStretch(1)
         v.addLayout(btns)
+        # グラフはホイールとウォームに分ける（凡例は各グラフの上＝カーブに被らない）
+        self.single_plot_wheel = pg.PlotWidget(title="ホイール")
+        self.single_plot_worm = pg.PlotWidget(title="ウォーム")
+        for plot in (self.single_plot_wheel, self.single_plot_worm):
+            plot.setLabel("bottom", "指令角度", units="°")
+            plot.setLabel("left", "偏差", units='"')
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            for axis in ("left", "bottom"):
+                plot.getAxis(axis).enableAutoSIPrefix(False)
+        self.single_legend_wheel = _legend_label()
+        self.single_legend_worm = _legend_label()
+        plots = QtWidgets.QHBoxLayout()
+        plots.setContentsMargins(0, 0, 0, 0)
+        plots.addWidget(_plot_box(self.single_legend_wheel, self.single_plot_wheel), 7)
+        plots.addWidget(_plot_box(self.single_legend_worm, self.single_plot_worm), 3)
+        v.addLayout(plots, 3)
+        self.single_table = QtWidgets.QTableWidget(0, 2)
+        self.single_table.setHorizontalHeaderLabels(["項目", "値"])
+        self.single_table.horizontalHeader().setStretchLastSection(True)
+        self.single_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        v.addWidget(self.single_table, 2)
         return w
 
     def load_single(self):
         win = self.win
-        self.single_plot.clear()
+        self.single_plot_wheel.clear()
+        self.single_plot_worm.clear()
+        self.single_legend_wheel.setText("")
+        self.single_legend_worm.setText("")
         self.single_result_rows = []
         self.single_series = None
         if not win.has_view_data():
@@ -3049,15 +3088,23 @@ class AnalysisDialog(QtWidgets.QDialog):
         self._fill_kv_table(self.single_table, self.single_result_rows)
         series = win.current_series_devs()
         self.single_series = series
+        colors = {"wheel_cw": "#1f77b4", "wheel_ccw": "#d62728",
+                  "worm_cw": "#2ca02c", "worm_ccw": "#ff7f0e"}
         if series:
+            wheel_leg, worm_leg = [], []
             for key, style in CURVE_STYLES.items():
                 ser = series.get(key)
                 if ser and ser[0]:
-                    self.single_plot.plot(
-                        ser[0], ser[1], name=SERIES_LABELS.get(key, key), **style)
-            self.single_plot.setTitle("偏差")
+                    target = (self.single_plot_wheel if key.startswith("wheel")
+                              else self.single_plot_worm)
+                    target.plot(ser[0], ser[1], **style)
+                    pair = (SERIES_LABELS.get(key, key), colors.get(key, "#333"))
+                    (wheel_leg if key.startswith("wheel") else worm_leg).append(pair)
+            self.single_legend_wheel.setText(_legend_html(wheel_leg))
+            self.single_legend_worm.setText(_legend_html(worm_leg))
         else:
-            self.single_plot.setTitle("再現性（数値は下表を参照）")
+            # 再現性は系列が分かれないので、ホイール側に1枚で出す（数値は下表）
+            self.single_plot_wheel.setTitle("再現性（数値は下表を参照）")
 
     def export_single_csv(self):
         if not self.single_result_rows:
@@ -3930,7 +3977,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_wheel = pg.PlotWidget(title="ホイール")
         self.plot_worm = pg.PlotWidget(title="ウォーム")
         for plot in (self.plot_wheel, self.plot_worm):
-            plot.addLegend(offset=(10, 10))
+            # 凡例はグラフ内に置くとカーブに被るので addLegend は使わず、各グラフの上に
+            # 色つきラベル（_plot_box）で出す。
             plot.setLabel("bottom", "指令角度", units="°")
             plot.setLabel("left", "偏差", units='"')
             plot.showGrid(x=True, y=True, alpha=0.3)
@@ -3938,13 +3986,16 @@ class MainWindow(QtWidgets.QMainWindow):
             # 単位が「k"」（キロ秒角）等に化けて読み違いのもとになる
             for axis_name in ("left", "bottom"):
                 plot.getAxis(axis_name).enableAutoSIPrefix(False)
+        self.legend_wheel = _legend_label()
+        self.legend_worm = _legend_label()
         self.curves = {}
         self.main_markers = {}  # 主点（1/N）グリッドの強調マーカー
         plots_widget = QtWidgets.QWidget()
         plots = QtWidgets.QHBoxLayout(plots_widget)
         plots.setContentsMargins(0, 0, 0, 0)
-        plots.addWidget(self.plot_wheel, 7)
-        plots.addWidget(self.plot_worm, 3)
+        plots.addWidget(_plot_box(self.legend_wheel, self.plot_wheel), 7)
+        plots.addWidget(_plot_box(self.legend_worm, self.plot_worm), 3)
+        self.update_legends()
 
         # ===== 結果表 =====
         # 精度結果は2つに分ける（横を狭く・縦を長く＝グラフを広げる）:
@@ -4548,6 +4599,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_series2.setVisible(show_division)
         self.corr_bar.setVisible(show_division)  # 補正前/後は分割系のみ
         self.plot_worm.setVisible(show_division)
+        self.legend_worm.setVisible(show_division)
+        self.update_legends()
         self.plot_wheel.setTitle(
             "再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
         # モードを変えたら取込中の測定はキャンセル
@@ -4870,6 +4923,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.auto_mode = True  # start()はauto_modeに触らないが明示
         self.trigger_bot()
+
+    def update_legends(self):
+        """凡例ラベルの内容をモードに合わせて更新（色はカーブと一致）。"""
+        if self.is_repeat():
+            self.legend_wheel.setText(_legend_html([("再現性 CW", "#1f77b4"),
+                                                    ("再現性 CCW", "#d62728")]))
+            self.legend_worm.setText("")
+        else:
+            self.legend_wheel.setText(_legend_html([
+                (SERIES_LABELS["wheel_cw"], "#1f77b4"),
+                (SERIES_LABELS["wheel_ccw"], "#d62728")]))
+            self.legend_worm.setText(_legend_html([
+                (SERIES_LABELS["worm_cw"], "#2ca02c"),
+                (SERIES_LABELS["worm_ccw"], "#ff7f0e")]))
 
     def rebuild_curves(self):
         for plot in (self.plot_wheel, self.plot_worm):

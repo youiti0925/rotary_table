@@ -33,8 +33,8 @@ DEFAULTS = dict(
     # 再現性の条件（型式ごと。回転・傾斜を別ファイルに分離）
     user_rotary_repeat_csv=r"マスタ/ユーザー回転再現条件.csv",
     user_tilt_repeat_csv=r"マスタ/ユーザー傾斜再現条件.csv",
-    # 過去データ閲覧の既定件数
-    recent_count=10,
+    # 過去データ閲覧・分析の既定件数（重いので少なめ。必要なら画面で増やす）
+    recent_count=5,
     # 画面のテーマ（見た目）。themes.THEME_NAMES の名前。"システム"=OS既定
     ui_theme="ネイビー・コーポレート",
     # 画面の基準文字サイズ[pt]（7〜22）

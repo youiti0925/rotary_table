@@ -178,6 +178,13 @@ class TestKsSave(unittest.TestCase):
         regenerated = format_ks(self.rebuilt, newline="\n").splitlines()[14:]
         self.assertEqual(regenerated, original)
 
+    def test_measure_save_byte_identical(self):
+        # 測定→セーブ(data_to_doc)で旧アプリ実物と完全バイト一致すること。
+        # 4行目のウォーム間隔は 0.5°=30'00"→DDMMSSパックで 3000。
+        out = format_ks(self.rebuilt, newline="\n")
+        self.assertEqual(out, FIXTURE.read_text(encoding="utf-8"))
+        self.assertEqual(out.splitlines()[4], "50000,3000")  # 刻み: 5°=50000, 0.5°=3000
+
     def test_reparse(self):
         # 書いたものを読み戻せる（範囲2の窓は旧アプリ同様ファイルに残らない）
         doc2 = parse_ks(format_ks(self.rebuilt, newline="\n"))

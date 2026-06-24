@@ -100,24 +100,20 @@ class TestFullRealFile(unittest.TestCase):
         # 読み込み→書き出しで実物と完全一致（ロード→セーブで崩れない）
         self.assertEqual(format_bs(self.doc, newline="\n"), self.text)
 
-    def test_measure_save_main_grid(self):
-        # 測定→セーブ(data_to_doc)で、主点グリッド(n=ステップ/points=主点数/interval=
-        # 主点間隔) が旧アプリ実物と一致すること（ホイール: n=3, points=12, 30°間隔）
+    def test_measure_save_byte_identical(self):
+        # 測定→セーブ(data_to_doc)で旧アプリ実物と完全バイト一致すること。
+        # 主点グリッド(n/主点数/間隔=DDMMSSパック)・傾き・精度1/2 まで含む。
+        # 2行目 interval: ホイール30°→300000、ウォーム0.5°=30'00"→3000。
         data = doc_to_data(self.doc)
         rebuilt = data_to_doc(
             data, summarize(data, 0.0), model="RW-250R", date="2026/06/11",
             operator="ODA", temperature="26", spec_min=10.0, spec_max=24.0,
             wheel_n=3, worm_n=1)
+        self.assertEqual(format_bs(rebuilt, newline="\n"), self.text)
         lines = format_bs(rebuilt, newline="\n").splitlines()
-        self.assertEqual(lines[3], "3,1,1,3")          # 主点ステップ n
-        self.assertEqual(lines[4], "12,10,10,12")      # 主点数 points
-        self.assertEqual(lines[5], "-4,1,0,1")         # 傾き
-        self.assertEqual(lines[6], "7.5,6.0,2.5,5.0")  # 精度1（主点PP）
-        self.assertEqual(lines[7], "6.5,5.5,2.5,6.0")  # 精度2（傾き補正後＝補正後）
-        # interval: ホイール主点間隔=30°(300000) は一致。ウォームは旧実物が 0.3°(3000)
-        # で、データ(0.5°刻み)から導けない値のため別途確認待ち。
-        self.assertTrue(lines[2].startswith("300000,"))
-        self.assertTrue(lines[2].endswith(",300000"))
+        self.assertEqual(lines[2], "300000,3000,3000,300000")  # 主点間隔(DDMMSS)
+        self.assertEqual(lines[3], "3,1,1,3")                  # 主点ステップ
+        self.assertEqual(lines[4], "12,10,10,12")              # 主点数
 
 
 class TestConversion(unittest.TestCase):

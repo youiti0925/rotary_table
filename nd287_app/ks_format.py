@@ -39,7 +39,7 @@ from .analysis import (
     deviation_sec,
     pp,
 )
-from .bs_format import join_dms, split_dms
+from .bs_format import join_dms, pack_dms, split_dms
 
 SECTION_KEYS = ("HR", "WR", "WL", "HL")
 
@@ -273,18 +273,19 @@ def data_to_doc(data, *, model, date, operator, range1=None, range2=None,
 
     wheel_t = sorted(data.get("wheel_cw", ([], []))[0])
     worm_t = sorted(data.get("worm_cw", ([], []))[0])
-    doc["start_h"] = round(wheel_t[0] * 10000) if wheel_t else 0
-    doc["end_h"] = round(wheel_t[-1] * 10000) if wheel_t else 0
-    doc["interval_h"] = round((wheel_t[1] - wheel_t[0]) * 10000) if len(wheel_t) > 1 else 0
-    doc["start_w"] = round(worm_t[0] * 10000) if worm_t else 0
-    doc["end_w"] = round(worm_t[-1] * 10000) if worm_t else 0
-    doc["interval_w"] = round((worm_t[1] - worm_t[0]) * 10000) if len(worm_t) > 1 else 0
+    # 幾何ヘッダは DDMMSS パック（旧アプリ形式。0.5°=30'00"=3000、5°=50000、30°=300000）
+    doc["start_h"] = pack_dms(wheel_t[0]) if wheel_t else 0
+    doc["end_h"] = pack_dms(wheel_t[-1]) if wheel_t else 0
+    doc["interval_h"] = pack_dms(wheel_t[1] - wheel_t[0]) if len(wheel_t) > 1 else 0
+    doc["start_w"] = pack_dms(worm_t[0]) if worm_t else 0
+    doc["end_w"] = pack_dms(worm_t[-1]) if worm_t else 0
+    doc["interval_w"] = pack_dms(worm_t[1] - worm_t[0]) if len(worm_t) > 1 else 0
     doc["points_h"] = max(len(wheel_t) - 1, 0)
     doc["points_w"] = max(len(worm_t) - 1, 0)
-    doc["range1_start"] = round(range1[0] * 10000) if range1 else None
-    doc["range1_end"] = round(range1[1] * 10000) if range1 else None
-    doc["range2_start"] = round(range2[0] * 10000) if range2 else None
-    doc["range2_end"] = round(range2[1] * 10000) if range2 else None
+    doc["range1_start"] = pack_dms(range1[0]) if range1 else None
+    doc["range1_end"] = pack_dms(range1[1]) if range1 else None
+    doc["range2_start"] = pack_dms(range2[0]) if range2 else None
+    doc["range2_end"] = pack_dms(range2[1]) if range2 else None
 
     # 精度行（全範囲・範囲1・範囲2）
     full = tilt_accuracy(data)

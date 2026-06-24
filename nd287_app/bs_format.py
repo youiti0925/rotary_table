@@ -52,6 +52,17 @@ def join_dms(d: float, m: float, s: float) -> float:
     return sign * (abs(d) + m / 60.0 + s / 3600.0)
 
 
+def pack_dms(deg: float) -> int:
+    """十進度 → DDMMSS パック整数（旧アプリの幾何ヘッダ形式）。
+
+    度・分・秒を 度×10000 + 分×100 + 秒 で1つの整数に詰める。
+    例: 0.5°=0°30'00"→3000、30°→300000、5°→50000、-180°→-1800000。
+    """
+    d, m, s = split_dms(abs(deg))
+    val = int(round(d)) * 10000 + int(round(m)) * 100 + int(round(s))
+    return -val if deg < 0 else val
+
+
 def parse_bs(text: str) -> dict:
     """.BSテキストを解析する。"""
     lines = text.splitlines()
@@ -233,7 +244,7 @@ def data_to_doc(data, summary, *, model, date, operator, temperature,
             main_step = max(int(step), 1)
             main_points = n_points // main_step if main_step else n_points
             doc["series"][section] = dict(
-                interval=int(round(pitch * main_step * 10000)),  # 主点グリッド間隔
+                interval=pack_dms(pitch * main_step),  # 主点グリッド間隔(DDMMSS)
                 n=main_step,
                 points=main_points,
                 slope=_ascending_slope(meas_targets, meas),

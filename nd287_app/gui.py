@@ -3981,9 +3981,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 補正前（生の偏差）／補正後（ホイールのピッチエラー補正を当てた偏差）の切替
         self.show_corrected = False
-        self.b_before = QtWidgets.QPushButton("補正前（生データ）")
-        self.b_after = QtWidgets.QPushButton("補正後（傾き補正）")
-        self.b_after.setToolTip("始点と終点の偏差を一致させた（傾き成分を除いた）"
+        self.b_before = QtWidgets.QPushButton("補正前")
+        self.b_before.setToolTip("生データ（補正なし）の偏差・精度を表示")
+        self.b_after = QtWidgets.QPushButton("補正後")
+        self.b_after.setToolTip("傾き補正：始点と終点の偏差を一致させた（傾き成分を除いた）"
                                 "偏差・精度を表示。ピッチエラー補正は含まない")
         for b in (self.b_before, self.b_after):
             b.setCheckable(True)

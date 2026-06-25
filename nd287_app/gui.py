@@ -3460,6 +3460,8 @@ class HelpDialog(QtWidgets.QDialog):
         self.list.setMaximumWidth(240)
         self.body = QtWidgets.QTextBrowser()
         self.body.setOpenExternalLinks(False)
+        # ヘルプ本文中の <img src="xxx.png"> を nd287_app/help_images から解決する
+        self.body.setSearchPaths([str(Path(__file__).resolve().parent / "help_images")])
         for title, _ in help_text.HELP_SECTIONS:
             self.list.addItem(title)
         self.list.currentRowChanged.connect(self._show_row)

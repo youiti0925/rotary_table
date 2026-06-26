@@ -1212,6 +1212,19 @@ class ParamDialog(QtWidgets.QDialog):
         self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
         self.e_master_prm.setPlaceholderText("今回使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
         self.e_master_prm.setToolTip("容量・空き軸で決まった制御装置の BASIC ファイル。これを元に作る")
+        # BASICの場所フォルダにあるBASICから「使える制御装置」を一覧化して選ぶ
+        brow = QtWidgets.QHBoxLayout()
+        brow.setContentsMargins(0, 0, 0, 0)
+        self.cmb_basic = QtWidgets.QComboBox()
+        self.cmb_basic.setToolTip("BASICの場所フォルダのBASICファイルから制御装置を一覧表示。"
+                                  "選ぶと『使うBASIC』に自動で入る")
+        self.cmb_basic.currentIndexChanged.connect(self._on_basic_selected)
+        brow.addWidget(self.cmb_basic, 1)
+        b_rescan = QtWidgets.QPushButton("更新")
+        b_rescan.setToolTip("BASICの場所フォルダを読み直して制御装置の一覧を更新")
+        b_rescan.clicked.connect(self._scan_basic_controllers)
+        brow.addWidget(b_rescan)
+        form_job.addRow("制御装置（一覧）", brow)
         form_job.addRow("使うBASIC",
                         self._with_browse(self.e_master_prm, self._browse_master_prm))
 
@@ -1335,7 +1348,39 @@ class ParamDialog(QtWidgets.QDialog):
 
         self._all = {}
         self._changes = []
+        self.e_basic_dir.editingFinished.connect(self._scan_basic_controllers)
+        self._scan_basic_controllers()   # 起動時にBASICの場所から制御装置一覧を作る
         self.reload()
+
+    def _scan_basic_controllers(self):
+        """BASICの場所フォルダのBASICファイルから制御装置を一覧化してプルダウンに入れる。"""
+        from pathlib import Path
+        folder = self.e_basic_dir.text().strip()
+        cur = self.e_master_prm.text().strip()
+        items = []
+        if folder and Path(folder).is_dir():
+            for p in sorted(Path(folder).iterdir()):
+                if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
+                    name = nc_param.controller_from_basic(p.name) or p.stem
+                    items.append((name, str(p)))
+        self.cmb_basic.blockSignals(True)
+        self.cmb_basic.clear()
+        if items:
+            self.cmb_basic.addItem("（制御装置を選択）", "")
+            for name, path in items:
+                self.cmb_basic.addItem(f"{name}（{Path(path).name}）", path)
+        else:
+            self.cmb_basic.addItem("（BASICの場所にBASICがありません）", "")
+        idx = self.cmb_basic.findData(cur) if cur else -1
+        if idx >= 0:
+            self.cmb_basic.setCurrentIndex(idx)
+        self.cmb_basic.blockSignals(False)
+
+    def _on_basic_selected(self, *_):
+        """制御装置プルダウンで選んだBASICを『使うBASIC』に反映する。"""
+        path = self.cmb_basic.currentData()
+        if path:
+            self.e_master_prm.setText(path)
 
     def _browse_master_prm(self):
         start = self.e_master_prm.text() or self.e_basic_dir.text()
@@ -1349,6 +1394,7 @@ class ParamDialog(QtWidgets.QDialog):
             self, "BASICの場所（フォルダ）", self.e_basic_dir.text())
         if p:
             self.e_basic_dir.setText(p)
+            self._scan_basic_controllers()   # フォルダを選んだら一覧を作り直す
 
     def _browse_product_dir(self):
         p = QtWidgets.QFileDialog.getExistingDirectory(
@@ -2018,7 +2064,13 @@ class ParamDBDialog(QtWidgets.QDialog):
         f = QtWidgets.QFormLayout(box)
         self.e_basic = QtWidgets.QLineEdit(str(owner.e_master_prm.text()))
         self.e_basic.setPlaceholderText("使うBASIC .prm（別の制御装置にするなら差し替える）")
+        # 制御装置を BASICの場所 から一覧化して選ぶ（別の制御装置に変えて作成しやすく）
+        self.cmb_basic = QtWidgets.QComboBox()
+        self.cmb_basic.setToolTip("BASICの場所フォルダの制御装置一覧。選ぶと使うBASICが変わる")
+        self.cmb_basic.currentIndexChanged.connect(self._on_db_basic_selected)
+        f.addRow("制御装置（一覧）", self.cmb_basic)
         f.addRow("使うBASIC", owner._with_browse(self.e_basic, self._browse_basic))
+        self._fill_basic_combo()
         axr = QtWidgets.QHBoxLayout(); axr.setContentsMargins(0, 0, 0, 0)
         self.cmb_axis = QtWidgets.QComboBox()
         for n in range(1, 7):
@@ -2150,6 +2202,32 @@ class ParamDBDialog(QtWidgets.QDialog):
                 self.cmb_prefix.setCurrentIndex(j)
 
     # ----- 参照 -----
+    def _fill_basic_combo(self):
+        """BASICの場所（親画面の設定）から制御装置を一覧化してプルダウンに入れる。"""
+        from pathlib import Path
+        folder = self.owner.e_basic_dir.text().strip()
+        cur = self.e_basic.text().strip()
+        items = []
+        if folder and Path(folder).is_dir():
+            for p in sorted(Path(folder).iterdir()):
+                if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
+                    items.append((nc_param.controller_from_basic(p.name) or p.stem, str(p)))
+        self.cmb_basic.blockSignals(True)
+        self.cmb_basic.clear()
+        self.cmb_basic.addItem("（制御装置を選択）" if items
+                               else "（BASICの場所にBASICがありません）", "")
+        for name, path in items:
+            self.cmb_basic.addItem(f"{name}（{Path(path).name}）", path)
+        idx = self.cmb_basic.findData(cur) if cur else -1
+        if idx >= 0:
+            self.cmb_basic.setCurrentIndex(idx)
+        self.cmb_basic.blockSignals(False)
+
+    def _on_db_basic_selected(self, *_):
+        path = self.cmb_basic.currentData()
+        if path:
+            self.e_basic.setText(path)
+
     def _browse_basic(self):
         start = self.e_basic.text() or self.owner.e_basic_dir.text()
         p, _ = QtWidgets.QFileDialog.getOpenFileName(

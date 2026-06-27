@@ -80,6 +80,43 @@ class TestReadProductMeta(unittest.TestCase):
         self.assertEqual(meta["mode_hint"], "フル")
 
 
+class TestStandardCapacity(unittest.TestCase):
+    def test_size_bands(self):
+        self.assertEqual(S.standard_capacity("αiS2/5000"), "20A")
+        self.assertEqual(S.standard_capacity("αiS4/5000-B"), "20A")
+        self.assertEqual(S.standard_capacity("αiS8/4000"), "40A")
+        self.assertEqual(S.standard_capacity("αiS12/4000"), "40A")
+        self.assertEqual(S.standard_capacity("αiS22/4000"), "80A")
+        self.assertEqual(S.standard_capacity("αiS30/4000"), "80A")
+        self.assertEqual(S.standard_capacity("αiS40/4000"), "160A")
+        self.assertEqual(S.standard_capacity("αiS50/3000"), "160A")
+        self.assertEqual(S.standard_capacity("αiF8/3000"), "40A")
+
+    def test_does_not_pick_speed(self):
+        # 5000(回転数)ではなく 2(番手)を見る
+        self.assertEqual(S.standard_capacity("αiS2/5000"), "20A")
+
+    def test_out_of_range_and_empty(self):
+        self.assertEqual(S.standard_capacity("αiS100/2500"), "")  # マスタ範囲外
+        self.assertEqual(S.standard_capacity(""), "")
+
+    def test_meta_uses_standard_when_no_table(self):
+        text = _prm(axis="R", amp="", motor="αiS2/5000")
+        meta = S.read_product_meta(text)        # 対応表なしでも標準で判定
+        self.assertEqual(meta["capacity"], "20A")
+        self.assertEqual(meta["capacity_src"], "標準")
+
+    def test_table_overrides_standard(self):
+        import tempfile
+        p = Path(tempfile.mkdtemp(), "m.csv")
+        p.write_text("モーター型式,容量\nαiS2/5000,40A\n", encoding="cp932")
+        t = S.load_motor_caps(str(p))
+        text = _prm(axis="R", amp="", motor="αiS2/5000")
+        meta = S.read_product_meta(text, motor_caps=t)
+        self.assertEqual(meta["capacity"], "40A")        # 対応表が標準を上書き
+        self.assertEqual(meta["capacity_src"], "対応表")
+
+
 class TestMotorCaps(unittest.TestCase):
     CSV = ("モーター型式,モーター番号,モーターID,容量,メモ\n"
            "αiS2/5000,A06B-0212-B000,262,20A,TWA-130\n"

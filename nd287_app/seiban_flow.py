@@ -153,6 +153,32 @@ def capacity_for_motor(table: dict, motor_no="", motor_model="", motor_id="") ->
     return ""
 
 
+def standard_capacity(motor_model: str) -> str:
+    """αiS/αiF モーター型式の「番手」から標準組合せのアンプ容量を返す。
+
+    FANUC の標準組合せ（番手＝出力の大きさ → アンプ容量）:
+      2,4 → 20A ／ 8,12 → 40A ／ 22,30 → 80A ／ 40,50 → 160A。
+    例: αiS2/5000→20A, αiS8/4000→40A, αiS22/4000→80A, αiS40/4000→160A。
+    判定できない／番手が範囲外なら ""（必要なら対応表CSVで上書き）。
+    """
+    s = str(motor_model or "")
+    m = re.search(r"[SsFf]\s*(\d+)\s*/", s)        # αiS<番手>/<回転数>
+    if not m:
+        m = re.search(r"(?<!\d)(\d+)(?!\d)", s)     # 予備: 最初の単独数字
+    if not m:
+        return ""
+    size = int(m.group(1))
+    if size <= 4:
+        return "20A"
+    if size <= 12:
+        return "40A"
+    if size <= 30:
+        return "80A"
+    if size <= 50:
+        return "160A"
+    return ""                                        # 50超(αiS100等)はマスタ範囲外
+
+
 def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
     """製品データ(.prm)の付加情報を読む。ヘッダ＋CSV形式（System Version=…）専用。
 
@@ -184,15 +210,20 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
         meta["motor_id"] = (prm_format.param_value(doc, "2020") or "").strip()
     except Exception:
         meta["motor_id"] = ""
-    # 容量: まず Servo Amp Model から、無ければ モーター→容量 対応表から引く
+    # 容量の決め方（優先順）: ①Servo Amp Model（データに明記）→ ②モーター→容量 対応表
+    # （ユーザー上書き・例外用）→ ③モーター型式の番手から標準組合せで自動判定。
     cap = derive_capacity(meta["amp_model"])
     if cap:
         meta["capacity_src"] = "アンプ"
-    elif motor_caps:
+    if not cap and motor_caps:
         cap = capacity_for_motor(motor_caps, meta["motor_no"], meta["motor"],
                                  meta["motor_id"])
         if cap:
             meta["capacity_src"] = "対応表"
+    if not cap:
+        cap = standard_capacity(meta["motor"])
+        if cap:
+            meta["capacity_src"] = "標準"
     meta["capacity"] = cap
     # 別置検出器が入っていればフルクロの手がかり（最終判定は 1815）
     meta["mode_hint"] = "フル" if meta["sep_detector"] else ""

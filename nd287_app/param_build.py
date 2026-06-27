@@ -15,6 +15,41 @@ def read_master(master_path) -> str:
     return Path(master_path).read_bytes().decode("cp932", errors="replace")
 
 
+def _merge_bits(product_val: str, basic_val: str) -> str:
+    """ビット表示値の '*'(不問) を BASIC の現在ビットで埋める（MSB先頭で桁合わせ）。
+
+    例: product '001*0000' / basic '00000000' → '00100000'（*の桁はBASICの0を残す）。
+    """
+    p, b = str(product_val), str(basic_val or "")
+    n = max(len(p), len(b))
+    p = p.rjust(n, "*")            # 足りない上位桁は不問＝BASICを残す
+    b = b.rjust(n, "0")
+    return "".join(b[i] if p[i] == "*" else p[i] for i in range(n))
+
+
+def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
+    """ヘッダ＋CSV形式の表示値を、ネイティブBASICへ書ける実値へ解決する。
+
+    - 先頭の ' (表示用クォート)を除去。
+    - ビット値の '*'(不問) は BASIC の当該軸(無ければ共通)の現在ビットを残す（マージ）。
+    BASIC がネイティブでない、または値に '/'* が無ければそのまま返す（実害なし）。
+    """
+    if not fanuc_param.looks_like_fanuc_prm(basic_text):
+        return dict(values)
+    out = {}
+    for num, val in values.items():
+        v = str(val).strip()
+        if v.startswith("'"):
+            v = v[1:].strip()
+        if "*" in v:
+            cur = fanuc_param.get_value(basic_text, num, f"A{axis}") if axis else None
+            if cur is None:
+                cur = fanuc_param.get_value(basic_text, num)
+            v = _merge_bits(v, cur or "")
+        out[num] = v
+    return out
+
+
 def build_text(raw: str, values: dict, axis: int, seiban: str = "") -> tuple:
     """BASIC テキスト raw に values({番号:値}) を入れた新テキストを返す。
 
@@ -22,6 +57,7 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "") -> tuple:
     N形式は指定軸だけ差替え（他軸・他バイトは不変）。ヘッダ＋CSV形式は Seiban も差替え。
     """
     if fanuc_param.looks_like_fanuc_prm(raw):
+        values = resolve_product_values(raw, values, axis)   # '除去・*マージ
         newtext, missing = fanuc_param.apply_product_values(raw, values, axis)
         return newtext, missing, "fanuc"
     doc = prm_format.parse_prm(raw)
@@ -109,9 +145,11 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
     text = raw
     missing = []
     for ax in sorted(axis_values):
-        text, miss = fanuc_param.apply_product_values(text, axis_values[ax], ax)
+        vals = resolve_product_values(raw, axis_values[ax], ax)   # '除去・*マージ
+        text, miss = fanuc_param.apply_product_values(text, vals, ax)
         missing += [(m, ax) for m in miss]
-    text, miss = fanuc_param.apply_common_values(text, common)
+    cvals = resolve_product_values(raw, common, None)
+    text, miss = fanuc_param.apply_common_values(text, cvals)
     missing += [(m, "") for m in miss]
     return text, missing, "fanuc"
 
@@ -139,14 +177,15 @@ def preview_rows_multi(raw: str, axis_values: dict, common: dict = None) -> list
     common = common or {}
     rows = []
     for ax in sorted(axis_values):
-        for num, newv in axis_values[ax].items():
+        vals = resolve_product_values(raw, axis_values[ax], ax)  # 表示も実際に書く値で
+        for num, newv in vals.items():
             if newv == "":
                 continue
             old = fanuc_param.get_value(raw, num, f"A{ax}")
             if old is None:
                 old = fanuc_param.get_value(raw, num)
             rows.append((str(num), ax, "" if old is None else str(old), str(newv)))
-    for num, newv in common.items():
+    for num, newv in resolve_product_values(raw, common, None).items():
         if newv == "":
             continue
         old = fanuc_param.get_value(raw, num)
@@ -182,7 +221,9 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
     """
     is_fanuc = fanuc_param.looks_like_fanuc_prm(raw)
     doc = None
-    if not is_fanuc:
+    if is_fanuc:
+        values = resolve_product_values(raw, values, axis)   # 表示も実際に書く値で
+    else:
         try:
             doc = prm_format.parse_prm(raw)
         except Exception:

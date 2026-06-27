@@ -130,6 +130,33 @@ class TestMultiAxis(unittest.TestCase):
         self.assertEqual(F.get_value(newtext, "8130", "L1"), "4")
 
 
+class TestResolveProductValues(unittest.TestCase):
+    """ヘッダ＋CSV製品の表示値(' と *)をネイティブBASICへ書ける実値へ解決する。"""
+
+    def test_strip_quote_plain(self):
+        r = B.resolve_product_values(BASIC_N, {"01825": "3000", "02020": "'262"}, axis=4)
+        self.assertEqual(r["01825"], "3000")
+        self.assertEqual(r["02020"], "262")          # ' を除去
+
+    def test_star_keeps_basic_bit(self):
+        # BASIC_N の 1815/A4 = 00000010。'*' の桁は BASIC のビットを残す
+        r = B.resolve_product_values(BASIC_N, {"01815": "'001*0000"}, axis=4)
+        self.assertEqual(r["01815"], "00100000")     # index3の*→BASICの0
+        r2 = B.resolve_product_values(BASIC_N, {"01815": "1*******"}, axis=4)
+        self.assertEqual(r2["01815"], "10000010")    # MSBだけ1、他はBASIC(00000010)
+
+    def test_build_text_writes_resolved_value(self):
+        newtext, missing, fmt = B.build_text(BASIC_N, {"01815": "1*******"}, axis=4)
+        self.assertEqual(fmt, "fanuc")
+        self.assertEqual(F.get_value(newtext, "1815", "A4"), "10000010")
+        self.assertEqual(F.get_value(newtext, "1815", "A1"), "00000000")  # 他軸不変
+
+    def test_preview_shows_resolved(self):
+        rows = B.preview_rows(BASIC_N, {"01815": "'001*0000"}, axis=4)
+        d = {n: (o, nw) for (n, o, nw) in rows}
+        self.assertEqual(d["01815"], ("00000010", "00100000"))  # 旧→解決後の新
+
+
 class TestDetectMode(unittest.TestCase):
     def test_full_on_axis4(self):
         # A4 は #1=1 → フル、A1 は #1=0 → セミ（軸で違う）

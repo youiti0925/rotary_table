@@ -100,6 +100,26 @@ class TestStandardCapacity(unittest.TestCase):
         self.assertEqual(S.standard_capacity("αiS100/2500"), "")  # マスタ範囲外
         self.assertEqual(S.standard_capacity(""), "")
 
+    def test_hv_halves_capacity(self):
+        # 400V(HV)は電流が約半分のコード
+        self.assertEqual(S.standard_capacity("αiS8/4000HV"), "20A")   # 200Vなら40A
+        self.assertEqual(S.standard_capacity("αiS22/4000HV"), "40A")  # 200Vなら80A
+        self.assertEqual(S.standard_capacity("αiS40/4000HV"), "80A")  # 200Vなら160A
+        self.assertEqual(S.standard_capacity("αiS2/5000HV"), "10A")   # 200Vなら20A
+
+    def test_motor_voltage(self):
+        self.assertEqual(S.motor_voltage("αiS8/4000HV"), "400V")
+        self.assertEqual(S.motor_voltage("αiS8/4000"), "200V")
+        self.assertEqual(S.motor_voltage(""), "")
+        self.assertTrue(S.is_hv("αiS8/4000HV"))
+        self.assertFalse(S.is_hv("αiS8/4000"))
+
+    def test_meta_hv_sets_voltage_and_half_capacity(self):
+        text = _prm(axis="R", amp="", motor="αiS22/4000HV")
+        meta = S.read_product_meta(text)
+        self.assertEqual(meta["voltage"], "400V")
+        self.assertEqual(meta["capacity"], "40A")    # 200Vなら80A
+
     def test_meta_uses_standard_when_no_table(self):
         text = _prm(axis="R", amp="", motor="αiS2/5000")
         meta = S.read_product_meta(text)        # 対応表なしでも標準で判定
@@ -191,6 +211,26 @@ class TestCapableControllers(unittest.TestCase):
     def test_empty_needs_returns_all(self):
         got = S.capable_controllers(self.ctls, [])
         self.assertEqual(len(got), len(self.ctls))
+
+    def test_voltage_filter_400v(self):
+        # 400V製品は400V号機(27/28)のみ。号機27は AV400V で 20A 軸あり
+        got = S.capable_controllers(self.ctls, ["20A"], voltage="400V")
+        units = {c.unit for c, _ in got}
+        self.assertEqual(units, {"27", "28"})
+        for c, _ in got:
+            self.assertEqual(S.controller_voltage(c), "400V")
+
+    def test_voltage_filter_200v_excludes_400v(self):
+        got = S.capable_controllers(self.ctls, ["20A"], voltage="200V")
+        units = {c.unit for c, _ in got}
+        self.assertNotIn("27", units)
+        self.assertNotIn("28", units)
+
+    def test_controller_voltage_norm(self):
+        c27 = next(c for c in self.ctls if c.unit == "27")
+        self.assertEqual(S.controller_voltage(c27), "400V")
+        c10 = next(c for c in self.ctls if c.unit == "10")
+        self.assertEqual(S.controller_voltage(c10), "200V")
 
 
 if __name__ == "__main__":

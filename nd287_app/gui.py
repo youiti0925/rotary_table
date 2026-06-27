@@ -1358,6 +1358,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             extra = []
             if meta.get("model"):
                 extra.append(f"型式 {meta['model']}")
+            if meta.get("voltage"):
+                extra.append(meta["voltage"])
             extra.append(cap)
             if meta.get("motor"):
                 extra.append(f"モーター {meta['motor']}")
@@ -1393,10 +1395,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.cmb_ctrl.blockSignals(False)
             self._on_ctrl_changed(); return
         needs = self._needs(sel)
-        self._cand = seiban_flow.capable_controllers(self._controllers, needs)
+        # 製品の電圧（HV→400V）。選択ファイルの電圧で号機を絞る（400V製品は400V号機のみ）
+        volts = {f["meta"].get("voltage") for f in sel if f["meta"].get("voltage")}
+        voltage = volts.pop() if len(volts) == 1 else ""
+        self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
         if not self._cand:
             caps = "・".join(n or "?" for n in needs)
-            self.cmb_ctrl.addItem(f"（容量 {caps} を満たす制御装置がありません）", -1)
+            vtxt = f"／{voltage}" if voltage else ""
+            self.cmb_ctrl.addItem(f"（容量 {caps}{vtxt} を満たす制御装置がありません）", -1)
         else:
             self.cmb_ctrl.addItem("（制御装置を選択）", -1)
             for i, (c, asg) in enumerate(self._cand):

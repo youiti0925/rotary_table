@@ -153,12 +153,30 @@ def capacity_for_motor(table: dict, motor_no="", motor_model="", motor_id="") ->
     return ""
 
 
+def is_hv(motor_model: str) -> bool:
+    """モーター型式に HV（High Voltage＝400V）の記載があれば True。"""
+    return "HV" in str(motor_model or "").upper()
+
+
+def motor_voltage(motor_model: str) -> str:
+    """モーター型式から電源電圧を返す。HV記載→'400V'、型式があれば'200V'、無ければ''。"""
+    s = str(motor_model or "").strip()
+    if not s:
+        return ""
+    return "400V" if is_hv(s) else "200V"
+
+
+# 番手→アンプ容量の標準組合せ（200V）。400V(HV)は電力同じでも電流が約半分なので半額コード。
+_STD_BANDS_200 = [(4, "20A"), (12, "40A"), (30, "80A"), (50, "160A")]
+_STD_BANDS_400 = [(4, "10A"), (12, "20A"), (30, "40A"), (50, "80A")]
+
+
 def standard_capacity(motor_model: str) -> str:
     """αiS/αiF モーター型式の「番手」から標準組合せのアンプ容量を返す。
 
-    FANUC の標準組合せ（番手＝出力の大きさ → アンプ容量）:
-      2,4 → 20A ／ 8,12 → 40A ／ 22,30 → 80A ／ 40,50 → 160A。
-    例: αiS2/5000→20A, αiS8/4000→40A, αiS22/4000→80A, αiS40/4000→160A。
+    200V: 2,4→20A ／ 8,12→40A ／ 22,30→80A ／ 40,50→160A。
+    400V(HV): 2,4→10A ／ 8,12→20A ／ 22,30→40A ／ 40,50→80A（電流が約半分）。
+    例: αiS2/5000→20A, αiS22/4000→80A, αiS22/4000HV→40A。
     判定できない／番手が範囲外なら ""（必要なら対応表CSVで上書き）。
     """
     s = str(motor_model or "")
@@ -168,15 +186,11 @@ def standard_capacity(motor_model: str) -> str:
     if not m:
         return ""
     size = int(m.group(1))
-    if size <= 4:
-        return "20A"
-    if size <= 12:
-        return "40A"
-    if size <= 30:
-        return "80A"
-    if size <= 50:
-        return "160A"
-    return ""                                        # 50超(αiS100等)はマスタ範囲外
+    bands = _STD_BANDS_400 if is_hv(s) else _STD_BANDS_200
+    for lim, cap in bands:
+        if size <= lim:
+            return cap
+    return ""                                        # 範囲外(αiS100等)はマスタ外
 
 
 def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
@@ -187,8 +201,9 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
     N形式（実機ネイティブ）はヘッダが無いので最小限（kind は引数のものを使う）。
     """
     meta = {"model": "", "kind": kind, "capacity": "", "capacity_src": "",
-            "amp_model": "", "motor": "", "motor_no": "", "motor_id": "",
-            "gear": "", "direction": "", "sep_detector": "", "mode_hint": ""}
+            "voltage": "", "amp_model": "", "motor": "", "motor_no": "",
+            "motor_id": "", "gear": "", "direction": "", "sep_detector": "",
+            "mode_hint": ""}
     if not text or fanuc_param.looks_like_fanuc_prm(text):
         return meta
     try:
@@ -225,6 +240,7 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
         if cap:
             meta["capacity_src"] = "標準"
     meta["capacity"] = cap
+    meta["voltage"] = motor_voltage(meta["motor"])    # HV記載→400V
     # 別置検出器が入っていればフルクロの手がかり（最終判定は 1815）
     meta["mode_hint"] = "フル" if meta["sep_detector"] else ""
     return meta
@@ -254,15 +270,31 @@ def assign_axes(controller, needs: list):
     return out
 
 
-def capable_controllers(controllers, needs: list) -> list:
+def controller_voltage(controller) -> str:
+    """制御装置マスタの電圧表記を正規化（'AV400V'→'400V', 'AC200V'→'200V'）。不明は ''。"""
+    v = str(getattr(controller, "voltage", "") or "").upper()
+    if "400" in v:
+        return "400V"
+    if "200" in v:
+        return "200V"
+    return ""
+
+
+def capable_controllers(controllers, needs: list, voltage: str = "") -> list:
     """needs（作りたい軸ぶんの容量）を満たせる制御装置と軸割り当てを返す。
 
-    戻り値: [(controller, [軸文字, ...]), ...]（号機番号順）。needs が空なら全件（割当 []）。
+    voltage を指定すると、電圧の合う号機だけに絞る（400V製品は400V号機のみ等）。
+    号機の電圧が不明（空欄）なら除外しない。戻り値 [(controller,[軸文字,...]),...]。
+    needs が空なら（電圧フィルタは効かせつつ）全件。
     """
+    pool = controllers
+    if voltage:
+        pool = [c for c in controllers
+                if controller_voltage(c) in ("", voltage)]
     if not needs:
-        return [(c, []) for c in controllers]
+        return [(c, []) for c in pool]
     out = []
-    for c in controllers:
+    for c in pool:
         asg = assign_axes(c, needs)
         if asg is not None:
             out.append((c, asg))

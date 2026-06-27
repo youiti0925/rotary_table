@@ -111,6 +111,7 @@ from . import prm_format
 from . import fanuc_param
 from . import param_build
 from . import controllers
+from . import seiban_flow
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1169,6 +1170,376 @@ class ParamPreviewDialog(QtWidgets.QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+
+
+class ParamWizardDialog(QtWidgets.QDialog):
+    """受注番号から かんたん作成（ガイド付き）。
+
+    ① 受注伝票番号(Seiban)を入れて「探す」→ 傾斜(T)/回転(R)の製品データを自動で探す。
+    ② 作るもの（両方／必要な方）を選ぶ → 製品データから必要容量を読み、作れる制御装置
+       （号機）を絞って一覧に出す。1つ選ぶと使う軸も自動で割り当てる。
+    ③ 出力先を確認して「作成」。2軸テーブルなら両軸を1ファイル(TR<Seiban>.prm)にする。
+    むずかしい設定（フォルダ・CSV・手動指定）は「詳細設定…」の従来画面で行う。
+    """
+
+    def __init__(self, parent, settings, *, model=""):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("受注番号から かんたん作成")
+        self.resize(680, 600)
+        self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
+        mpath = settings.get("controller_master_csv", "")
+        if mpath and not Path(mpath).is_absolute():
+            mpath = str(app_dir() / mpath)
+        self._controllers = controllers.load_controllers(mpath)
+        self._cand = []           # 候補 [(controller, [軸文字,...])]
+
+        v = QtWidgets.QVBoxLayout(self)
+        title = QtWidgets.QLabel("受注番号から かんたん作成")
+        title.setStyleSheet("font-size:15px; font-weight:bold;")
+        v.addWidget(title)
+
+        # --- ① 受注伝票番号 ---
+        box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
+        f1 = QtWidgets.QVBoxLayout(box1)
+        srow = QtWidgets.QHBoxLayout()
+        self.e_seiban = QtWidgets.QLineEdit()
+        self.e_seiban.setPlaceholderText("受注伝票番号（例 50013078）")
+        self.e_seiban.returnPressed.connect(self.search)
+        b_search = QtWidgets.QPushButton("探す")
+        b_search.setObjectName("primary"); b_search.clicked.connect(self.search)
+        srow.addWidget(QtWidgets.QLabel("Seiban")); srow.addWidget(self.e_seiban, 1)
+        srow.addWidget(b_search)
+        f1.addLayout(srow)
+        self.found_box = QtWidgets.QWidget()
+        self.found_lay = QtWidgets.QVBoxLayout(self.found_box)
+        self.found_lay.setContentsMargins(0, 0, 0, 0)
+        self.lbl_found = QtWidgets.QLabel("製品データの場所から、傾斜(T)・回転(R)を探します。")
+        self.lbl_found.setStyleSheet("color:#6b7280;")
+        self.found_lay.addWidget(self.lbl_found)
+        f1.addWidget(self.found_box)
+        v.addWidget(box1)
+
+        # --- ② 制御装置 ---
+        box2 = QtWidgets.QGroupBox("② 作れる制御装置（号機）を選ぶ")
+        f2 = QtWidgets.QFormLayout(box2)
+        self.cmb_cap = QtWidgets.QComboBox()
+        self.cmb_cap.addItem("（自動：製品データから判定）", "")
+        for c in controllers.all_capacities(self._controllers):
+            self.cmb_cap.addItem(c, c)
+        self.cmb_cap.setToolTip("製品データから容量を自動判定します。判定できないときだけ手で選んでください")
+        self.cmb_cap.currentIndexChanged.connect(self._update_candidates)
+        f2.addRow("必要容量", self.cmb_cap)
+        self.cmb_ctrl = QtWidgets.QComboBox()
+        self.cmb_ctrl.setToolTip("製品の必要容量を満たす制御装置だけ出します。選ぶと使う軸を自動割当")
+        self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
+        f2.addRow("制御装置", self.cmb_ctrl)
+        self.lbl_assign = QtWidgets.QLabel("")
+        self.lbl_assign.setWordWrap(True)
+        self.lbl_assign.setStyleSheet("color:#374151;")
+        f2.addRow("軸の割当", self.lbl_assign)
+        v.addWidget(box2)
+
+        # --- ③ 出力 ---
+        box3 = QtWidgets.QGroupBox("③ 出力先を確認して「作成」")
+        f3 = QtWidgets.QFormLayout(box3)
+        self.e_basic = QtWidgets.QLineEdit()
+        self.e_basic.setPlaceholderText("使うBASIC（制御装置を選ぶと自動で入ります）")
+        f3.addRow("使うBASIC", self._with_browse(self.e_basic, self._browse_basic))
+        self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
+                                            or settings.get("nc_send_folder", "")))
+        self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有 \\192.168.0.10\nc）")
+        f3.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
+        v.addWidget(box3)
+
+        self.lbl_basic_dir = QtWidgets.QLabel("")
+        self.lbl_basic_dir.setStyleSheet("color:#6b7280; font-size:11px;")
+        v.addWidget(self.lbl_basic_dir)
+
+        row = QtWidgets.QHBoxLayout()
+        b_adv = QtWidgets.QPushButton("詳細設定（フォルダ/CSV/手動）…")
+        b_adv.setToolTip("BASICや製品データの場所、変更表CSV、軸の手動指定などの従来画面を開く")
+        b_adv.clicked.connect(self._open_advanced)
+        b_make = QtWidgets.QPushButton("作成 → 出力先")
+        b_make.setObjectName("primary"); b_make.clicked.connect(self.create)
+        b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
+        row.addWidget(b_adv); row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
+        v.addLayout(row)
+
+        if model:
+            pass  # 型式はここでは使わない（Seiban起点）
+        self.e_seiban.setFocus()
+        self._refresh_basic_dir_note()
+
+    # ----- 補助 -----
+    def _with_browse(self, line, slot):
+        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(line, 1)
+        b = QtWidgets.QPushButton("参照..."); b.clicked.connect(slot)
+        h.addWidget(b)
+        return w
+
+    def _abs_dir(self, key):
+        d = str(self.settings.get(key, "") or "")
+        return d
+
+    def _refresh_basic_dir_note(self):
+        bd = self._abs_dir("param_basic_dir")
+        pd = self._abs_dir("param_product_dir")
+        miss = []
+        if not pd or not Path(pd).is_dir():
+            miss.append("製品データの場所")
+        if not bd or not Path(bd).is_dir():
+            miss.append("BASICの場所")
+        if miss:
+            self.lbl_basic_dir.setText(
+                "※ " + "・".join(miss) + " が未設定です。「詳細設定…」で一度だけ設定してください。")
+        else:
+            self.lbl_basic_dir.setText(f"製品データ: {pd}　／　BASIC: {bd}")
+
+    def _browse_basic(self):
+        start = self.e_basic.text() or self._abs_dir("param_basic_dir")
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
+        if p:
+            self.e_basic.setText(p)
+
+    def _browse_out(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(self, "出力先", self.e_out.text())
+        if p:
+            self.e_out.setText(p)
+
+    def _open_advanced(self):
+        dlg = ParamDialog(self.parent() or self, self.settings)
+        dlg.e_seiban.setText(self.e_seiban.text().strip())
+        dlg.exec()
+        # 詳細画面でフォルダ設定が変わっているかもしれないので注記を更新
+        self._refresh_basic_dir_note()
+
+    # ----- ① 探す -----
+    def search(self):
+        seiban = self.e_seiban.text().strip()
+        # 既存のチェックUIを消す
+        for f in self._files:
+            f["chk"].setParent(None)
+        self._files = []
+        pd = self._abs_dir("param_product_dir")
+        if not seiban:
+            self.lbl_found.setText("Seiban を入力してください。")
+            self._update_candidates(); return
+        if not pd or not Path(pd).is_dir():
+            self.lbl_found.setText("製品データの場所が未設定です。「詳細設定…」で設定してください。")
+            self._update_candidates(); return
+        files = seiban_flow.find_seiban_files(pd, seiban)
+        if not files:
+            self.lbl_found.setText(
+                f"Seiban『{seiban}』の製品データ（T…/R…）が見つかりませんでした。\n"
+                "頭文字 T(傾斜)/R(回転)＋Seiban の名前か、「詳細設定…」で手動指定してください。")
+            self._update_candidates(); return
+        self.lbl_found.setText("見つかったものにチェックを入れてください（両方／必要な方だけ）:")
+        for fdict in files:
+            try:
+                text = Path(fdict["path"]).read_text(encoding="cp932", errors="replace")
+            except Exception:
+                text = ""
+            meta = seiban_flow.read_product_meta(text, kind=fdict["kind"])
+            fdict["meta"] = meta
+            cap = meta.get("capacity") or "容量不明"
+            extra = []
+            if meta.get("model"):
+                extra.append(f"型式 {meta['model']}")
+            extra.append(f"容量 {cap}")
+            if meta.get("motor"):
+                extra.append(f"モーター {meta['motor']}")
+            chk = QtWidgets.QCheckBox(
+                f"{fdict['kind']}（{fdict['name']}）  " + " / ".join(extra))
+            chk.setChecked(True)
+            chk.stateChanged.connect(self._update_candidates)
+            fdict["chk"] = chk
+            self.found_lay.addWidget(chk)
+            self._files.append(fdict)
+        self._update_candidates()
+
+    def _selected_files(self):
+        return [f for f in self._files if f.get("chk") and f["chk"].isChecked()]
+
+    def _needs(self, sel):
+        """選択ファイルごとの必要容量リスト。手動指定があれば不明分を補う。"""
+        manual = self.cmb_cap.currentData() or ""
+        return [(f["meta"].get("capacity") or manual) for f in sel]
+
+    # ----- ② 候補制御装置 -----
+    def _update_candidates(self, *_):
+        sel = self._selected_files()
+        self.cmb_ctrl.blockSignals(True)
+        self.cmb_ctrl.clear()
+        self._cand = []
+        if not sel:
+            self.cmb_ctrl.addItem("（①で作るものを選んでください）", -1)
+            self.cmb_ctrl.blockSignals(False)
+            self._on_ctrl_changed(); return
+        if not self._controllers:
+            self.cmb_ctrl.addItem("（制御装置マスタが未設定）", -1)
+            self.cmb_ctrl.blockSignals(False)
+            self._on_ctrl_changed(); return
+        needs = self._needs(sel)
+        self._cand = seiban_flow.capable_controllers(self._controllers, needs)
+        if not self._cand:
+            caps = "・".join(n or "?" for n in needs)
+            self.cmb_ctrl.addItem(f"（容量 {caps} を満たす制御装置がありません）", -1)
+        else:
+            self.cmb_ctrl.addItem("（制御装置を選択）", -1)
+            for i, (c, asg) in enumerate(self._cand):
+                amap = "  ".join(f"{nc_param.axis_name(seiban_flow_axis(a))}:{c.caps[a]}"
+                                 for a in asg)
+                self.cmb_ctrl.addItem(f"{c.label()}  →  {amap}", i)
+        self.cmb_ctrl.blockSignals(False)
+        self._on_ctrl_changed()
+
+    def _on_ctrl_changed(self, *_):
+        idx = self.cmb_ctrl.currentData()
+        sel = self._selected_files()
+        if idx is None or idx < 0 or idx >= len(self._cand):
+            self.lbl_assign.setText("")
+            return
+        c, asg = self._cand[idx]
+        parts = []
+        for f, a in zip(sel, asg):
+            parts.append(f"{f['kind']} → {a}軸（第{seiban_flow_axis(a)}軸／{c.caps[a]}）")
+        self.lbl_assign.setText("　".join(parts))
+        # BASICを号機から自動セット
+        bd = self._abs_dir("param_basic_dir")
+        path = controllers.basic_file_for_unit(bd, c.unit) if bd else None
+        if path:
+            self.e_basic.setText(path)
+        elif not self.e_basic.text().strip():
+            self.lbl_assign.setText(self.lbl_assign.text()
+                                    + f"\n※ 号機 {c.unit} のBASICが見つかりません。『使うBASIC』を指定してください。")
+
+    # ----- ③ 作成 -----
+    def create(self):
+        sel = self._selected_files()
+        if not sel:
+            QtWidgets.QMessageBox.warning(self, "作成", "①で作るもの（傾斜/回転）を選んでください")
+            return
+        idx = self.cmb_ctrl.currentData()
+        if idx is None or idx < 0 or idx >= len(self._cand):
+            QtWidgets.QMessageBox.warning(self, "作成", "②で制御装置を選んでください")
+            return
+        ctl, asg = self._cand[idx]
+        master = self.e_basic.text().strip()
+        out = self.e_out.text().strip()
+        seiban = self.e_seiban.text().strip()
+        if not master or not Path(master).is_file():
+            QtWidgets.QMessageBox.warning(self, "作成", "使うBASIC（.prm）を指定してください")
+            return
+        if not out or not Path(out).is_dir():
+            QtWidgets.QMessageBox.warning(self, "作成", "出力先（存在するフォルダ）を指定してください")
+            return
+        try:
+            raw = param_build.read_master(master)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{e}")
+            return
+        # 各ファイル → 変更値（平坦）→ 割当軸番号
+        axis_values, per_meta = {}, {}
+        for f, a in zip(sel, asg):
+            axnum = seiban_flow_axis(a)
+            try:
+                ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "作成", f"製品データを読めません:\n{e}")
+                return
+            vals = param_build.product_change_values(raw, ptext)
+            if not vals:
+                QtWidgets.QMessageBox.warning(
+                    self, "作成",
+                    f"{f['kind']}（{f['name']}）から変更値を取り出せませんでした。"
+                    "BASICと製品データの形式が合っているか確認してください。")
+                return
+            axis_values[axnum] = vals
+            per_meta[axnum] = (f, a)
+        # 頭文字・ファイル名
+        if len(sel) >= 2:
+            kinds = {"傾斜": "T", "回転": "R"}
+            ps = "".join(kinds.get(f["kind"], "") for f in sel)
+            prefix = ps if len(set(ps)) == len(sel) and "" not in ps else "TR"
+        else:
+            prefix = seiban_flow.KIND_PREFIX.get(sel[0]["kind"], "T")
+        fname = param_build.filename(prefix, seiban)
+        axis_label = "＋".join(f"{nc_param.axis_name(ax)}" for ax in sorted(axis_values))
+        # プレビュー（軸つき）
+        rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
+                for (num, ax, old, new) in param_build.preview_rows_multi(raw, axis_values)]
+        sub = ("＋".join(f["kind"] for f in sel)
+               + f" → {fname}（{ctl.label()}）")
+        if not ParamPreviewDialog(self, rows, subtitle=sub).exec():
+            return
+        try:
+            out_path, missing, fmt = param_build.create_file_multi(
+                master, out, axis_values, prefix=prefix, seiban=seiban)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "作成に失敗", str(e))
+            return
+        controller = nc_param.controller_from_basic(master)
+        total = sum(len(v) for v in axis_values.values())
+        reg = []
+        csv_path = self.settings.get("param_change_csv", "")
+        for axnum, vals in axis_values.items():
+            f, _a = per_meta[axnum]
+            meta = f.get("meta", {})
+            mode, _eff = param_build.detect_mode(
+                raw, vals, axnum,
+                number=self.settings.get("closed_loop_number", "1815"),
+                bit=int(self.settings.get("closed_loop_bit", 1)),
+                full_when=int(self.settings.get("closed_loop_full", 1)))
+            _log_param_creation(
+                self.settings, model=meta.get("model", ""), kind=f["kind"], mode=mode,
+                motor=meta.get("motor", ""), controller=controller,
+                axis=nc_param.axis_name(axnum), seiban=seiban,
+                basic=Path(master).name, out=fname,
+                applied=len(vals), total=len(vals))
+            if csv_path:
+                entry = nc_param.ParamEntry(
+                    model=meta.get("model", ""), kind=f["kind"], mode=mode,
+                    motor=meta.get("motor", ""), motor_no=meta.get("motor_no", ""),
+                    direction=meta.get("direction", ""), gear=meta.get("gear", ""),
+                    controller=controller, axis=nc_param.axis_name(axnum), seiban=seiban,
+                    date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
+                    basic=Path(master).name,
+                    items=[(n, vv, "") for n, vv in vals.items() if vv != ""])
+                try:
+                    _, action = nc_param.upsert_entry(csv_path, entry)
+                    verb = {"added": "登録", "updated": "更新"}.get(action, "")
+                    if verb:
+                        reg.append(f"・{f['kind']}（{nc_param.axis_name(axnum)}軸）を履歴に{verb}")
+                except Exception:
+                    pass
+        try:
+            from .settings import save_settings
+            self.settings["param_out_folder"] = out
+            save_settings(self.settings)
+        except Exception:
+            pass
+        msg = (f"作成しました:\n・{out_path.name}\n"
+               f"（{Path(master).name} の {axis_label} 軸へ製品値を書き込み）\n"
+               f"値の反映: {total - len(missing)} / {total} 件")
+        if len(sel) >= 2:
+            msg += "\n（2軸テーブル: 傾斜＋回転を1ファイルにまとめました）"
+        if missing:
+            miss = ", ".join(f"{n}({nc_param.axis_name(a)})" if a else str(n)
+                             for n, a in missing[:12])
+            msg += f"\n⚠ BASICに無い番号（未反映）: {miss}"
+        if reg:
+            msg += "\nデータベース履歴:\n" + "\n".join(reg)
+        msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        QtWidgets.QMessageBox.information(self, "作成しました", msg)
+
+
+def seiban_flow_axis(letter):
+    """軸文字(X/Y/Z/A/B/C) → 軸番号(1〜6)。ParamWizardDialog 用の薄いラッパ。"""
+    return nc_param.axis_number(letter)
 
 
 class ParamDialog(QtWidgets.QDialog):
@@ -2362,7 +2733,11 @@ class ParamDBDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl)
 
         row = QtWidgets.QHBoxLayout()
-        b_make = QtWidgets.QPushButton("この設定で作成→出力先")
+        b_repeat = QtWidgets.QPushButton("前回と同じ制御装置で即作成")
+        b_repeat.setToolTip("選択エントリに登録された制御装置(BASIC)・軸をそのまま使い、"
+                            "Seibanだけ変えて即作成（リピート品の最短手順）")
+        b_repeat.clicked.connect(self.repeat_same_controller)
+        b_make = QtWidgets.QPushButton("制御装置を選んで作成→出力先")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.make_from_entry)
         b_make2 = QtWidgets.QPushButton("2軸で作成（傾斜＋回転）…")
         b_make2.setToolTip("2軸テーブル用。選択中エントリ＋相手エントリの2軸を、"
@@ -2371,7 +2746,8 @@ class ParamDBDialog(QtWidgets.QDialog):
         b_dump = QtWidgets.QPushButton("吸い出し差分を登録")
         b_dump.clicked.connect(self.register_dump)
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
-        row.addWidget(b_make); row.addWidget(b_make2); row.addWidget(b_dump)
+        row.addWidget(b_repeat); row.addWidget(b_make); row.addWidget(b_make2)
+        row.addWidget(b_dump)
         row.addStretch(1); row.addWidget(b_close)
         v.addLayout(row)
 
@@ -2587,6 +2963,40 @@ class ParamDBDialog(QtWidgets.QDialog):
         ParamLogDialog(self, str(p)).exec()
 
     # ----- リピート作成（作成すると履歴に登録） -----
+    def repeat_same_controller(self):
+        """リピート最短手順: 選択エントリの制御装置(BASIC)・軸をそのまま使い即作成。
+
+        登録された使用BASIC名を『BASICの場所』から解決して使うBASICへ入れ、軸・頭文字も
+        エントリの値に合わせてから、通常の作成（make_from_entry）を呼ぶ。"""
+        from pathlib import Path
+        e = self._selected_entry()
+        if not e:
+            QtWidgets.QMessageBox.warning(self, "作成", "エントリを選んでください")
+            return
+        # 使用BASIC名 → BASICの場所 で実ファイルへ解決（無ければ今の『使うBASIC』のまま）
+        if e.basic:
+            bd = str(self.settings.get("param_basic_dir", "") or "")
+            cand = Path(bd, e.basic) if bd else None
+            if cand and cand.is_file():
+                self.e_basic.setText(str(cand))
+            elif not self.e_basic.text().strip():
+                QtWidgets.QMessageBox.information(
+                    self, "作成",
+                    f"登録BASIC『{e.basic}』が『BASICの場所』に見つかりません。\n"
+                    "『使うBASIC』を指定してください。")
+                return
+        # 軸・頭文字をエントリに合わせる
+        if e.axis:
+            i = self.cmb_axis.findData(nc_param.axis_number(e.axis))
+            if i >= 0:
+                self.cmb_axis.setCurrentIndex(i)
+        pfx = seiban_flow.KIND_PREFIX.get(e.kind, "")
+        if pfx:
+            j = self.cmb_prefix.findData(pfx)
+            if j >= 0:
+                self.cmb_prefix.setCurrentIndex(j)
+        self.make_from_entry()
+
     def make_from_entry(self):
         from pathlib import Path
         e = self._selected_entry()
@@ -4375,8 +4785,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
         self.b_program.clicked.connect(self.show_program_dialog)
         self.b_param = QtWidgets.QPushButton("パラメータ")
-        self.b_param.setToolTip("製品ごとのパラメータ変更（差分）の確認表・差分ファイルを"
-                                "作ってカード/LANへ出力（機械への入力は人が実施）")
+        self.b_param.setToolTip("受注番号から かんたん作成: Seibanで傾斜/回転を探し、作れる制御装置を選んで"
+                                "パラメータ.prmを作成（2軸テーブルは1ファイル）。詳細設定も中から開けます")
         self.b_param.clicked.connect(self.show_param_dialog)
         self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
         self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
@@ -6805,10 +7215,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ProgramDialog(self, self.settings, params).exec()
 
     def show_param_dialog(self):
-        """製品ごとのパラメータ変更（差分）の確認表・差分ファイルを作るダイアログ。"""
-        dlg = ParamDialog(self, self.settings,
-                          model=self.e_model.text().strip(),
-                          machine=self.e_machine.text().strip())
+        """受注番号から かんたん作成（ガイド付き）。詳細は中の「詳細設定…」から。"""
+        dlg = ParamWizardDialog(self, self.settings,
+                                model=self.e_model.text().strip())
         dlg.exec()
 
     # ----- 印刷 -----

@@ -68,6 +68,25 @@ def product_axis_values(basic_text: str, product_text: str) -> tuple:
     return fanuc_param.diff_by_axis(basic_text, product_text)
 
 
+def product_change_values(basic_text: str, product_text: str) -> dict:
+    """完成製品 .prm から「BASICへ入れる変更値 {番号:値}」を平坦に取り出す。
+
+    軸へ再ターゲット（別の軸へ入れ直す）できるよう、軸ラベルを落として番号→値で返す。
+    FANUC N形式（完成製品）は BASIC との差分、ヘッダ＋CSV形式は全パラメータ値。
+    かんたん作成（Seiban起点）で、製品の傾斜/回転ファイルを号機の割当軸へ入れるのに使う。
+    """
+    if fanuc_param.looks_like_fanuc_prm(product_text):
+        if fanuc_param.looks_like_fanuc_prm(basic_text):
+            return {num: ov for (num, _l, _m, ov)
+                    in fanuc_param.diff(basic_text, product_text) if ov is not None}
+        return {num: v for (num, _l), v in fanuc_param.values_map(product_text).items()}
+    try:
+        doc = prm_format.parse_prm(product_text)
+        return {num: v for (num, v, _jp, _en) in prm_format.iter_params(doc) if v != ""}
+    except Exception:
+        return {}
+
+
 def build_text_multi(raw: str, axis_values: dict, common: dict = None,
                      seiban: str = "") -> tuple:
     """BASIC raw に「複数軸ぶんの値」を入れた新テキストを返す（2軸テーブル用）。

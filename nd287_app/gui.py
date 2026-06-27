@@ -1673,21 +1673,24 @@ class ParamWizardDialog(QtWidgets.QDialog):
             meta = seiban_flow.read_product_meta(
                 text, kind=fdict["kind"], motor_caps=self._motor_caps)
             fdict["meta"] = meta
-            if meta.get("capacity"):
-                cap = f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
-            else:
-                cap = "容量不明→手で選択"
+            is_fanuc = meta.get("system", "FANUC") == "FANUC"
             extra = []
             if meta.get("model"):
                 extra.append(f"型式 {meta['model']}")
-            if meta.get("voltage"):
-                extra.append(meta["voltage"])
-            extra.append(cap)
+            if not is_fanuc:
+                extra.append(f"⚠ {meta.get('system')}系（今はFANUCのみ作成可）")
+            else:
+                if meta.get("voltage"):
+                    extra.append(meta["voltage"])
+                extra.append(f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
+                             if meta.get("capacity") else "容量不明→手で選択")
             if meta.get("motor"):
                 extra.append(f"モーター {meta['motor']}")
             chk = QtWidgets.QCheckBox(
                 f"{fdict['kind']}（{fdict['name']}）  " + " / ".join(extra))
-            chk.setChecked(True)
+            chk.setChecked(is_fanuc)            # 非FANUCは既定オフ（作成対象外）
+            if not is_fanuc:
+                chk.setStyleSheet("color:#b45309;")
             chk.stateChanged.connect(self._update_candidates)
             fdict["chk"] = chk
             self.found_lay.addWidget(chk)
@@ -1759,6 +1762,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
         sel = self._selected_files()
         if not sel:
             QtWidgets.QMessageBox.warning(self, "作成", "①で作るもの（傾斜/回転）を選んでください")
+            return
+        # FANUC以外（三菱/安川TPC等）はFANUCのBASICに適用できない＝今は作成不可で弾く
+        non_fanuc = [f for f in sel if f["meta"].get("system", "FANUC") != "FANUC"]
+        if non_fanuc:
+            names = "、".join(f"{f['name']}（{f['meta'].get('system')}系）" for f in non_fanuc)
+            QtWidgets.QMessageBox.warning(
+                self, "作成",
+                f"次の製品はFANUC制御ではないため、今は作成できません:\n・{names}\n\n"
+                "現在パラメータ作成はFANUCのみ対応です（三菱・安川等は後日対応）。"
+                "FANUC製品だけを選んで作成してください。")
             return
         idx = self.cmb_ctrl.currentData()
         if idx is None or idx < 0 or idx >= len(self._cand):

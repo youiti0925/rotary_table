@@ -164,6 +164,47 @@ def is_dd_motor(motor_model: str) -> bool:
     return "DIS" in norm or norm.startswith("DD")
 
 
+def detect_system(text: str, motor: str = "", amp: str = "") -> str:
+    """製品データの制御系統を推定する: 'FANUC' / '三菱' / '安川/TPC' / '不明'。
+
+    モーター型式・アンプ型式・パラメータ番号から判定。今はFANUCだけ作成対応なので、
+    非FANUCを早めに弾く（FANUCのBASICへ適用しないため）の判定に使う。
+    """
+    t = text or ""
+    if not motor:
+        mm = re.search(r"^Motor Model=(.*)$", t, re.M)
+        motor = mm.group(1).strip() if mm else ""
+    if not amp:
+        am = re.search(r"^Servo Amp Model=(.*)$", t, re.M)
+        amp = am.group(1).strip() if am else ""
+    mu = str(motor or "").upper()
+    au = str(amp or "").upper()
+    # 三菱(MELDAS): アンプ MDS〜 / モーター HG・HF・HC・HA〜
+    if au.startswith("MDS") or mu.startswith(("HG", "HF", "HC", "HA")):
+        return "三菱"
+    # 安川/TPC: モーター SGM〜・TPC / Pナンバー(P100/P110等)パラメータ
+    if mu.startswith("SGM") or "TPC" in mu or re.search(r'"P1[0-9]0"', t):
+        return "安川/TPC"
+    # FANUC: αi/α モーター、または代表パラメータ番号(1815/2020/2165)を持つ
+    if ("α" in str(motor or "")) or re.search(r'"0?(?:1815|2020|2165|1825)"', t):
+        return "FANUC"
+    # 補助: ヘッダ PrintForm（1/5=FANUC, 20=三菱, 33/34=安川TPC）
+    pf = re.search(r"^PrintForm=(\d+)", t, re.M)
+    if pf:
+        n = int(pf.group(1))
+        if n == 20:
+            return "三菱"
+        if n in (33, 34):
+            return "安川/TPC"
+        if n in (1, 5):
+            return "FANUC"
+    return "不明"
+
+
+def is_fanuc_product(text: str, motor: str = "", amp: str = "") -> bool:
+    return detect_system(text, motor, amp) == "FANUC"
+
+
 def motor_voltage(motor_model: str) -> str:
     """モーター型式から電源電圧を返す。HV記載→'400V'、型式があれば'200V'、無ければ''。"""
     s = str(motor_model or "").strip()
@@ -211,7 +252,7 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
     N形式（実機ネイティブ）はヘッダが無いので最小限（kind は引数のものを使う）。
     """
     meta = {"model": "", "kind": kind, "capacity": "", "capacity_src": "",
-            "voltage": "", "amp_model": "", "motor": "", "motor_no": "",
+            "voltage": "", "system": "", "amp_model": "", "motor": "", "motor_no": "",
             "motor_id": "", "gear": "", "direction": "", "sep_detector": "",
             "mode_hint": ""}
     if not text or fanuc_param.looks_like_fanuc_prm(text):
@@ -251,6 +292,7 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
             meta["capacity_src"] = "標準"
     meta["capacity"] = cap
     meta["voltage"] = motor_voltage(meta["motor"])    # HV記載→400V
+    meta["system"] = detect_system(text, meta["motor"], meta["amp_model"])
     # 別置検出器が入っていればフルクロの手がかり（最終判定は 1815）
     meta["mode_hint"] = "フル" if meta["sep_detector"] else ""
     return meta

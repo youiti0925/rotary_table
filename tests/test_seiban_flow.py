@@ -113,6 +113,34 @@ class TestStandardCapacity(unittest.TestCase):
         for mm in ("HG-H104T", "SGM7P-08A7K", "TPC-Jr-K3B", "MDS-E/EH"):
             self.assertEqual(S.standard_capacity(mm), "", mm)
 
+
+class TestDetectSystem(unittest.TestCase):
+    def _p(self, motor="", amp="", printform="1", extra_param=""):
+        return (f"System Version=Ver.1.10\nPrintForm={printform}\n"
+                f"Model=X\nSeiban=1\nAxis=R\n"
+                f"Motor Model={motor}\nServo Amp Model={amp}\n"
+                '"1815","---","","","00000010",""\n' + extra_param)
+
+    def test_fanuc(self):
+        self.assertEqual(S.detect_system(self._p(motor="αiS2/5000")), "FANUC")
+        self.assertEqual(S.detect_system(self._p(motor="α6/2000")), "FANUC")  # 旧αも
+        self.assertTrue(S.is_fanuc_product(self._p(motor="αiF12/4000-B")))
+
+    def test_mitsubishi(self):
+        self.assertEqual(S.detect_system(self._p(motor="HG-H104T", amp="MDS-E/EH",
+                                                 printform="20")), "三菱")
+        self.assertFalse(S.is_fanuc_product(self._p(motor="HF-204S", amp="MDS-D/DH")))
+
+    def test_yaskawa_tpc(self):
+        self.assertEqual(S.detect_system(self._p(motor="TPC-Jr-K3B", printform="34")),
+                         "安川/TPC")
+        self.assertEqual(S.detect_system(self._p(motor="SGM7P-08A7K", printform="33")),
+                         "安川/TPC")
+
+    def test_meta_has_system(self):
+        m = S.read_product_meta(self._p(motor="HG-H104T", amp="MDS-E/EH", printform="20"))
+        self.assertEqual(m["system"], "三菱")
+
     def test_hv_halves_capacity(self):
         # 400V(HV)は電流が約半分のコード
         self.assertEqual(S.standard_capacity("αiS8/4000HV"), "20A")   # 200Vなら40A

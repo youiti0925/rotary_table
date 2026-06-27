@@ -275,6 +275,11 @@ PROGRAM_TRANSFER = """
 <li>プログラムを選択して運転。</li>
 </ol>
 
+<h4>機械での読込画面（カード／USB 共通のイメージ）</h4>
+<p>機械のプログラム／入力画面で、入力デバイス（メモリカード／USB）を選び、ファイルを選んで
+<b>READ（入力）</b>します。</p>
+<p><img src="scr_prog_read.png" width="430"></p>
+
 <h4>③ LANケーブルの場合（カード不要）</h4>
 <p><img src="lan.png" width="560"></p>
 <ol>
@@ -314,6 +319,7 @@ Seibanごと）から、<code>&lt;頭文字&gt;&lt;Seiban&gt;.prm</code>（傾�
 <li><b>「パラメータ書込」＝1</b> にする。<code>SW0100</code>（パラメータ書込許可）の警告が出ますが、
     これは<b>正常</b>です。</li>
 </ol>
+<p><img src="scr_setting.png" width="430"></p>
 
 <h4>④ 入力</h4>
 <ul>
@@ -321,6 +327,7 @@ Seibanごと）から、<code>&lt;頭文字&gt;&lt;Seiban&gt;.prm</code>（傾�
     載っている番号だけが書き換わり、他は現状維持です。</li>
 <li><b>手入力</b>：<b>確認表</b>を見ながら、該当番号だけを手で入力（旧値→新値を照合）。</li>
 </ul>
+<p><img src="scr_param.png" width="430"></p>
 
 <h4>⑤ 電源再投入（必要なとき）</h4>
 <p>一部の番号は<b>電源を入れ直す</b>まで反映されません（<code>PW0000</code> 等の警告が出たら再投入）。</p>

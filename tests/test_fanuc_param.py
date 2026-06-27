@@ -54,6 +54,33 @@ class TestRead(unittest.TestCase):
         self.assertIsNone(F.get_value(SAMPLE, "99999"))
 
 
+class TestOddLineEndings(unittest.TestCase):
+    """実機BASICは改行が \\n\\r\\r 等まちまち（行頭に \\r が残る）。それでも
+    検出・読み取り・値置換ができ、出力はバイト一致（余白も保存）すること。"""
+
+    # F30BASIC.PRM 実物と同じ \n\r\r 区切り
+    ODD = ("%\n\r\r"
+           "N01020Q1A1P88A2P89A3P90A4P65\n\r\r"
+           "N01825Q1A1P3000A2P3000A3P3000A4P3000\n\r\r"
+           "N02165Q1A1P25A2P45A3P85A4P165\n\r\r"
+           "%\n")
+
+    def test_detect_and_read(self):
+        self.assertTrue(F.looks_like_fanuc_prm(self.ODD))
+        self.assertEqual(F.get_value(self.ODD, "1020", "A1"), "88")
+        self.assertEqual(F.get_value(self.ODD, "2165", "A4"), "165")
+        self.assertEqual(F.get_value(self.ODD, "1825", "A4"), "3000")
+
+    def test_set_value_preserves_bytes(self):
+        new, ok = F.set_value(self.ODD, "1825", "2500", "A4")
+        self.assertTrue(ok)
+        self.assertEqual(F.get_value(new, "1825", "A4"), "2500")
+        self.assertEqual(F.get_value(new, "1825", "A1"), "3000")  # 他軸不変
+        # 変わったのは値1か所だけ。\n\r\r の余白も保存される（バイト一致）
+        self.assertEqual(new.replace("A4P2500", "A4P3000"), self.ODD)
+        self.assertEqual(len(new.encode("cp932")), len(self.ODD.encode("cp932")))
+
+
 class TestByteSafeEdit(unittest.TestCase):
     def test_set_axis_value_only_changes_that_value(self):
         new, ok = F.set_value(SAMPLE, "1825", "2500", "A4")

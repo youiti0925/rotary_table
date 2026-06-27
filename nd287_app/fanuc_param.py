@@ -20,8 +20,10 @@
 
 import re
 
-# 1パラメータ行（行頭が N<digits>Q1）。Q1 以降のセグメント部を group(2) に取る
-_LINE = re.compile(r"^(N(\d+)Q1)(.*)$")
+# 1パラメータ行。行頭の余白(\r や空白)を group(1) に保持してから N<digits>Q1。
+# 実機BASICは改行が \n\r\r 等まちまちで、split("\n") すると行頭に \r が残るため、
+# 先頭余白を許容しつつ保存（出力のバイト一致のため余白はそのまま戻す）。
+_LINE = re.compile(r"^(\s*)(N(\d+)Q1)(.*)$")
 # セグメント: 任意のグループ(L1/A1..A4/S1/T1 等) + 型(P/M) + 値
 _SEG = re.compile(r"([LASTlast]\d+)?([PM])([-+]?\d+(?:\.\d+)?)")
 _VALUE = r"[-+]?\d+(?:\.\d+)?"
@@ -32,12 +34,12 @@ def segments(line: str):
     m = _LINE.match(line)
     if not m:
         return None
-    return [(g or "", t, v) for (g, t, v) in _SEG.findall(m.group(3))]
+    return [(g or "", t, v) for (g, t, v) in _SEG.findall(m.group(4))]
 
 
 def param_number(line: str):
     m = _LINE.match(line)
-    return m.group(2) if m else None
+    return m.group(3) if m else None
 
 
 def _norm_num(number) -> str:
@@ -74,7 +76,7 @@ def set_value(text: str, number, value, label: str = None) -> tuple:
         if done or param_number(line) != num:
             continue
         m = _LINE.match(line)
-        head, body = m.group(1), m.group(3)  # head='N#####Q1', body=セグメント部
+        prefix, head, body = m.group(1), m.group(2), m.group(4)  # 先頭余白/N#####Q1/本体
         # body 内で、目的のセグメントの「値」だけを置換する
         out, pos, replaced = [], 0, False
         for sm in _SEG.finditer(body):
@@ -88,7 +90,7 @@ def set_value(text: str, number, value, label: str = None) -> tuple:
             pos = sm.end()
         out.append(body[pos:])
         if replaced:
-            lines[i] = head + "".join(out)
+            lines[i] = prefix + head + "".join(out)  # 先頭余白も復元（バイト一致）
             done = True
     return "\n".join(lines), done
 
@@ -190,12 +192,13 @@ def diff_by_axis(master_text: str, product_text: str) -> tuple:
 
 
 def looks_like_fanuc_prm(text: str) -> bool:
-    """先頭付近に N#####Q1… 形式があれば FANUCネイティブ.PRM とみなす。"""
-    head = text.lstrip()
-    if not head.startswith("%"):
-        # %が無くてもN行が並んでいれば許容
-        pass
-    return bool(re.search(r"^N\d+Q1", head, re.MULTILINE))
+    """N#####Q1… 形式の行があれば FANUCネイティブ.PRM とみなす。
+
+    実機BASICは改行が \\n\\r\\r 等まちまちで行頭に \\r が残ることがあるため、
+    行頭アンカーに頼らず、その特徴的なパターン自体の有無で判定する
+    （ヘッダ＋CSV形式には N#####Q1 は現れない）。
+    """
+    return bool(re.search(r"N\d+Q1", text or ""))
 
 
 def values_map(text: str) -> dict:

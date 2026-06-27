@@ -80,6 +80,51 @@ class TestReadProductMeta(unittest.TestCase):
         self.assertEqual(meta["mode_hint"], "フル")
 
 
+class TestMotorCaps(unittest.TestCase):
+    CSV = ("モーター型式,モーター番号,モーターID,容量,メモ\n"
+           "αiS2/5000,A06B-0212-B000,262,20A,TWA-130\n"
+           "αiS4/5000-B,A06B-2215-B000,,40,\n"
+           "空行は無視,,, ,\n")
+
+    def _table(self):
+        d = tempfile.mkdtemp()
+        p = Path(d, "motor.csv")
+        p.write_text(self.CSV, encoding="cp932")
+        return S.load_motor_caps(str(p))
+
+    def test_lookup_by_number_model_id(self):
+        t = self._table()
+        self.assertEqual(S.capacity_for_motor(t, motor_no="A06B-0212-B000"), "20A")
+        self.assertEqual(S.capacity_for_motor(t, motor_model="αiS4/5000-B"), "40A")
+        self.assertEqual(S.capacity_for_motor(t, motor_id="262"), "20A")
+        self.assertEqual(S.capacity_for_motor(t, motor_no="UNKNOWN"), "")
+
+    def test_blank_capacity_rows_ignored(self):
+        d = tempfile.mkdtemp()
+        p = Path(d, "m.csv")
+        p.write_text("モーター型式,容量\nαiS2/5000,\n", encoding="cp932")
+        t = S.load_motor_caps(str(p))
+        self.assertEqual(S.capacity_for_motor(t, motor_model="αiS2/5000"), "")
+
+    def test_meta_uses_table_when_amp_empty(self):
+        # 実データ相当: Servo Amp Model 空、Motor で対応表から容量を引く
+        t = self._table()
+        text = _prm(model="TWA-130", axis="R", amp="", motor="αiS2/5000")
+        # Motor Number を実データに合わせる
+        text = text.replace("A06B-2215-B000", "A06B-0212-B000")
+        meta = S.read_product_meta(text, motor_caps=t)
+        self.assertEqual(meta["capacity"], "20A")
+        self.assertEqual(meta["capacity_src"], "対応表")
+        self.assertEqual(meta["kind"], "回転")
+
+    def test_meta_reads_param_2020(self):
+        text = _prm(amp="")
+        text = text.replace('"1815","A4","","","00000010",""\n',
+                            '"1815","A4","","","00000010",""\n"2020","---","","","262",""\n')
+        meta = S.read_product_meta(text)
+        self.assertEqual(meta["motor_id"], "262")
+
+
 class TestCapableControllers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -8,6 +8,8 @@
 これを ParamWizardDialog から呼んで、Seiban→何を作るか→どの制御装置か→作成、を導く。
 """
 
+import csv
+import io
 import re
 from pathlib import Path
 
@@ -62,16 +64,105 @@ def derive_capacity(amp_model: str = "", motor_model: str = "") -> str:
     return ""
 
 
-def read_product_meta(text: str, *, kind="") -> dict:
+def _normkey(s) -> str:
+    """対応表の照合キー正規化（大文字・記号/空白除去）。"""
+    return re.sub(r"[\s\-_/.]", "", str(s or "")).upper()
+
+
+_MCAP_ALIASES = {
+    "model": ("モーター型式", "モータ型式", "モーター", "モータ", "motor model", "motor"),
+    "number": ("モーター番号", "モータ番号", "motor number", "motor no", "number"),
+    "motor_id": ("モーターid", "モータid", "2020", "motor id", "id"),
+    "capacity": ("容量", "アンプ容量", "必要容量", "capacity", "amp"),
+}
+
+
+def _mcap_header(name):
+    key = (name or "").strip().lower()
+    for canon, aliases in _MCAP_ALIASES.items():
+        if key in (a.lower() for a in aliases):
+            return canon
+    return key
+
+
+def parse_motor_caps(text: str) -> dict:
+    """モーター→容量 対応表CSV → {"by_no":{}, "by_model":{}, "by_id":{}}（正規化キー）。
+
+    列: モーター型式 / モーター番号 / モーターID(2020) / 容量。空容量の行は無視。
+    """
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return {"by_no": {}, "by_model": {}, "by_id": {}}
+    header = [_mcap_header(c) for c in rows[0]]
+    idx = {n: header.index(n) for n in set(header) if n in _MCAP_ALIASES}
+    out = {"by_no": {}, "by_model": {}, "by_id": {}}
+
+    def cell(row, name):
+        i = idx.get(name)
+        return row[i].strip() if i is not None and i < len(row) else ""
+
+    for row in rows[1:]:
+        if not any(c.strip() for c in row):
+            continue
+        cap = _norm_cap_text(cell(row, "capacity"))
+        if not cap:
+            continue
+        if cell(row, "number"):
+            out["by_no"][_normkey(cell(row, "number"))] = cap
+        if cell(row, "model"):
+            out["by_model"][_normkey(cell(row, "model"))] = cap
+        if cell(row, "motor_id"):
+            out["by_id"][_normkey(cell(row, "motor_id"))] = cap
+    return out
+
+
+def _norm_cap_text(cap) -> str:
+    s = str(cap or "").strip().upper().replace("Ａ", "A")
+    if not s:
+        return ""
+    if s.endswith("A"):
+        s = s[:-1]
+    s = s.strip()
+    return f"{s}A" if s else ""
+
+
+def load_motor_caps(path) -> dict:
+    """モーター→容量 対応表を読む（cp932/UTF-8両対応）。無ければ空の辞書。"""
+    if not path or not Path(path).exists():
+        return {"by_no": {}, "by_model": {}, "by_id": {}}
+    raw = Path(path).read_bytes()
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            t = parse_motor_caps(raw.decode(enc, errors="strict"))
+        except Exception:
+            continue
+        if any(t.values()):
+            return t
+    return parse_motor_caps(raw.decode("cp932", errors="replace"))
+
+
+def capacity_for_motor(table: dict, motor_no="", motor_model="", motor_id="") -> str:
+    """モーター→容量 対応表から容量を引く（番号→ID→型式の順で照合）。無ければ ""。"""
+    if not table:
+        return ""
+    for key, val in (("by_no", motor_no), ("by_id", motor_id), ("by_model", motor_model)):
+        if val:
+            cap = table.get(key, {}).get(_normkey(val))
+            if cap:
+                return cap
+    return ""
+
+
+def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
     """製品データ(.prm)の付加情報を読む。ヘッダ＋CSV形式（System Version=…）専用。
 
     戻り値 dict: model, kind(傾斜/回転), capacity(推定), amp_model, motor, motor_no,
     gear, direction, sep_detector, mode_hint(フル/セミ/'')。
     N形式（実機ネイティブ）はヘッダが無いので最小限（kind は引数のものを使う）。
     """
-    meta = {"model": "", "kind": kind, "capacity": "", "amp_model": "",
-            "motor": "", "motor_no": "", "gear": "", "direction": "",
-            "sep_detector": "", "mode_hint": ""}
+    meta = {"model": "", "kind": kind, "capacity": "", "capacity_src": "",
+            "amp_model": "", "motor": "", "motor_no": "", "motor_id": "",
+            "gear": "", "direction": "", "sep_detector": "", "mode_hint": ""}
     if not text or fanuc_param.looks_like_fanuc_prm(text):
         return meta
     try:
@@ -89,7 +180,20 @@ def read_product_meta(text: str, *, kind="") -> dict:
     meta["gear"] = g("Gear Rate").lstrip("'")
     meta["direction"] = g("Direction")
     meta["sep_detector"] = g("Separate Detector")
-    meta["capacity"] = derive_capacity(meta["amp_model"], meta["motor"])
+    try:                                       # パラメータ2020＝モーター型式ID
+        meta["motor_id"] = (prm_format.param_value(doc, "2020") or "").strip()
+    except Exception:
+        meta["motor_id"] = ""
+    # 容量: まず Servo Amp Model から、無ければ モーター→容量 対応表から引く
+    cap = derive_capacity(meta["amp_model"])
+    if cap:
+        meta["capacity_src"] = "アンプ"
+    elif motor_caps:
+        cap = capacity_for_motor(motor_caps, meta["motor_no"], meta["motor"],
+                                 meta["motor_id"])
+        if cap:
+            meta["capacity_src"] = "対応表"
+    meta["capacity"] = cap
     # 別置検出器が入っていればフルクロの手がかり（最終判定は 1815）
     meta["mode_hint"] = "フル" if meta["sep_detector"] else ""
     return meta

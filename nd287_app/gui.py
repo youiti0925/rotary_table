@@ -1192,6 +1192,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if mpath and not Path(mpath).is_absolute():
             mpath = str(app_dir() / mpath)
         self._controllers = controllers.load_controllers(mpath)
+        # モーター→容量 対応表（製品データに Servo Amp Model が無いとき容量を引く）
+        cpath = settings.get("motor_capacity_csv", "")
+        if cpath and not Path(cpath).is_absolute():
+            cpath = str(app_dir() / cpath)
+        self._motor_caps = seiban_flow.load_motor_caps(cpath)
         self._cand = []           # 候補 [(controller, [軸文字,...])]
 
         v = QtWidgets.QVBoxLayout(self)
@@ -1343,13 +1348,17 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 text = Path(fdict["path"]).read_text(encoding="cp932", errors="replace")
             except Exception:
                 text = ""
-            meta = seiban_flow.read_product_meta(text, kind=fdict["kind"])
+            meta = seiban_flow.read_product_meta(
+                text, kind=fdict["kind"], motor_caps=self._motor_caps)
             fdict["meta"] = meta
-            cap = meta.get("capacity") or "容量不明"
+            if meta.get("capacity"):
+                cap = f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
+            else:
+                cap = "容量不明→手で選択"
             extra = []
             if meta.get("model"):
                 extra.append(f"型式 {meta['model']}")
-            extra.append(f"容量 {cap}")
+            extra.append(cap)
             if meta.get("motor"):
                 extra.append(f"モーター {meta['motor']}")
             chk = QtWidgets.QCheckBox(

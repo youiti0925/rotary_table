@@ -277,17 +277,84 @@ MASTER_HEADER = ["号機", "CNCユニット", "Ver", "制御電圧", "SERVO",
 
 
 def _master_row(ctl) -> list:
-    """Controller → マスタCSV 1行（MASTER_HEADER 順）。CNC/電圧等は空（後で人が記入）。"""
+    """Controller → マスタCSV 1行（MASTER_HEADER 順）。Controller の持つ値を全部書く。"""
     row = {h: "" for h in MASTER_HEADER}
     row["号機"] = ctl.unit
-    row["制御電圧"] = ctl.voltage
     row["CNCユニット"] = ctl.cnc
+    row["Ver"] = ctl.ver
+    row["制御電圧"] = ctl.voltage
+    row["SERVO"] = ctl.servo
+    row["-Bなめらか補正"] = ctl.b_corr
+    row["-D駆動"] = ctl.d_drive
     for a in AXES:
         if ctl.caps.get(a):
             row[f"{a}容量"] = ctl.caps[a]
         if ctl.amps.get(a):
             row[f"{a}アンプ"] = ctl.amps[a]
     return [row[h] for h in MASTER_HEADER]
+
+
+def _read_master_rows(path):
+    """マスタCSVを (ヘッダ有無, [行リスト]) で読む。cp932/UTF-8どちらでも。"""
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return False, []
+    raw = p.read_bytes()
+    text = raw.decode("cp932", errors="replace")
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    rows = list(csv.reader(io.StringIO(text)))
+    has_header = bool(rows) and rows[0] and "号機" in rows[0][0]
+    return has_header, rows
+
+
+def _write_master_rows(path, body_rows):
+    """ヘッダ＋本文行をマスタCSVへ書き出す（cp932）。"""
+    from pathlib import Path
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(MASTER_HEADER)
+    for r in body_rows:
+        w.writerow(r)
+    Path(path).write_bytes(buf.getvalue().encode("cp932", errors="replace"))
+
+
+def upsert_controller(path, controller) -> str:
+    """1台の制御装置を手入力で登録/更新する。号機が既にあれば更新、無ければ追加。
+
+    戻り値: 'added' / 'updated'。他の号機の行はそのまま保持。
+    """
+    has_header, rows = _read_master_rows(path)
+    body = rows[1:] if has_header else rows
+    new_row = _master_row(controller)
+    u = str(controller.unit).strip()
+    updated = False
+    for i, r in enumerate(body):
+        if r and str(r[0]).strip() == u:
+            body[i] = new_row
+            updated = True
+            break
+    if not updated:
+        body.append(new_row)
+    _write_master_rows(path, body)
+    return "updated" if updated else "added"
+
+
+def delete_controller(path, unit) -> bool:
+    """号機を1台削除する。削除できたら True。"""
+    has_header, rows = _read_master_rows(path)
+    body = rows[1:] if has_header else rows
+    u = str(unit).strip()
+    kept = [r for r in body if not (r and str(r[0]).strip() == u)]
+    if len(kept) == len(body):
+        return False
+    _write_master_rows(path, kept)
+    return True
 
 
 def diff_scanned_vs_master(scanned, existing) -> list:

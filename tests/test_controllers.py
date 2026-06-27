@@ -137,5 +137,40 @@ class TestBasicScan(unittest.TestCase):
         self.assertEqual(reloaded["10"].cnc, "18i-M")      # 既存行は保持
 
 
+class TestManualRegister(unittest.TestCase):
+    def _path(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "m.csv"
+        p.write_bytes((",".join(C.MASTER_HEADER) + "\r\n"
+                       "10,18i-M,,AC200V,,20A,40A,80A,160A\r\n").encode("cp932"))
+        return str(p)
+
+    def test_add_new_controller(self):
+        path = self._path()
+        ctl = C.Controller("40", cnc="0i-MF", voltage="AC200V",
+                           caps={"X": "40A", "A": "160A"})
+        self.assertEqual(C.upsert_controller(path, ctl), "added")
+        d = {c.unit: c for c in C.load_controllers(path)}
+        self.assertEqual(set(d), {"10", "40"})
+        self.assertEqual(d["40"].cnc, "0i-MF")
+        self.assertEqual(d["40"].caps_text(), "X:40A A:160A")
+        self.assertEqual(d["10"].cnc, "18i-M")          # 既存は保持
+
+    def test_update_existing_controller(self):
+        path = self._path()
+        ctl = C.Controller("10", cnc="18i-MB", voltage="AC200V",
+                           caps={"X": "20A", "Y": "40A", "Z": "80A", "A": "160A"})
+        self.assertEqual(C.upsert_controller(path, ctl), "updated")
+        d = {c.unit: c for c in C.load_controllers(path)}
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d["10"].cnc, "18i-MB")
+
+    def test_delete_controller(self):
+        path = self._path()
+        self.assertTrue(C.delete_controller(path, "10"))
+        self.assertEqual(C.load_controllers(path), [])
+        self.assertFalse(C.delete_controller(path, "99"))
+
+
 if __name__ == "__main__":
     unittest.main()

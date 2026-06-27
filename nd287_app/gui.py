@@ -1172,6 +1172,77 @@ class ParamPreviewDialog(QtWidgets.QDialog):
         v.addWidget(bb)
 
 
+class ControllerEditDialog(QtWidgets.QDialog):
+    """制御装置(号機)を手入力で登録/編集する。BASICが無い・新規購入の号機用。
+
+    号機・CNC機種・電圧・各軸の容量を入れる。容量がある軸＝実装軸として扱う。
+    アンプ型式は任意（空でOK。必要ならCSVで記入）。OKで Controller を返す。
+    """
+
+    CAPS = ["", "10A", "20A", "40A", "80A", "160A"]
+    VOLT = ["", "AC200V", "AV400V"]
+    YN = ["", "○", "×"]
+
+    def __init__(self, parent, controller=None):
+        super().__init__(parent)
+        self.setWindowTitle("制御装置の登録／編集（手入力）")
+        self.resize(420, 460)
+        self.result_controller = None
+        self.orig_unit = controller.unit if controller else ""
+        v = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        self.e_unit = QtWidgets.QLineEdit(controller.unit if controller else "")
+        self.e_unit.setPlaceholderText("号機（例 30）")
+        form.addRow("号機", self.e_unit)
+        self.e_cnc = QtWidgets.QLineEdit(controller.cnc if controller else "")
+        self.e_cnc.setPlaceholderText("CNC機種（例 0i-MF）任意")
+        form.addRow("CNCユニット", self.e_cnc)
+        self.e_ver = QtWidgets.QLineEdit(controller.ver if controller else "")
+        form.addRow("Ver（任意）", self.e_ver)
+        self.cmb_volt = QtWidgets.QComboBox(); self.cmb_volt.addItems(self.VOLT)
+        if controller:
+            i = self.cmb_volt.findText(controller.voltage)
+            self.cmb_volt.setCurrentIndex(i if i >= 0 else 0)
+        self.cmb_volt.setToolTip("AC200V か AV400V。400V(HV)機なら AV400V")
+        form.addRow("制御電圧", self.cmb_volt)
+        self.e_servo = QtWidgets.QLineEdit(controller.servo if controller else "")
+        form.addRow("SERVO版（任意）", self.e_servo)
+
+        # 各軸の容量（容量を入れた軸＝その号機にある軸）
+        self.cmb_caps = {}
+        for a in controllers.AXES:
+            cmb = QtWidgets.QComboBox(); cmb.addItems(self.CAPS)
+            if controller and controller.caps.get(a):
+                j = cmb.findText(controller.caps[a]); cmb.setCurrentIndex(j if j >= 0 else 0)
+            self.cmb_caps[a] = cmb
+            form.addRow(f"{a}軸 容量", cmb)
+        v.addLayout(form)
+        v.addWidget(QtWidgets.QLabel(
+            "※ 容量を入れた軸だけ『その号機にある軸』として扱います。\n"
+            "　 アンプ型式は空でOK（必要ならマスタCSVで記入）。"))
+
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def _accept(self):
+        unit = self.e_unit.text().strip()
+        if not unit:
+            QtWidgets.QMessageBox.warning(self, "入力", "号機を入れてください")
+            return
+        caps = {a: self.cmb_caps[a].currentText() for a in controllers.AXES
+                if self.cmb_caps[a].currentText()}
+        if not caps:
+            QtWidgets.QMessageBox.warning(self, "入力", "少なくとも1軸の容量を選んでください")
+            return
+        self.result_controller = controllers.Controller(
+            unit, cnc=self.e_cnc.text().strip(), ver=self.e_ver.text().strip(),
+            voltage=self.cmb_volt.currentText(), servo=self.e_servo.text().strip(),
+            caps=caps)
+        self.accept()
+
+
 class BasicScanDialog(QtWidgets.QDialog):
     """BASICフォルダを読み、各号機の軸数・容量を自動抽出して制御装置マスタへ登録する。
 
@@ -1263,6 +1334,127 @@ class BasicScanDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class ControllerMasterDialog(QtWidgets.QDialog):
+    """制御装置マスタ（号機の一覧）の管理。手入力で追加/編集/削除、BASICから取り込み。
+
+    マスタ＝最初に画像で渡された『制御装置一覧表』のデジタル版。ここに無い号機は
+    かんたん作成の候補に出ないので、無い号機はここで登録する。
+    """
+
+    COLS = ["号機", "CNC", "電圧", "容量", "軸数"]
+
+    def __init__(self, parent, master_path, basic_dir=""):
+        super().__init__(parent)
+        self.setWindowTitle("制御装置マスタ（登録・編集）")
+        self.resize(640, 520)
+        self.master_path = master_path
+        self.basic_dir = basic_dir
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel(
+            "登録済みの制御装置(号機)一覧です。無い号機は「手入力で追加」または\n"
+            "「BASICから取り込む」で登録してください（かんたん作成の候補になります）。"))
+        self.tbl = QtWidgets.QTableWidget(0, len(self.COLS))
+        self.tbl.setHorizontalHeaderLabels(self.COLS)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.doubleClicked.connect(self.edit)
+        v.addWidget(self.tbl, 1)
+        self.lbl = QtWidgets.QLabel("")
+        v.addWidget(self.lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        for label, slot, tip in (
+            ("手入力で追加…", self.add, "号機・電圧・各軸容量を入れて登録"),
+            ("編集…", self.edit, "選択した号機を編集"),
+            ("削除", self.delete, "選択した号機を削除"),
+            ("BASICから取り込む…", self.import_basic, "BASICフォルダから軸数・容量を自動登録"),
+        ):
+            b = QtWidgets.QPushButton(label); b.setToolTip(tip); b.clicked.connect(slot)
+            row.addWidget(b)
+        row.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
+        row.addWidget(b_close)
+        v.addLayout(row)
+        self.reload()
+
+    def reload(self):
+        self._ctls = controllers.load_controllers(self.master_path)
+        self.tbl.setRowCount(len(self._ctls))
+        for r, c in enumerate(self._ctls):
+            vals = [c.unit, c.cnc, c.voltage, c.caps_text(), str(len(c.axes()))]
+            for col, t in enumerate(vals):
+                it = QtWidgets.QTableWidgetItem(t)
+                it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+                self.tbl.setItem(r, col, it)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.lbl.setText(f"{len(self._ctls)} 号機　{self.master_path}")
+
+    def _selected(self):
+        r = self.tbl.currentRow()
+        return self._ctls[r] if 0 <= r < len(self._ctls) else None
+
+    def _backup(self):
+        p = Path(self.master_path)
+        if p.exists():
+            try:
+                p.with_suffix(p.suffix + ".bak").write_bytes(p.read_bytes())
+            except Exception:
+                pass
+
+    def add(self):
+        dlg = ControllerEditDialog(self)
+        if dlg.exec() and dlg.result_controller:
+            ctl = dlg.result_controller
+            if any(c.unit == ctl.unit for c in self._ctls):
+                if QtWidgets.QMessageBox.question(
+                        self, "確認", f"号機 {ctl.unit} は既にあります。上書きしますか？"
+                ) != QtWidgets.QMessageBox.Yes:
+                    return
+            self._backup()
+            controllers.upsert_controller(self.master_path, ctl)
+            self.reload()
+
+    def edit(self):
+        sel = self._selected()
+        if not sel:
+            QtWidgets.QMessageBox.warning(self, "編集", "号機を選んでください")
+            return
+        dlg = ControllerEditDialog(self, controller=sel)
+        if dlg.exec() and dlg.result_controller:
+            ctl = dlg.result_controller
+            self._backup()
+            # 号機番号を変えた場合は旧番号を削除してから登録
+            if dlg.orig_unit and dlg.orig_unit != ctl.unit:
+                controllers.delete_controller(self.master_path, dlg.orig_unit)
+            controllers.upsert_controller(self.master_path, ctl)
+            self.reload()
+
+    def delete(self):
+        sel = self._selected()
+        if not sel:
+            QtWidgets.QMessageBox.warning(self, "削除", "号機を選んでください")
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "削除の確認", f"号機 {sel.unit} を削除しますか？"
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        self._backup()
+        controllers.delete_controller(self.master_path, sel.unit)
+        self.reload()
+
+    def import_basic(self):
+        if not self.basic_dir or not Path(self.basic_dir).is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "BASIC取り込み", "BASICの場所が未設定です（詳細設定で指定）。")
+            return
+        BasicScanDialog(self, self.basic_dir, self.master_path).exec()
+        self.reload()
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -1335,8 +1527,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_assign.setWordWrap(True)
         self.lbl_assign.setStyleSheet("color:#374151;")
         f2.addRow("軸の割当", self.lbl_assign)
-        b_scan = QtWidgets.QPushButton("BASICから号機を取り込む…")
-        b_scan.setToolTip("BASICフォルダを読み、各号機の軸数・容量を自動抽出して制御装置マスタへ登録")
+        b_scan = QtWidgets.QPushButton("制御装置マスタ（登録/編集）…")
+        b_scan.setToolTip("号機の一覧を管理。手入力で追加・編集・削除、BASICから自動取り込みもできる")
         b_scan.clicked.connect(self._scan_basics)
         f2.addRow("", b_scan)
         v.addWidget(box2)
@@ -1419,26 +1611,20 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._refresh_basic_dir_note()
 
     def _scan_basics(self):
-        """BASICフォルダを読み、号機の軸数・容量を自動抽出してマスタへ登録する。"""
-        bd = self._abs_dir("param_basic_dir")
-        if not bd or not Path(bd).is_dir():
-            QtWidgets.QMessageBox.warning(
-                self, "BASIC取り込み",
-                "BASICの場所が未設定です。「詳細設定…」で設定してください。")
-            return
-        if BasicScanDialog(self, bd, self._mpath).exec():
-            # マスタが増えたので読み直して候補を更新
-            self._controllers = controllers.load_controllers(self._mpath)
-            self.cmb_cap.blockSignals(True)
-            cur = self.cmb_cap.currentData()
-            self.cmb_cap.clear(); self.cmb_cap.addItem("（自動：製品データから判定）", "")
-            for c in controllers.all_capacities(self._controllers):
-                self.cmb_cap.addItem(c, c)
-            i = self.cmb_cap.findData(cur)
-            if i >= 0:
-                self.cmb_cap.setCurrentIndex(i)
-            self.cmb_cap.blockSignals(False)
-            self._update_candidates()
+        """制御装置マスタの管理（手入力 追加/編集/削除・BASICから取り込み）を開く。"""
+        ControllerMasterDialog(self, self._mpath, self._abs_dir("param_basic_dir")).exec()
+        # マスタが変わったかもしれないので読み直して候補を更新
+        self._controllers = controllers.load_controllers(self._mpath)
+        self.cmb_cap.blockSignals(True)
+        cur = self.cmb_cap.currentData()
+        self.cmb_cap.clear(); self.cmb_cap.addItem("（自動：製品データから判定）", "")
+        for c in controllers.all_capacities(self._controllers):
+            self.cmb_cap.addItem(c, c)
+        i = self.cmb_cap.findData(cur)
+        if i >= 0:
+            self.cmb_cap.setCurrentIndex(i)
+        self.cmb_cap.blockSignals(False)
+        self._update_candidates()
 
     # ----- ① 探す -----
     def search(self):

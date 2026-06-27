@@ -158,6 +158,12 @@ def is_hv(motor_model: str) -> bool:
     return "HV" in str(motor_model or "").upper()
 
 
+def is_dd_motor(motor_model: str) -> bool:
+    """DDモーター(直駆動 DiS系)なら True。番手＝トルクで αiS の出力番手とは別物。"""
+    norm = re.sub(r"[\s\-_]", "", str(motor_model or "")).upper()
+    return "DIS" in norm or norm.startswith("DD")
+
+
 def motor_voltage(motor_model: str) -> str:
     """モーター型式から電源電圧を返す。HV記載→'400V'、型式があれば'200V'、無ければ''。"""
     s = str(motor_model or "").strip()
@@ -177,12 +183,16 @@ def standard_capacity(motor_model: str) -> str:
     200V: 2,4→20A ／ 8,12→40A ／ 22,30→80A ／ 40,50→160A。
     400V(HV): 2,4→10A ／ 8,12→20A ／ 22,30→40A ／ 40,50→80A（電流が約半分）。
     例: αiS2/5000→20A, αiS22/4000→80A, αiS22/4000HV→40A。
-    判定できない／番手が範囲外なら ""（必要なら対応表CSVで上書き）。
+
+    対象は αiS/αiF（番手/回転数 形式）に限る。DDモーター(DiS系)や他形式は番手＝トルクで
+    αiS の番手とは別物なので推定しない（"" を返し、モーター容量マスタ/手入力に回す）。
     """
     s = str(motor_model or "")
-    m = re.search(r"[SsFf]\s*(\d+)\s*/", s)        # αiS<番手>/<回転数>
-    if not m:
-        m = re.search(r"(?<!\d)(\d+)(?!\d)", s)     # 予備: 最初の単独数字
+    if is_dd_motor(s):                              # DiS等は番手→容量が当てはまらない
+        return ""
+    # αiS/αiF の「i + S/F + 番手 + /」形だけを対象（誤ヒット防止のため '/' 必須）
+    m = re.search(r"[iＩ]\s*[SsFf]\s*(\d+)\s*/", s) \
+        or re.search(r"[αＡ]\s*i?\s*[SsFf]\s*(\d+)\s*/", s)
     if not m:
         return ""
     size = int(m.group(1))

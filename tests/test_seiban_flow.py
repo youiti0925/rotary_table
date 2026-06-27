@@ -100,6 +100,19 @@ class TestStandardCapacity(unittest.TestCase):
         self.assertEqual(S.standard_capacity("αiS100/2500"), "")  # マスタ範囲外
         self.assertEqual(S.standard_capacity(""), "")
 
+    def test_dd_motor_not_guessed(self):
+        # FANUC DDモーター(DiS系)は番手＝トルク。αiSの番手として誤推定しないこと
+        self.assertTrue(S.is_dd_motor("DiS60"))
+        self.assertTrue(S.is_dd_motor("DiS-60-B"))
+        self.assertEqual(S.standard_capacity("DiS60"), "")
+        self.assertEqual(S.standard_capacity("DiS-60-B"), "")
+        self.assertEqual(S.standard_capacity("DiS22"), "")   # 旧コードは80Aと誤答していた
+
+    def test_non_fanuc_motors_empty(self):
+        # 三菱HG/安川SGM/TPC等は容量推定しない（"" → 手入力/対応表）
+        for mm in ("HG-H104T", "SGM7P-08A7K", "TPC-Jr-K3B", "MDS-E/EH"):
+            self.assertEqual(S.standard_capacity(mm), "", mm)
+
     def test_hv_halves_capacity(self):
         # 400V(HV)は電流が約半分のコード
         self.assertEqual(S.standard_capacity("αiS8/4000HV"), "20A")   # 200Vなら40A

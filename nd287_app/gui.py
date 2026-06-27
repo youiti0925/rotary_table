@@ -1172,6 +1172,97 @@ class ParamPreviewDialog(QtWidgets.QDialog):
         v.addWidget(bb)
 
 
+class BasicScanDialog(QtWidgets.QDialog):
+    """BASICフォルダを読み、各号機の軸数・容量を自動抽出して制御装置マスタへ登録する。
+
+    軸名はパラメータ1020、容量はパラメータ2165(アンプ最大電流AMR)から読む。電圧
+    (200/400V)はBASICからは確実に出ないので空のまま（後でマスタで記入）。未登録の
+    号機だけ追記し、既存行は変更しない（容量が違う号機は警告表示のみ）。
+    """
+
+    def __init__(self, parent, basic_dir, master_path):
+        super().__init__(parent)
+        self.setWindowTitle("BASICから制御装置を取り込む")
+        self.resize(720, 520)
+        self.master_path = master_path
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel(
+            "BASICフォルダの各号機について、軸数・容量を自動抽出しました。\n"
+            "未登録(新規)の号機にチェックを入れて「マスタへ登録」を押してください。\n"
+            "※ 電圧(200V/400V)とCNC機種は空欄で登録されます（後でマスタに記入）。"))
+        self._scanned = controllers.scan_basic_folder(basic_dir)
+        existing = controllers.load_controllers(master_path)
+        self._by_unit = {c.unit: c for c, _ in self._scanned}
+        diff = controllers.diff_scanned_vs_master(self._scanned, existing)
+
+        self.tbl = QtWidgets.QTableWidget(len(diff), 5)
+        self.tbl.setHorizontalHeaderLabels(["登録", "号機", "軸:容量(BASIC)", "状態", "BASIC"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self._checks = {}
+        STATUS = {"new": "新規（未登録）", "same": "登録済み（一致）",
+                  "diff": "登録済み（容量が違う！要確認）"}
+        for r, d in enumerate(diff):
+            chk = QtWidgets.QCheckBox()
+            chk.setEnabled(d["status"] == "new")
+            chk.setChecked(d["status"] == "new")
+            self._checks[d["unit"]] = chk
+            w = QtWidgets.QWidget(); hl = QtWidgets.QHBoxLayout(w)
+            hl.setContentsMargins(0, 0, 0, 0); hl.addWidget(chk); hl.setAlignment(QtCore.Qt.AlignCenter)
+            self.tbl.setCellWidget(r, 0, w)
+            caps = d["caps"]
+            if d["status"] == "diff":
+                caps += f"  （マスタ: {d['master_caps']}）"
+            cells = [d["unit"], caps, STATUS.get(d["status"], d["status"]), d["file"]]
+            for c, t in enumerate(cells, start=1):
+                it = QtWidgets.QTableWidgetItem(t)
+                it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+                if d["status"] == "diff" and c in (2, 3):
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+                self.tbl.setItem(r, c, it)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(self.tbl, 1)
+
+        n_new = sum(1 for d in diff if d["status"] == "new")
+        self.lbl = QtWidgets.QLabel(
+            f"スキャン {len(diff)} 号機　新規 {n_new}　"
+            f"差異 {sum(1 for d in diff if d['status']=='diff')}")
+        v.addWidget(self.lbl)
+
+        bb = QtWidgets.QDialogButtonBox()
+        ok = bb.addButton("マスタへ登録", QtWidgets.QDialogButtonBox.AcceptRole)
+        ok.setObjectName("primary")
+        bb.addButton("閉じる", QtWidgets.QDialogButtonBox.RejectRole)
+        ok.clicked.connect(self._register)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self._registered = False
+
+    def _register(self):
+        add = [self._by_unit[u] for u, c in self._checks.items()
+               if c.isChecked() and c.isEnabled() and u in self._by_unit]
+        if not add:
+            QtWidgets.QMessageBox.information(self, "登録", "登録する号機（新規）が選ばれていません。")
+            return
+        # 既存マスタを .bak へバックアップしてから追記
+        try:
+            p = Path(self.master_path)
+            if p.exists():
+                bak = p.with_suffix(p.suffix + ".bak")
+                bak.write_bytes(p.read_bytes())
+            n = controllers.append_units_to_master(self.master_path, add)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "登録に失敗", str(e))
+            return
+        QtWidgets.QMessageBox.information(
+            self, "登録しました",
+            f"{n} 号機をマスタへ登録しました（号機 {', '.join(c.unit for c in add)}）。\n"
+            "電圧(200V/400V)とCNC機種は空欄です。必要ならマスタCSVに記入してください。")
+        self._registered = True
+        self.accept()
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -1191,6 +1282,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
             mpath = str(app_dir() / mpath)
+        self._mpath = mpath
         self._controllers = controllers.load_controllers(mpath)
         # モーター→容量 対応表（製品データに Servo Amp Model が無いとき容量を引く）
         cpath = settings.get("motor_capacity_csv", "")
@@ -1243,6 +1335,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_assign.setWordWrap(True)
         self.lbl_assign.setStyleSheet("color:#374151;")
         f2.addRow("軸の割当", self.lbl_assign)
+        b_scan = QtWidgets.QPushButton("BASICから号機を取り込む…")
+        b_scan.setToolTip("BASICフォルダを読み、各号機の軸数・容量を自動抽出して制御装置マスタへ登録")
+        b_scan.clicked.connect(self._scan_basics)
+        f2.addRow("", b_scan)
         v.addWidget(box2)
 
         # --- ③ 出力 ---
@@ -1321,6 +1417,28 @@ class ParamWizardDialog(QtWidgets.QDialog):
         dlg.exec()
         # 詳細画面でフォルダ設定が変わっているかもしれないので注記を更新
         self._refresh_basic_dir_note()
+
+    def _scan_basics(self):
+        """BASICフォルダを読み、号機の軸数・容量を自動抽出してマスタへ登録する。"""
+        bd = self._abs_dir("param_basic_dir")
+        if not bd or not Path(bd).is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "BASIC取り込み",
+                "BASICの場所が未設定です。「詳細設定…」で設定してください。")
+            return
+        if BasicScanDialog(self, bd, self._mpath).exec():
+            # マスタが増えたので読み直して候補を更新
+            self._controllers = controllers.load_controllers(self._mpath)
+            self.cmb_cap.blockSignals(True)
+            cur = self.cmb_cap.currentData()
+            self.cmb_cap.clear(); self.cmb_cap.addItem("（自動：製品データから判定）", "")
+            for c in controllers.all_capacities(self._controllers):
+                self.cmb_cap.addItem(c, c)
+            i = self.cmb_cap.findData(cur)
+            if i >= 0:
+                self.cmb_cap.setCurrentIndex(i)
+            self.cmb_cap.blockSignals(False)
+            self._update_candidates()
 
     # ----- ① 探す -----
     def search(self):

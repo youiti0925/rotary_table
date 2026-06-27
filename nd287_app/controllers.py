@@ -14,6 +14,97 @@ import re
 
 AXES = ["X", "Y", "Z", "A", "B", "C"]
 
+# 軸名パラメータ(1020)の値は軸名のASCIIコード。88=X,89=Y,90=Z,65=A,66=B,67=C…
+_AXIS_CODE = {88: "X", 89: "Y", 90: "Z", 65: "A", 66: "B", 67: "C",
+              85: "U", 86: "V", 87: "W"}
+# アンプ最大電流(2165=AMR)→容量。実機(F30/F84)で 25→20A,45→40A,85→80A,165→160A を確認。
+_AMR_CAP = {25: "20A", 45: "40A", 85: "80A", 165: "160A"}
+_STD_CAP_NUMS = (10, 20, 40, 80, 160, 360)
+
+
+def amr_to_capacity(amr) -> str:
+    """アンプ最大電流(パラメータ2165=AMR)値 → 容量(20A等)。判定不能なら ""。
+
+    確認済み: 25→20A,45→40A,85→80A,165→160A（AMR = 容量+5）。未知値は AMR-5 を
+    標準容量(10/20/40/80/160/360)へ寄せる。離れていれば "" としてユーザー確認に回す。
+    """
+    s = str(amr if amr is not None else "").strip()
+    if not s.lstrip("-").isdigit():
+        return ""
+    n = int(s)
+    if n in _AMR_CAP:
+        return _AMR_CAP[n]
+    cand = n - 5
+    for std in _STD_CAP_NUMS:
+        if abs(cand - std) <= 2:
+            return f"{std}A"
+    return ""
+
+
+def controller_from_basic_text(text, unit):
+    """BASIC(.PRM ネイティブ)テキストから Controller を作る。
+
+    軸名は 1020(軸名のASCIIコード)、容量は 2165(アンプ最大電流AMR)、参考に 2020
+    (モーターID)を読む。電圧(200/400V)は BASIC からは確実に読めないので空のまま。
+    """
+    from . import fanuc_param
+    vm = {}                                    # {(5桁番号, ラベル): 値} に一度で集約
+    for (num, label), v in fanuc_param.values_map(text).items():
+        vm[(fanuc_param._norm_num(num), label)] = v
+
+    def g(num, lab):
+        return vm.get((fanuc_param._norm_num(num), lab))
+
+    caps, amps = {}, {}
+    for i in range(1, 13):                      # 軸スロット A1〜A12
+        lab = f"A{i}"
+        code = g("1020", lab)
+        if code is None or not code.strip().lstrip("-").isdigit():
+            continue
+        letter = _AXIS_CODE.get(int(code))
+        if not letter:
+            continue
+        amr = g("2165", lab)
+        caps[letter] = amr_to_capacity(amr)
+        mid = g("2020", lab)
+        amps[letter] = f"ID{mid}/AMR{amr}" if (mid or amr) else ""
+    return Controller(unit, caps=caps, amps=amps)
+
+
+def scan_basic_folder(folder):
+    """BASICフォルダを走査し、各号機の Controller を BASIC から自動抽出する。
+
+    ファイル名 F<号機>BASIC.*（拡張子ゆらぎ可）。同一号機に複数あれば
+    basic_file_for_unit と同じ優先順(.prm>.txt>.dat>無)で1つ選ぶ。
+    戻り値: [(Controller, BASICファイル名)]（号機番号順）。
+    """
+    from pathlib import Path
+    from . import fanuc_param
+    if not folder or not Path(folder).is_dir():
+        return []
+    units = {}
+    for p in sorted(Path(folder).iterdir()):
+        if not p.is_file():
+            continue
+        m = re.match(r"^F(\d+)BASIC", p.name, re.IGNORECASE)
+        if m and m.group(1).isdigit():
+            units.setdefault(str(int(m.group(1))), []).append(p)
+    out = []
+    for unit in sorted(units, key=lambda u: int(u)):
+        path = basic_file_for_unit(folder, unit)
+        if not path:
+            continue
+        try:
+            text = Path(path).read_bytes().decode("cp932", errors="replace")
+        except Exception:
+            continue
+        if not fanuc_param.looks_like_fanuc_prm(text):
+            continue
+        ctl = controller_from_basic_text(text, unit)
+        if ctl.axes():
+            out.append((ctl, Path(path).name))
+    return out
+
 
 def _norm_cap(cap) -> str:
     """容量表記を正規化（'40a'/' 40A '/'40' → '40A'）。空なら ''。"""
@@ -176,3 +267,80 @@ def basic_file_for_unit(folder, unit):
 
     cands.sort(key=rank)
     return str(cands[0])
+
+
+# 制御装置マスタCSVの列順（書き出し・追記で使う）
+MASTER_HEADER = ["号機", "CNCユニット", "Ver", "制御電圧", "SERVO",
+                 "X容量", "Y容量", "Z容量", "A容量", "B容量", "C容量",
+                 "Xアンプ", "Yアンプ", "Zアンプ", "Aアンプ", "Bアンプ", "Cアンプ",
+                 "-Bなめらか補正", "-D駆動"]
+
+
+def _master_row(ctl) -> list:
+    """Controller → マスタCSV 1行（MASTER_HEADER 順）。CNC/電圧等は空（後で人が記入）。"""
+    row = {h: "" for h in MASTER_HEADER}
+    row["号機"] = ctl.unit
+    row["制御電圧"] = ctl.voltage
+    row["CNCユニット"] = ctl.cnc
+    for a in AXES:
+        if ctl.caps.get(a):
+            row[f"{a}容量"] = ctl.caps[a]
+        if ctl.amps.get(a):
+            row[f"{a}アンプ"] = ctl.amps[a]
+    return [row[h] for h in MASTER_HEADER]
+
+
+def diff_scanned_vs_master(scanned, existing) -> list:
+    """BASICから読んだ scanned[(Controller,ファイル名)] と既存マスタ existing を突き合わせる。
+
+    戻り値: [{"unit","caps","file","status","master_caps"}]。
+    status: 'new'(マスタ未登録) / 'same'(容量一致) / 'diff'(容量が違う)。
+    """
+    by_unit = {str(c.unit): c for c in existing}
+    out = []
+    for ctl, fname in scanned:
+        ex = by_unit.get(str(ctl.unit))
+        if ex is None:
+            status, mcaps = "new", ""
+        else:
+            mcaps = ex.caps_text()
+            status = "same" if mcaps == ctl.caps_text() else "diff"
+        out.append({"unit": ctl.unit, "caps": ctl.caps_text(), "file": fname,
+                    "status": status, "master_caps": mcaps})
+    return out
+
+
+def append_units_to_master(path, controllers_to_add) -> int:
+    """マスタCSVに新規号機の行を追記する（既存行はそのまま）。追記件数を返す。
+
+    既存ファイルが無ければヘッダ付きで新規作成。文字コードは cp932。
+    """
+    from pathlib import Path
+    if not path or not controllers_to_add:
+        return 0
+    p = Path(path)
+    lines = []
+    if p.exists():
+        raw = p.read_bytes()
+        for enc in ("cp932", "utf-8-sig", "utf-8"):
+            try:
+                text = raw.decode(enc)
+                break
+            except Exception:
+                text = raw.decode("cp932", errors="replace")
+        existing_rows = list(csv.reader(io.StringIO(text)))
+        has_header = bool(existing_rows) and existing_rows[0] and "号機" in existing_rows[0][0]
+    else:
+        existing_rows, has_header = [], False
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if not has_header:
+        w.writerow(MASTER_HEADER)
+    for row in existing_rows:
+        w.writerow(row)
+    n = 0
+    for ctl in controllers_to_add:
+        w.writerow(_master_row(ctl))
+        n += 1
+    p.write_bytes(buf.getvalue().encode("cp932", errors="replace"))
+    return n

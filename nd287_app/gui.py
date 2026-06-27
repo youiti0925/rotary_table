@@ -1258,19 +1258,21 @@ class BasicScanDialog(QtWidgets.QDialog):
         self.master_path = master_path
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(QtWidgets.QLabel(
-            "BASICフォルダの各号機について、軸数・容量を自動抽出しました。\n"
-            "未登録(新規)の号機にチェックを入れて「マスタへ登録」を押してください。\n"
-            "※ 電圧(200V/400V)とCNC機種は空欄で登録されます（後でマスタに記入）。"))
+            "BASICから各号機の軸数・容量を自動抽出しました（これは正確）。\n"
+            "BASICに無い『電圧』だけ各行で選んでください（既定200V。400V(HV)機は400Vに）。\n"
+            "未登録(新規)の号機にチェックを入れて「マスタへ登録」を押します。"))
         self._scanned = controllers.scan_basic_folder(basic_dir)
         existing = controllers.load_controllers(master_path)
         self._by_unit = {c.unit: c for c, _ in self._scanned}
         diff = controllers.diff_scanned_vs_master(self._scanned, existing)
 
-        self.tbl = QtWidgets.QTableWidget(len(diff), 5)
-        self.tbl.setHorizontalHeaderLabels(["登録", "号機", "軸:容量(BASIC)", "状態", "BASIC"])
+        self.tbl = QtWidgets.QTableWidget(len(diff), 6)
+        self.tbl.setHorizontalHeaderLabels(
+            ["登録", "号機", "軸:容量(BASIC)", "電圧", "状態", "BASIC"])
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.horizontalHeader().setStretchLastSection(True)
         self._checks = {}
+        self._volts = {}
         STATUS = {"new": "新規（未登録）", "same": "登録済み（一致）",
                   "diff": "登録済み（容量が違う！要確認）"}
         for r, d in enumerate(diff):
@@ -1284,13 +1286,16 @@ class BasicScanDialog(QtWidgets.QDialog):
             caps = d["caps"]
             if d["status"] == "diff":
                 caps += f"  （マスタ: {d['master_caps']}）"
-            cells = [d["unit"], caps, STATUS.get(d["status"], d["status"]), d["file"]]
-            for c, t in enumerate(cells, start=1):
-                it = QtWidgets.QTableWidgetItem(t)
-                it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
-                if d["status"] == "diff" and c in (2, 3):
-                    it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
-                self.tbl.setItem(r, c, it)
+            self.tbl.setItem(r, 1, self._ro(d["unit"]))
+            self.tbl.setItem(r, 2, self._ro(caps, d["status"] == "diff"))
+            # 電圧コンボ（BASICから出ないのでここで選ぶ。新規行のみ操作可、既定200V）
+            cmb = QtWidgets.QComboBox(); cmb.addItems(["AC200V", "AV400V"])
+            cmb.setEnabled(d["status"] == "new")
+            self._volts[d["unit"]] = cmb
+            self.tbl.setCellWidget(r, 3, cmb)
+            self.tbl.setItem(r, 4, self._ro(STATUS.get(d["status"], d["status"]),
+                                            d["status"] == "diff"))
+            self.tbl.setItem(r, 5, self._ro(d["file"]))
         self.tbl.resizeColumnsToContents()
         self.tbl.horizontalHeader().setStretchLastSection(True)
         v.addWidget(self.tbl, 1)
@@ -1310,9 +1315,21 @@ class BasicScanDialog(QtWidgets.QDialog):
         v.addWidget(bb)
         self._registered = False
 
+    @staticmethod
+    def _ro(text, warn=False):
+        it = QtWidgets.QTableWidgetItem(text)
+        it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+        if warn:
+            it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+        return it
+
     def _register(self):
-        add = [self._by_unit[u] for u, c in self._checks.items()
-               if c.isChecked() and c.isEnabled() and u in self._by_unit]
+        add = []
+        for u, c in self._checks.items():
+            if c.isChecked() and c.isEnabled() and u in self._by_unit:
+                ctl = self._by_unit[u]
+                ctl.voltage = self._volts[u].currentText()   # BASICに無い電圧をここで付与
+                add.append(ctl)
         if not add:
             QtWidgets.QMessageBox.information(self, "登録", "登録する号機（新規）が選ばれていません。")
             return
@@ -1329,7 +1346,8 @@ class BasicScanDialog(QtWidgets.QDialog):
         QtWidgets.QMessageBox.information(
             self, "登録しました",
             f"{n} 号機をマスタへ登録しました（号機 {', '.join(c.unit for c in add)}）。\n"
-            "電圧(200V/400V)とCNC機種は空欄です。必要ならマスタCSVに記入してください。")
+            "軸数・容量はBASICから、電圧は選択値で登録しました。"
+            "CNC機種名は空欄です（必要なら『編集』で記入）。")
         self._registered = True
         self.accept()
 

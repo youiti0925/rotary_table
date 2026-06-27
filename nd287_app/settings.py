@@ -104,6 +104,8 @@ DEFAULTS = dict(
     param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
     param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
+    # 制御装置マスタ（号機・CNC・軸ごとの容量等）。必要容量で制御装置を絞り込むのに使う
+    controller_master_csv=r"マスタ/制御装置マスタ.csv",
     # クローズドループ判定（DB表示用）。既定は FANUC 1815 #1(OPTx=別置検出器)=1 → フルクロ、
     # 0 → セミクロ。機種でビット/番号が違うことがあるので変更可（生値表示と併用し人が確認）。
     closed_loop_number="1815",

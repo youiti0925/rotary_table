@@ -110,6 +110,7 @@ from . import nc_param
 from . import prm_format
 from . import fanuc_param
 from . import param_build
+from . import controllers
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1181,6 +1182,11 @@ class ParamDialog(QtWidgets.QDialog):
         self.machine = machine
         self.setWindowTitle("パラメータ変更（差分）の出力")
         self.resize(720, 520)
+        # 制御装置マスタ（号機・容量など）。あれば号機一覧＋必要容量で絞り込みに使う
+        mpath = settings.get("controller_master_csv", "")
+        if mpath and not Path(mpath).is_absolute():
+            mpath = str(app_dir() / mpath)
+        self._controllers = controllers.load_controllers(mpath)
         v = QtWidgets.QVBoxLayout(self)
 
         # 画面を3つに分ける: ①場所(共有サーバ・一度だけ) ②今回の作業 ③任意/CSV運用。
@@ -1212,16 +1218,25 @@ class ParamDialog(QtWidgets.QDialog):
         self.e_master_prm = QtWidgets.QLineEdit(str(settings.get("param_master_prm", "")))
         self.e_master_prm.setPlaceholderText("今回使う制御装置のBASIC .prm（例 F30BASIC.PRM）")
         self.e_master_prm.setToolTip("容量・空き軸で決まった制御装置の BASIC ファイル。これを元に作る")
-        # BASICの場所フォルダにあるBASICから「使える制御装置」を一覧化して選ぶ
+        # 必要容量で制御装置を絞り込む（製品の容量に合う軸を持つ号機だけ表示）
+        self.cmb_cap = QtWidgets.QComboBox()
+        self.cmb_cap.setToolTip("製品の必要容量。選ぶと、その容量の軸を持つ制御装置だけ一覧に出る")
+        self.cmb_cap.addItem("（指定なし）", "")
+        for c in controllers.all_capacities(self._controllers):
+            self.cmb_cap.addItem(c, c)
+        self.cmb_cap.currentIndexChanged.connect(self._scan_basic_controllers)
+        if self._controllers:
+            form_job.addRow("必要容量", self.cmb_cap)
+        # 制御装置（号機）を一覧から選ぶ
         brow = QtWidgets.QHBoxLayout()
         brow.setContentsMargins(0, 0, 0, 0)
         self.cmb_basic = QtWidgets.QComboBox()
-        self.cmb_basic.setToolTip("BASICの場所フォルダのBASICファイルから制御装置を一覧表示。"
-                                  "選ぶと『使うBASIC』に自動で入る")
+        self.cmb_basic.setToolTip("制御装置マスタ（号機・容量）または BASICの場所のファイルから一覧表示。"
+                                  "選ぶと『使うBASIC』に自動で入り、必要容量に合う軸を提案する")
         self.cmb_basic.currentIndexChanged.connect(self._on_basic_selected)
         brow.addWidget(self.cmb_basic, 1)
         b_rescan = QtWidgets.QPushButton("更新")
-        b_rescan.setToolTip("BASICの場所フォルダを読み直して制御装置の一覧を更新")
+        b_rescan.setToolTip("制御装置マスタ／BASICの場所を読み直して一覧を更新")
         b_rescan.clicked.connect(self._scan_basic_controllers)
         brow.addWidget(b_rescan)
         form_job.addRow("制御装置（一覧）", brow)
@@ -1353,34 +1368,63 @@ class ParamDialog(QtWidgets.QDialog):
         self.reload()
 
     def _scan_basic_controllers(self):
-        """BASICの場所フォルダのBASICファイルから制御装置を一覧化してプルダウンに入れる。"""
+        """制御装置プルダウンを作り直す。マスタがあれば号機一覧（必要容量で絞り込み）、
+        無ければ BASICの場所フォルダのファイル名から。"""
         from pathlib import Path
-        folder = self.e_basic_dir.text().strip()
         cur = self.e_master_prm.text().strip()
-        items = []
-        if folder and Path(folder).is_dir():
-            for p in sorted(Path(folder).iterdir()):
-                if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
-                    name = nc_param.controller_from_basic(p.name) or p.stem
-                    items.append((name, str(p)))
+        cap = self.cmb_cap.currentData() if hasattr(self, "cmb_cap") else ""
         self.cmb_basic.blockSignals(True)
         self.cmb_basic.clear()
-        if items:
-            self.cmb_basic.addItem("（制御装置を選択）", "")
+        if self._controllers:
+            ctls = controllers.filter_by_capacity(self._controllers, cap or "")
+            if ctls:
+                self.cmb_basic.addItem("（制御装置を選択）", "")
+                for c in ctls:
+                    self.cmb_basic.addItem(c.label(), c.unit)
+            else:
+                self.cmb_basic.addItem("（条件に合う制御装置がありません）", "")
+        else:
+            folder = self.e_basic_dir.text().strip()
+            items = []
+            if folder and Path(folder).is_dir():
+                for p in sorted(Path(folder).iterdir()):
+                    if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
+                        items.append((nc_param.controller_from_basic(p.name) or p.stem,
+                                      str(p)))
+            self.cmb_basic.addItem("（制御装置を選択）" if items
+                                   else "（BASICの場所にBASICがありません）", "")
             for name, path in items:
                 self.cmb_basic.addItem(f"{name}（{Path(path).name}）", path)
-        else:
-            self.cmb_basic.addItem("（BASICの場所にBASICがありません）", "")
-        idx = self.cmb_basic.findData(cur) if cur else -1
-        if idx >= 0:
-            self.cmb_basic.setCurrentIndex(idx)
+            idx = self.cmb_basic.findData(cur) if cur else -1
+            if idx >= 0:
+                self.cmb_basic.setCurrentIndex(idx)
         self.cmb_basic.blockSignals(False)
 
     def _on_basic_selected(self, *_):
-        """制御装置プルダウンで選んだBASICを『使うBASIC』に反映する。"""
-        path = self.cmb_basic.currentData()
-        if path:
-            self.e_master_prm.setText(path)
+        """制御装置プルダウンの選択 → 使うBASICへ反映。マスタ運用なら号機からBASICを
+        探し、必要容量に合う軸も提案する。"""
+        data = self.cmb_basic.currentData()
+        if not data:
+            return
+        if self._controllers:
+            ctl = next((c for c in self._controllers if c.unit == data), None)
+            path = controllers.basic_file_for_unit(self.e_basic_dir.text().strip(), data)
+            if path:
+                self.e_master_prm.setText(path)
+            else:
+                QtWidgets.QMessageBox.information(
+                    self, "BASIC",
+                    f"号機 {data} のBASICが『BASICの場所』に見つかりません。\n"
+                    "『使うBASIC』を手動で指定してください。")
+            cap = self.cmb_cap.currentData() or ""
+            if ctl and cap:
+                axes = ctl.axes_with_capacity(cap)
+                if axes:
+                    i = self.cmb_axis.findData(nc_param.axis_number(axes[0]))
+                    if i >= 0:
+                        self.cmb_axis.setCurrentIndex(i)
+        else:
+            self.e_master_prm.setText(data)
 
     def _browse_master_prm(self):
         start = self.e_master_prm.text() or self.e_basic_dir.text()

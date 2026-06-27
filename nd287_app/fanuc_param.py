@@ -135,6 +135,60 @@ def apply_product_values(text: str, values: dict, axis_num) -> tuple:
     return text, missing
 
 
+def set_common(text: str, number, value) -> tuple:
+    """軸に属さない値(L1/S1/T1/無ラベル)だけを差し替える（A軸は触らない）。
+
+    2軸テーブルで「共通(系統)パラメータ」を、誤って片方の軸へ入れないための専用版。
+    戻り値 (新テキスト, 成否)。
+    """
+    for label in ("L1", "S1", "T1", None):
+        new, ok = set_value(text, number, value, label)
+        if ok:
+            return new, True
+    return text, False
+
+
+def apply_common_values(text: str, values: dict) -> tuple:
+    """共通値 {番号: 値} を BASIC の共通スロット(L1/S1/T1/無ラベル)へ反映する。
+
+    戻り値 (新テキスト, 反映できなかった番号のリスト)。
+    """
+    missing = []
+    for number, value in values.items():
+        if value is None or str(value) == "":
+            continue
+        text, ok = set_common(text, number, value)
+        if not ok:
+            missing.append(str(number))
+    return text, missing
+
+
+def axis_of_label(label) -> int:
+    """ラベル 'A4'/'a2' → 軸番号 4/2。A軸でなければ None（L1/S1/T1/'' 等）。"""
+    m = re.fullmatch(r"[Aa](\d+)", str(label or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def diff_by_axis(master_text: str, product_text: str) -> tuple:
+    """master(BASIC) と完成製品 .PRM の差分を「軸ごと」に分ける。
+
+    2軸テーブルでは完成製品ファイルが傾斜軸・回転軸の両方を変更している。
+    diff() は軸ラベルを保持するので、それを軸番号で振り分けて返す。
+    戻り値: (per_axis: {軸番号: {番号: 値}}, common: {番号: 値})。
+    値が None（製品側に無い番号）は除外する。
+    """
+    per_axis, common = {}, {}
+    for (number, label, _mv, ov) in diff(master_text, product_text):
+        if ov is None:
+            continue
+        ax = axis_of_label(label)
+        if ax is None:
+            common[number] = ov
+        else:
+            per_axis.setdefault(ax, {})[number] = ov
+    return per_axis, common
+
+
 def looks_like_fanuc_prm(text: str) -> bool:
     """先頭付近に N#####Q1… 形式があれば FANUCネイティブ.PRM とみなす。"""
     head = text.lstrip()

@@ -1132,24 +1132,31 @@ class ParamPreviewDialog(QtWidgets.QDialog):
     def __init__(self, parent, rows, subtitle=""):
         super().__init__(parent)
         self.setWindowTitle("作成前プレビュー（旧値→新値）")
-        self.resize(520, 460)
+        self.resize(560, 460)
         v = QtWidgets.QVBoxLayout(self)
-        changed = sum(1 for (_n, o, nw) in rows if o != nw)
+        # rows は (番号, 旧, 新) か (番号, 軸, 旧, 新)。軸つき=2軸テーブルの両軸表示
+        has_axis = bool(rows) and len(rows[0]) == 4
+        norm = [(r[0], r[1], r[2], r[3]) if has_axis else (r[0], "", r[1], r[2])
+                for r in rows]
+        changed = sum(1 for (_n, _a, o, nw) in norm if o != nw)
         head = QtWidgets.QLabel(
             (subtitle + "\n" if subtitle else "")
-            + f"全 {len(rows)} 件中 {changed} 件が BASIC と異なります。"
+            + f"全 {len(norm)} 件中 {changed} 件が BASIC と異なります。"
               "内容を確認して『作成』を押してください。")
         head.setWordWrap(True)
         v.addWidget(head)
-        t = QtWidgets.QTableWidget(len(rows), 3)
-        t.setHorizontalHeaderLabels(["番号", "旧値(BASIC)", "新値"])
+        cols = ["番号", "軸", "旧値(BASIC)", "新値"] if has_axis else ["番号", "旧値(BASIC)", "新値"]
+        t = QtWidgets.QTableWidget(len(norm), len(cols))
+        t.setHorizontalHeaderLabels(cols)
         t.verticalHeader().setVisible(False)
         t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         t.horizontalHeader().setStretchLastSection(True)
-        for i, (num, old, new) in enumerate(rows):
-            for j, text in enumerate((num, old, new)):
+        for i, (num, axis, old, new) in enumerate(norm):
+            cells = (num, axis, old, new) if has_axis else (num, old, new)
+            newcol = len(cells) - 1
+            for j, text in enumerate(cells):
                 it = QtWidgets.QTableWidgetItem(text)
-                if old != new and j == 2:
+                if old != new and j == newcol:
                     it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
                 t.setItem(i, j, it)
         t.resizeColumnsToContents()
@@ -1314,6 +1321,9 @@ class ParamDialog(QtWidgets.QDialog):
             "（傾斜T／回転R）を選ぶ → 出力先を確認 →「FANUC .prm 作成」。\n"
             "・製品データ（完成済み.prm）があれば、それと BASIC の差分を自動で当てます。"
             "無いときだけ ③ の変更表CSV（列: 型式, 制御, 番号, 軸, 変更値, メモ）を使います。\n"
+            "・2軸テーブル: 完成済み.prm が傾斜軸と回転軸の両方を変えていれば自動で検知し、"
+            "両軸を1つのBASICへ入れて1ファイル（TR<Seiban>.prm）にします。"
+            "登録済みエントリから作る場合は「パラメータDB…」→「2軸で作成」。\n"
             "・実機への入力は人が行います（PWE=1。番号により電源再投入が必要）。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#374151;")
@@ -1673,6 +1683,13 @@ class ParamDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
             return
+        # 2軸テーブル自動判定: 完成製品.prm が複数軸を変更していれば、傾斜軸・回転軸の
+        # 両方を1つのBASICへ入れて1ファイルにする（片軸ずつ別ファイルだと、もう片方が
+        # 読込時にBASIC値へ戻ってしまうため、1ファイルに両軸を入れるのが正しい）。
+        split = self._product_axis_split(raw)
+        if split and len(split[0]) >= 2:
+            self._make_prm_multi(raw, master_path, d, seiban, split)
+            return
         try:
             values, source = self._product_values(raw)
         except Exception as e:
@@ -1739,6 +1756,98 @@ class ParamDialog(QtWidgets.QDialog):
                 msg += f" 他{len(missing) - 12}件"
         msg += reg_msg
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        QtWidgets.QMessageBox.information(self, "作成しました", msg)
+
+    def _product_axis_split(self, raw):
+        """製品データが完成 .prm(FANUC N形式) のとき、BASICとの差分を軸ごとに分けて返す。
+
+        戻り値 (per_axis: {軸番号:{番号:値}}, common:{番号:値})。
+        製品データが無い／CSV／ヘッダ＋CSV形式なら None（2軸自動判定の対象外）。
+        """
+        from pathlib import Path
+        path = self.e_product.text().strip()
+        if not path or not Path(path).is_file():
+            return None
+        try:
+            text = Path(path).read_text(encoding="cp932", errors="replace")
+        except Exception:
+            return None
+        if not (fanuc_param.looks_like_fanuc_prm(text)
+                and fanuc_param.looks_like_fanuc_prm(raw)):
+            return None
+        return param_build.product_axis_values(raw, text)
+
+    def _make_prm_multi(self, raw, master_path, out_dir, seiban, split):
+        """2軸テーブル: 完成製品.prm の差分（複数軸）を 1つのBASICへ入れて1ファイル作る。
+
+        傾斜軸・回転軸の両方を同じ制御装置(BASIC)へ書き込む。作成前プレビューで両軸を
+        確認し、作成後は軸ごとに作成ログ＋データベース登録（履歴）を残す。
+        """
+        from pathlib import Path
+        per_axis, common = split
+        axes = sorted(per_axis)
+        # 出力名は両軸を1ファイルにするので「TR」(傾斜+回転)を既定の頭文字にする
+        prefix = "TR"
+        fname = param_build.filename(prefix, seiban)
+        axis_label = "＋".join(nc_param.axis_name(a) for a in axes)
+        # 作成前プレビュー（軸つき）。中止なら書き込まない
+        rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
+                for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis, common)]
+        if not ParamPreviewDialog(
+                self, rows,
+                subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
+                         f"{self.e_model.text().strip() or '—'} → {fname}").exec():
+            return
+        try:
+            out_path, missing, fmt = param_build.create_file_multi(
+                master_path, out_dir, per_axis, common, prefix=prefix, seiban=seiban)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
+            return
+        self._persist()
+        controller = nc_param.controller_from_basic(master_path)
+        model = self.e_model.text().strip()
+        total = sum(len(v) for v in per_axis.values()) + len(common)
+        applied = total - len(missing)
+        # 軸ごとにモード判定・ログ・DB登録（制御/軸が違えば別エントリ＝履歴になる）
+        reg_lines = []
+        for ax in axes:
+            mode, _eff = self._detect_mode(raw, per_axis[ax], ax)
+            _log_param_creation(
+                self.settings, model=model, mode=mode,
+                controller=controller, axis=nc_param.axis_name(ax),
+                seiban=seiban, basic=Path(master_path).name, out=fname,
+                applied=len(per_axis[ax]), total=len(per_axis[ax]))
+            csv_path = self.e_csv.text().strip()
+            if model and csv_path:
+                entry = nc_param.ParamEntry(
+                    model=model, mode=mode, controller=controller,
+                    axis=nc_param.axis_name(ax), seiban=seiban,
+                    date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
+                    basic=Path(master_path).name,
+                    items=[(n, v, "") for n, v in per_axis[ax].items() if v != ""])
+                try:
+                    _, action = nc_param.upsert_entry(csv_path, entry)
+                    verb = {"added": "登録", "updated": "更新"}.get(action, "")
+                    if verb:
+                        reg_lines.append(f"・{nc_param.axis_name(ax)}軸を履歴に{verb}"
+                                         f"（{mode}クロ）" if mode else
+                                         f"・{nc_param.axis_name(ax)}軸を履歴に{verb}")
+                except Exception:
+                    pass
+        msg = (f"2軸テーブルの FANUC .prm を作成しました:\n・{fname}\n"
+               f"（{Path(master_path).name} の {axis_label} 軸を1ファイルに書き込み）\n"
+               f"値の反映: {applied} / {total} 件")
+        if missing:
+            miss = ", ".join(f"{n}({nc_param.axis_name(a)})" if a else str(n)
+                             for n, a in missing[:12])
+            msg += f"\n⚠ BASICに無い番号（未反映）: {miss}"
+        if reg_lines:
+            msg += "\nデータベース履歴:\n" + "\n".join(reg_lines)
+        msg += ("\n\n※ ファイル名の頭文字は『TR』(傾斜+回転)にしています。"
+                "運用名が違う場合は出力後にリネームしてください。"
+                "\n機械側での入力は人が実施（PWE/電源再投入に注意）。")
+        self.reload()
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     def _detect_mode(self, raw, values, axis):
@@ -2027,6 +2136,104 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
         return bool(re.fullmatch(r"[-+]?\d+(\.\d+)?", s))
 
 
+class TwoAxisCreateDialog(QtWidgets.QDialog):
+    """2軸テーブル: 傾斜エントリ＋回転エントリの2つを選び、両軸を1ファイルに作る。
+
+    1つの制御装置(BASIC)に傾斜軸・回転軸の両方を入れて 1つの .prm を出力する。
+    （フルbackupを軸ごとに2ファイル作ると、片方の読込でもう片方がBASIC値に戻るため、
+    1ファイルに両軸を入れるのが正しい。）OKで (傾斜軸番号, 回転軸番号, 頭文字) を返す。
+    """
+
+    def __init__(self, parent, primary, partner_entries):
+        super().__init__(parent)
+        self.setWindowTitle("2軸テーブルで作成（傾斜＋回転）")
+        self.resize(560, 280)
+        self.partner = None
+        self._partners = list(partner_entries)
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel(
+            "1つの制御装置(BASIC)に2軸ぶんを入れて1ファイルにします。\n"
+            "選択中エントリ＝1軸目、相手エントリ＝2軸目。各軸の番号を確認してください。"))
+        form = QtWidgets.QFormLayout()
+        # 1軸目（選択中エントリ）
+        self.lbl_primary = QtWidgets.QLabel(self._entry_label(primary))
+        self.lbl_primary.setWordWrap(True)
+        form.addRow("1軸目（選択中）", self.lbl_primary)
+        self.cmb_axis1 = QtWidgets.QComboBox()
+        for n in range(1, 7):
+            self.cmb_axis1.addItem(f"{nc_param.axis_name(n)}（第{n}軸）", n)
+        self._set_axis(self.cmb_axis1, primary.axis, default=4)
+        form.addRow("1軸目の軸", self.cmb_axis1)
+        # 2軸目（相手エントリ）
+        self.cmb_partner = QtWidgets.QComboBox()
+        for e in self._partners:
+            self.cmb_partner.addItem(self._entry_label(e), e.id)
+        self.cmb_partner.currentIndexChanged.connect(self._on_partner_changed)
+        form.addRow("2軸目（相手）", self.cmb_partner)
+        self.cmb_axis2 = QtWidgets.QComboBox()
+        for n in range(1, 7):
+            self.cmb_axis2.addItem(f"{nc_param.axis_name(n)}（第{n}軸）", n)
+        form.addRow("2軸目の軸", self.cmb_axis2)
+        v.addLayout(form)
+        self._primary = primary
+        self._on_partner_changed()
+        bb = QtWidgets.QDialogButtonBox()
+        ok = bb.addButton("この2軸で作成", QtWidgets.QDialogButtonBox.AcceptRole)
+        ok.setObjectName("primary")
+        bb.addButton("中止", QtWidgets.QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    @staticmethod
+    def _entry_label(e):
+        bits = [e.model or "—"]
+        if e.kind:
+            bits.append(e.kind)
+        if e.mode:
+            bits.append(e.mode + "クロ")
+        if e.axis:
+            bits.append(e.axis + "軸")
+        if e.seiban:
+            bits.append("Seiban " + e.seiban)
+        return f"ID {e.id}: " + " / ".join(bits) + f"（{e.count()}件）"
+
+    @staticmethod
+    def _set_axis(cmb, axis_name, default=4):
+        n = nc_param.axis_number(axis_name) or default
+        i = cmb.findData(n)
+        cmb.setCurrentIndex(i if i >= 0 else default - 1)
+
+    def _on_partner_changed(self, *_):
+        e = self._current_partner()
+        if e:
+            self._set_axis(self.cmb_axis2, e.axis, default=4)
+
+    def _current_partner(self):
+        pid = self.cmb_partner.currentData()
+        return next((e for e in self._partners if e.id == pid), None)
+
+    def _accept(self):
+        partner = self._current_partner()
+        if not partner:
+            QtWidgets.QMessageBox.warning(self, "2軸作成", "相手エントリを選んでください")
+            return
+        a1 = int(self.cmb_axis1.currentData())
+        a2 = int(self.cmb_axis2.currentData())
+        if a1 == a2:
+            QtWidgets.QMessageBox.warning(
+                self, "2軸作成", "1軸目と2軸目に同じ軸は指定できません。別の軸にしてください。")
+            return
+        self.partner = partner
+        self.axis1, self.axis2 = a1, a2
+        # 頭文字: 種別から T(傾斜)/R(回転) を組み立て、決まらなければ TR
+        kinds = {"傾斜": "T", "回転": "R"}
+        p1 = kinds.get(self._primary.kind, "")
+        p2 = kinds.get(partner.kind, "")
+        self.prefix = (p1 + p2) if (p1 and p2 and p1 != p2) else "TR"
+        self.accept()
+
+
 class ParamDBDialog(QtWidgets.QDialog):
     """パラメータ作成データベース（エントリ単位）。
 
@@ -2034,6 +2241,7 @@ class ParamDBDialog(QtWidgets.QDialog):
     ＋変更パラメータ）を検索・フィルタし、選んだエントリからリピート品を作成する
     （制御＝BASICや軸を変更可、作成すると履歴として登録）。新規手入力・編集・削除、
     制御装置からの吸い出し差分登録もできる。セミ/フルは 1815 で判定して表示。
+    2軸テーブルは傾斜＋回転の2エントリを選んで1ファイルにまとめて作成できる。
     """
 
     COLS = ["ID", "型式", "種別", "モード", "モーター", "モーター番号", "方向",
@@ -2156,10 +2364,14 @@ class ParamDBDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         b_make = QtWidgets.QPushButton("この設定で作成→出力先")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.make_from_entry)
+        b_make2 = QtWidgets.QPushButton("2軸で作成（傾斜＋回転）…")
+        b_make2.setToolTip("2軸テーブル用。選択中エントリ＋相手エントリの2軸を、"
+                           "1つのBASICへ入れて1ファイルにまとめて作成します")
+        b_make2.clicked.connect(self.make_two_axis)
         b_dump = QtWidgets.QPushButton("吸い出し差分を登録")
         b_dump.clicked.connect(self.register_dump)
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
-        row.addWidget(b_make); row.addWidget(b_dump)
+        row.addWidget(b_make); row.addWidget(b_make2); row.addWidget(b_dump)
         row.addStretch(1); row.addWidget(b_close)
         v.addLayout(row)
 
@@ -2444,6 +2656,94 @@ class ParamDBDialog(QtWidgets.QDialog):
                f"値の反映: {len(values) - len(missing)} / {len(values)} 件{reg}")
         if missing:
             msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
+        msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        QtWidgets.QMessageBox.information(self, "作成しました", msg)
+
+    def make_two_axis(self):
+        """2軸テーブル: 選択エントリ＋相手エントリの2軸を、1つのBASICへ入れて1ファイルに作る。"""
+        from pathlib import Path
+        e = self._selected_entry()
+        if not e:
+            QtWidgets.QMessageBox.warning(self, "2軸作成", "1軸目のエントリを選んでください")
+            return
+        partners = [x for x in self._entries if x.id != e.id and x.values()]
+        if not partners:
+            QtWidgets.QMessageBox.warning(
+                self, "2軸作成",
+                "相手（2軸目）にできるエントリがありません。\n"
+                "傾斜と回転の両方をデータベースに登録してから実行してください。")
+            return
+        master = self.e_basic.text().strip()
+        out = self.e_out.text().strip()
+        seiban = self.e_seiban.text().strip()
+        if not master:
+            QtWidgets.QMessageBox.warning(self, "2軸作成", "使うBASIC を指定してください")
+            return
+        if not out or not Path(out).is_dir():
+            QtWidgets.QMessageBox.warning(self, "2軸作成", "出力先（存在するフォルダ）を指定してください")
+            return
+        if not seiban:
+            QtWidgets.QMessageBox.warning(self, "2軸作成", "Seiban（受注伝票番号）を入力してください")
+            return
+        dlg = TwoAxisCreateDialog(self, e, partners)
+        if not dlg.exec():
+            return
+        partner, a1, a2, prefix = dlg.partner, dlg.axis1, dlg.axis2, dlg.prefix
+        per_axis = {a1: e.values(), a2: partner.values()}
+        try:
+            raw = param_build.read_master(master)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "2軸作成", f"BASIC を読めません:\n{ex}")
+            return
+        fname = param_build.filename(prefix, seiban)
+        axis_label = f"{nc_param.axis_name(a1)}＋{nc_param.axis_name(a2)}"
+        rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
+                for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis)]
+        if not ParamPreviewDialog(
+                self, rows,
+                subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
+                         f"{e.model} ＋ {partner.model} → {fname}").exec():
+            return
+        try:
+            out_path, missing, fmt = param_build.create_file_multi(
+                master, out, per_axis, prefix=prefix, seiban=seiban)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
+            return
+        controller = nc_param.controller_from_basic(master)
+        total = sum(len(v) for v in per_axis.values())
+        # 軸ごとにログ＋履歴登録（制御/軸/Seibanが変われば別エントリ＝履歴）
+        reg = []
+        for ent, ax in ((e, a1), (partner, a2)):
+            _log_param_creation(
+                self.settings, model=ent.model, kind=ent.kind, mode=ent.mode,
+                motor=ent.motor, controller=controller,
+                axis=nc_param.axis_name(ax), seiban=seiban, basic=Path(master).name,
+                out=out_path.name, applied=len(ent.values()), total=len(ent.values()))
+            if self._csv_path():
+                hist = nc_param.ParamEntry(
+                    model=ent.model, kind=ent.kind, mode=ent.mode, motor=ent.motor,
+                    motor_no=ent.motor_no, direction=ent.direction, gear=ent.gear,
+                    controller=controller, axis=nc_param.axis_name(ax), seiban=seiban,
+                    date=QtCore.QDate.currentDate().toString("yyyy/MM/dd"),
+                    basic=Path(master).name, items=list(ent.items))
+                try:
+                    _, action = nc_param.upsert_entry(self._csv_path(), hist)
+                    verb = {"added": "登録", "updated": "更新"}.get(action, "")
+                    if verb:
+                        reg.append(f"・{nc_param.axis_name(ax)}軸（{ent.model}）を履歴に{verb}")
+                except Exception:
+                    pass
+        self.reload()
+        msg = (f"2軸テーブルの .prm を作成しました:\n・{out_path.name}\n"
+               f"（{Path(master).name} の {axis_label} 軸を1ファイルに書き込み）\n"
+               f"値の反映: {total - len(missing)} / {total} 件")
+        if missing:
+            miss = ", ".join(f"{n}({nc_param.axis_name(a)})" if a else str(n)
+                             for n, a in missing[:12])
+            msg += f"\n⚠ BASICに無い番号（未反映）: {miss}"
+        if reg:
+            msg += "\nデータベース履歴:\n" + "\n".join(reg)
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 

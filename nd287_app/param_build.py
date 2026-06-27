@@ -56,6 +56,85 @@ def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
     return out, missing, fmt
 
 
+def product_axis_values(basic_text: str, product_text: str) -> tuple:
+    """完成製品 .prm と BASIC の差分を「軸ごと」に返す（2軸テーブル用）。
+
+    戻り値: (per_axis: {軸番号: {番号: 値}}, common: {番号: 値})。
+    FANUC N形式（実機ネイティブ）専用。ヘッダ＋CSV形式は軸概念が無いので空を返す。
+    """
+    if not (fanuc_param.looks_like_fanuc_prm(basic_text)
+            and fanuc_param.looks_like_fanuc_prm(product_text)):
+        return {}, {}
+    return fanuc_param.diff_by_axis(basic_text, product_text)
+
+
+def build_text_multi(raw: str, axis_values: dict, common: dict = None,
+                     seiban: str = "") -> tuple:
+    """BASIC raw に「複数軸ぶんの値」を入れた新テキストを返す（2軸テーブル用）。
+
+    axis_values={軸番号: {番号:値}} を各軸へ、common={番号:値} を共通スロットへ適用。
+    1つの BASIC（=1つの制御装置）に傾斜軸・回転軸の両方を入れて 1ファイルにする。
+    （フル backup を軸ごとに2ファイル作ると、片方が他軸を BASIC 値へ戻してしまうため、
+    1ファイルに両軸を入れるのが正しい。）
+    戻り値: (新テキスト, 反映できなかった [(番号, 軸), ...], 形式 'fanuc'/'headercsv')。
+    """
+    axis_values = axis_values or {}
+    common = common or {}
+    if not fanuc_param.looks_like_fanuc_prm(raw):
+        # ヘッダ＋CSV形式は軸が無い。全値を束ねて従来処理（軸=0）にフォールバック
+        merged = dict(common)
+        for vals in axis_values.values():
+            merged.update(vals)
+        newtext, missing, fmt = build_text(raw, merged, 0, seiban)
+        return newtext, [(m, "") for m in missing], fmt
+    text = raw
+    missing = []
+    for ax in sorted(axis_values):
+        text, miss = fanuc_param.apply_product_values(text, axis_values[ax], ax)
+        missing += [(m, ax) for m in miss]
+    text, miss = fanuc_param.apply_common_values(text, common)
+    missing += [(m, "") for m in miss]
+    return text, missing, "fanuc"
+
+
+def create_file_multi(master_path, out_dir, axis_values: dict, common: dict = None,
+                      *, prefix: str, seiban: str) -> tuple:
+    """BASIC を元に、複数軸ぶんを入れた <頭文字><Seiban>.prm を作成する（2軸テーブル用）。
+
+    戻り値: (出力Path, 反映できなかった [(番号, 軸), ...], 形式)。
+    """
+    raw = read_master(master_path)
+    newtext, missing, fmt = build_text_multi(raw, axis_values, common, seiban)
+    out = Path(out_dir) / filename(prefix, seiban)
+    write_text(out, newtext)
+    return out, missing, fmt
+
+
+def preview_rows_multi(raw: str, axis_values: dict, common: dict = None) -> list:
+    """2軸テーブルの作成前プレビュー [(番号, 軸名, 旧値, 新値)]。
+
+    旧値は BASIC(raw) の各軸の値。軸名は呼び側で表示名へ変換できるよう軸番号で返す
+    （common は軸="")。N形式専用。
+    """
+    axis_values = axis_values or {}
+    common = common or {}
+    rows = []
+    for ax in sorted(axis_values):
+        for num, newv in axis_values[ax].items():
+            if newv == "":
+                continue
+            old = fanuc_param.get_value(raw, num, f"A{ax}")
+            if old is None:
+                old = fanuc_param.get_value(raw, num)
+            rows.append((str(num), ax, "" if old is None else str(old), str(newv)))
+    for num, newv in common.items():
+        if newv == "":
+            continue
+        old = fanuc_param.get_value(raw, num)
+        rows.append((str(num), "", "" if old is None else str(old), str(newv)))
+    return rows
+
+
 def header_info(text: str) -> dict:
     """ヘッダ＋CSV形式(.prm)からヘッダ情報を取り出す。N形式や非対応なら空 dict。
 

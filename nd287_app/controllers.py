@@ -153,16 +153,26 @@ def filter_by_capacity(controllers, cap):
 def basic_file_for_unit(folder, unit):
     """BASICの場所フォルダから、号機に対応するBASICファイルのパスを探す。
 
-    ファイル名の数字トークン（例 'F10BASIC' → '10'）が号機と一致するものを返す。
-    見つからなければ None。'1' が 'F100' に誤一致しないようトークン一致で判定。
+    ファイル名は `F<号機>BASIC`（拡張子は .PRM/.prm/.DAT/.dat/.txt や無しなど様々）。
+    号機番号がちょうど一致するものを返す（'1' が 'F10'/'F100' に誤一致しない）。
+    複数あれば .prm → .txt → .dat → 拡張子なし の順で優先。見つからなければ None。
     """
     from pathlib import Path
     u = str(unit or "").strip()
     if not u or not folder or not Path(folder).is_dir():
         return None
+    cands = []
     for p in sorted(Path(folder).iterdir()):
-        if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
-            nums = re.findall(r"\d+", p.stem)
-            if u in nums:
-                return str(p)
-    return None
+        if not p.is_file():
+            continue
+        m = re.match(r"^F(\d+)BASIC", p.name, re.IGNORECASE)
+        if m and u.isdigit() and m.group(1).isdigit() and int(m.group(1)) == int(u):
+            cands.append(p)
+    if not cands:
+        return None
+
+    def rank(p):
+        return {".prm": 0, ".txt": 1, ".dat": 2, "": 3}.get(p.suffix.lower(), 4)
+
+    cands.sort(key=rank)
+    return str(cands[0])

@@ -62,6 +62,23 @@ class TestControllerMaster(unittest.TestCase):
         self.assertIsNone(C.basic_file_for_unit(d, "1"))
         self.assertIsNone(C.basic_file_for_unit(d, "99"))
 
+    def test_basic_file_varied_extensions(self):
+        # 実データは .DAT・拡張子なし・.dat 等もある。すべて拾えること
+        d = tempfile.mkdtemp()
+        (Path(d) / "F35BASIC").write_text("%\n", encoding="cp932")        # 拡張子なし
+        (Path(d) / "F10BASIC.dat").write_text("%\n", encoding="cp932")    # .dat
+        (Path(d) / "F86BASIC.DAT").write_text("%\n", encoding="cp932")    # .DAT
+        self.assertTrue(C.basic_file_for_unit(d, "35").endswith("F35BASIC"))
+        self.assertTrue(C.basic_file_for_unit(d, "10").endswith("F10BASIC.dat"))
+        self.assertTrue(C.basic_file_for_unit(d, "86").endswith("F86BASIC.DAT"))
+
+    def test_basic_file_prefers_prm(self):
+        # 同じ号機に複数あれば .prm を優先
+        d = tempfile.mkdtemp()
+        (Path(d) / "F30BASIC.DAT").write_text("%\n", encoding="cp932")
+        (Path(d) / "F30BASIC.PRM").write_text("%\n", encoding="cp932")
+        self.assertTrue(C.basic_file_for_unit(d, "30").endswith("F30BASIC.PRM"))
+
 
 if __name__ == "__main__":
     unittest.main()

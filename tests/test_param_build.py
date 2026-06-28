@@ -167,11 +167,21 @@ class TestServoOptions(unittest.TestCase):
         self.assertEqual(F.set_bit_value("0", 1, True), "00000010")          # ビット列扱い
         self.assertEqual(F.set_bit_value("12", 1, True), "14")               # 非ビット=整数
 
-    def test_zero_motor(self):
-        v = B.with_servo_options(BASIC_N, 4, {"01825": "2500"}, zero_motor=True,
-                                 zero_param="2020")
-        self.assertEqual(v["2020"], "0")
+    def test_zero_motor_dgpr_bit_only(self):
+        # 2000 #1(DGPR) だけを0にする（他ビットは保持）。BASIC_Nに2000を足して検証
+        basic = BASIC_N.replace(
+            "N02020Q1A1P255A2P273A3P293A4P303 \r\n",
+            "N02020Q1A1P255A2P273A3P293A4P303 \r\n"
+            "N02000Q1A1P00000010A2P00000010A3P00000010A4P00000010 \r\n")
+        v = B.with_servo_options(basic, 4, {"01825": "2500"}, zero_motor=True,
+                                 zero_param="2000", zero_bit=1)
+        self.assertEqual(v["2000"], "00000000")  # #1(bit1)=0、元00000010→00000000
         self.assertEqual(v["01825"], "2500")     # 他は不変
+        # 他ビットは保持される（例 #4を立てた値なら#4は残る）
+        v2 = B.with_servo_options(
+            basic.replace("A4P00000010 \r\n", "A4P00010010 \r\n"), 4, {},
+            zero_motor=True, zero_param="2000", zero_bit=1)
+        self.assertEqual(v2["2000"], "00010000")  # #4は保持・#1だけ0
 
     def test_origin_on_off_from_basic(self):
         # BASIC_N の 1815/A4 = 00000010。原点(#5)ON → 00100010、OFF → 00000010

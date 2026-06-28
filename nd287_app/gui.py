@@ -1719,8 +1719,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         f3.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
         # 作成時オプション（チェック→作成前プレビューで旧→新を確認できる）
         zp = settings.get("motor_zero_param", "2000")
-        self.chk_zero = QtWidgets.QCheckBox(f"パラメータ{zp}を0にする（モーター番号変更時）")
-        self.chk_zero.setToolTip(f"チェックすると、作成する軸の{zp}を 0 にして書き込みます")
+        zb = settings.get("motor_zero_bit", 1)
+        self.chk_zero = QtWidgets.QCheckBox(
+            f"DGPR（{zp} #{zb}）を0にする（モーター番号変更時のサーボ再初期化）")
+        self.chk_zero.setToolTip(
+            f"チェックすると作成する軸の {zp} #{zb}(DGPR) を 0 にします（他ビットは保持）。"
+            "FANUC: DGPR=0 → 電源再投入で自動的に1へ。モーターを変えたときに使用")
         f3.addRow("オプション", self.chk_zero)
         op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
         self.cmb_origin = QtWidgets.QComboBox()
@@ -2031,6 +2035,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 raw, axnum, vals,
                 zero_motor=self.chk_zero.isChecked(),
                 zero_param=self.settings.get("motor_zero_param", "2000"),
+                zero_bit=int(self.settings.get("motor_zero_bit", 1)),
                 origin=(self.cmb_origin.currentData() or None),
                 origin_param=self.settings.get("origin_param", "1815"),
                 origin_bit=int(self.settings.get("origin_bit", 5)))

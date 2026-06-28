@@ -1688,8 +1688,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_cap.setToolTip("製品データから容量を自動判定します。判定できないときだけ手で選んでください")
         self.cmb_cap.currentIndexChanged.connect(self._update_candidates)
         f2.addRow("必要容量", self.cmb_cap)
+        self.lbl_need = QtWidgets.QLabel("")
+        self.lbl_need.setWordWrap(True)
+        self.lbl_need.setStyleSheet("color:#1d4ed8;")
+        f2.addRow("選択 → 必要軸", self.lbl_need)
         self.cmb_ctrl = QtWidgets.QComboBox()
-        self.cmb_ctrl.setToolTip("製品の必要容量を満たす制御装置だけ出します。選ぶと使う軸を自動割当")
+        self.cmb_ctrl.setToolTip("製品の必要容量を満たす制御装置だけ出します。選ぶと使う軸を自動割当。"
+                                 "傾斜＋回転を両方選ぶと2軸とも載る号機、片方なら1軸でよい号機が出ます")
         self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
         f2.addRow("制御装置", self.cmb_ctrl)
         self.lbl_assign = QtWidgets.QLabel("")
@@ -1868,20 +1873,20 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 text, kind=fdict["kind"], motor_caps=self._motor_caps)
             fdict["meta"] = meta
             is_fanuc = meta.get("system", "FANUC") == "FANUC"
-            extra = []
-            if meta.get("model"):
-                extra.append(f"型式 {meta['model']}")
-            if not is_fanuc:
-                extra.append(f"⚠ {meta.get('system')}系（今はFANUCのみ作成可）")
-            else:
-                if meta.get("voltage"):
-                    extra.append(meta["voltage"])
-                extra.append(f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
-                             if meta.get("capacity") else "容量不明→手で選択")
+            # 作業者が一目で安心できる並び: 型式 / 系統 / 回転傾斜 / モーター / 容量
+            parts = [f"型式 {meta.get('model') or '—'}",
+                     meta.get("system") or "FANUC",
+                     fdict["kind"]]
             if meta.get("motor"):
-                extra.append(f"モーター {meta['motor']}")
-            chk = QtWidgets.QCheckBox(
-                f"{fdict['kind']}（{fdict['name']}）  " + " / ".join(extra))
+                parts.append(meta["motor"])
+            if is_fanuc:
+                parts.append(f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
+                             if meta.get("capacity") else "容量不明→手で選択")
+                if meta.get("voltage"):
+                    parts.append(meta["voltage"])
+            else:
+                parts.append("⚠ 今はFANUCのみ作成可")
+            chk = QtWidgets.QCheckBox(" / ".join(parts) + f"　（{fdict['name']}）")
             chk.setChecked(is_fanuc)            # 非FANUCは既定オフ（作成対象外）
             if not is_fanuc:
                 chk.setStyleSheet("color:#b45309;")
@@ -1907,10 +1912,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._cand = []
         if not sel:
             self.cmb_ctrl.addItem("（①で作るものを選んでください）", -1)
+            self.lbl_need.setText("")
             self.cmb_ctrl.blockSignals(False)
             self._on_ctrl_changed(); return
         if not self._controllers:
             self.cmb_ctrl.addItem("（制御装置マスタが未設定）", -1)
+            self.lbl_need.setText("")
             self.cmb_ctrl.blockSignals(False)
             self._on_ctrl_changed(); return
         needs = self._needs(sel)
@@ -1918,10 +1925,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
         volts = {f["meta"].get("voltage") for f in sel if f["meta"].get("voltage")}
         voltage = volts.pop() if len(volts) == 1 else ""
         self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
+        # 選択内容→必要な軸数の要約（両方なら2軸とも載る号機、片方なら1軸でよい号機）
+        kinds = "＋".join(f["kind"] for f in sel)
+        capstr = "・".join(n or "?" for n in needs)
+        vtxt = f"・{voltage}" if voltage else ""
+        self.lbl_need.setText(
+            f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
         if not self._cand:
-            caps = "・".join(n or "?" for n in needs)
-            vtxt = f"／{voltage}" if voltage else ""
-            self.cmb_ctrl.addItem(f"（容量 {caps}{vtxt} を満たす制御装置がありません）", -1)
+            self.cmb_ctrl.addItem(f"（容量 {capstr}{vtxt} を満たす制御装置がありません）", -1)
         else:
             self.cmb_ctrl.addItem("（制御装置を選択）", -1)
             for i, (c, asg) in enumerate(self._cand):

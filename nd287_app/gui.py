@@ -1644,6 +1644,19 @@ class ParamWizardDialog(QtWidgets.QDialog):
         title.setStyleSheet("font-size:15px; font-weight:bold;")
         v.addWidget(title)
 
+        # --- 場所（最初に一度だけ。ここで設定すれば保存され、詳細設定は不要） ---
+        box0 = QtWidgets.QGroupBox("場所（共有サーバ。最初に一度だけ設定すればOK）")
+        f0 = QtWidgets.QFormLayout(box0)
+        self.e_pdir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
+        self.e_pdir.setPlaceholderText(r"製品データ(R/T〇〇.prm)を置くフォルダ")
+        self.e_pdir.editingFinished.connect(self._save_dirs)
+        f0.addRow("製品データの場所", self._dir_row(self.e_pdir, "param_product_dir"))
+        self.e_bdir = QtWidgets.QLineEdit(str(settings.get("param_basic_dir", "")))
+        self.e_bdir.setPlaceholderText(r"BASIC(F〇〇BASIC)を置くフォルダ")
+        self.e_bdir.editingFinished.connect(self._save_dirs)
+        f0.addRow("BASICの場所", self._dir_row(self.e_bdir, "param_basic_dir"))
+        v.addWidget(box0)
+
         # --- ① 受注伝票番号 ---
         box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
         f1 = QtWidgets.QVBoxLayout(box1)
@@ -1733,9 +1746,38 @@ class ParamWizardDialog(QtWidgets.QDialog):
         h.addWidget(b)
         return w
 
+    def _dir_row(self, line, key):
+        """フォルダ入力＋参照ボタン。参照で選んだら即保存する。"""
+        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0); h.addWidget(line, 1)
+        b = QtWidgets.QPushButton("参照...")
+        b.clicked.connect(lambda: self._browse_dir(line, key))
+        h.addWidget(b)
+        return w
+
+    def _browse_dir(self, line, key):
+        p = QtWidgets.QFileDialog.getExistingDirectory(self, "フォルダを選択", line.text())
+        if p:
+            line.setText(p); self._save_dirs()
+
+    def _save_dirs(self):
+        """ウィザードの場所欄を設定へ保存（詳細設定を開かなくても反映・永続化）。"""
+        self.settings["param_product_dir"] = self.e_pdir.text().strip()
+        self.settings["param_basic_dir"] = self.e_bdir.text().strip()
+        try:
+            from .settings import save_settings
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._refresh_basic_dir_note()
+
     def _abs_dir(self, key):
-        d = str(self.settings.get(key, "") or "")
-        return d
+        # ウィザードの場所欄があればそれを優先（最新の入力値）。無ければ設定値。
+        if key == "param_product_dir" and hasattr(self, "e_pdir"):
+            return self.e_pdir.text().strip()
+        if key == "param_basic_dir" and hasattr(self, "e_bdir"):
+            return self.e_bdir.text().strip()
+        return str(self.settings.get(key, "") or "")
 
     def _refresh_basic_dir_note(self):
         bd = self._abs_dir("param_basic_dir")
@@ -1747,7 +1789,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             miss.append("BASICの場所")
         if miss:
             self.lbl_basic_dir.setText(
-                "※ " + "・".join(miss) + " が未設定です。「詳細設定…」で一度だけ設定してください。")
+                "※ " + "・".join(miss) + " が未設定/存在しません。上の「場所」欄で指定してください。")
         else:
             self.lbl_basic_dir.setText(f"製品データ: {pd}　／　BASIC: {bd}")
 
@@ -1764,10 +1806,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.e_out.setText(p)
 
     def _open_advanced(self):
+        self._save_dirs()                       # 現在の場所欄を先に保存して引き継ぐ
         dlg = ParamDialog(self.parent() or self, self.settings)
         dlg.e_seiban.setText(self.e_seiban.text().strip())
         dlg.exec()
-        # 詳細画面でフォルダ設定が変わっているかもしれないので注記を更新
+        # 詳細画面で場所が変わっていれば、ウィザードの欄へ反映
+        self.e_pdir.setText(str(self.settings.get("param_product_dir", "")))
+        self.e_bdir.setText(str(self.settings.get("param_basic_dir", "")))
         self._refresh_basic_dir_note()
 
     def _open_viewer(self):
@@ -2058,13 +2103,19 @@ class ParamDialog(QtWidgets.QDialog):
         self.settings = settings
         self.machine = machine
         self.setWindowTitle("パラメータ変更（差分）の出力")
-        self.resize(720, 520)
+        self.resize(740, 600)
         # 制御装置マスタ（号機・容量など）。あれば号機一覧＋必要容量で絞り込みに使う
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
             mpath = str(app_dir() / mpath)
         self._controllers = controllers.load_controllers(mpath)
-        v = QtWidgets.QVBoxLayout(self)
+        # 縦に長い画面なので全体をスクロール可能に（下のボタンは固定で常時表示）
+        outer = QtWidgets.QVBoxLayout(self)
+        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        inner = QtWidgets.QWidget(); scroll.setWidget(inner)
+        outer.addWidget(scroll, 1)
+        v = QtWidgets.QVBoxLayout(inner)
 
         # 画面を3つに分ける: ①場所(共有サーバ・一度だけ) ②今回の作業 ③任意/CSV運用。
         # 各 self.e_* の参照名はそのまま（reload/find_product/make_prm から使うため）。
@@ -2242,7 +2293,7 @@ class ParamDialog(QtWidgets.QDialog):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(b_close)
-        v.addLayout(row)
+        outer.addLayout(row)   # ボタンはスクロール外＝常に見える位置に固定
 
         self._all = {}
         self._changes = []
@@ -2832,6 +2883,11 @@ class ParamDialog(QtWidgets.QDialog):
             save_settings(self.settings)
         except Exception:
             pass
+
+    def done(self, result):
+        """閉じる/OK/×のどれで閉じても、入力した場所(フォルダ等)を必ず保存する。"""
+        self._persist()
+        super().done(result)
 
 
 class ParamEntryEditDialog(QtWidgets.QDialog):

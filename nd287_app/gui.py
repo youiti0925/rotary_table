@@ -112,6 +112,7 @@ from . import fanuc_param
 from . import param_build
 from . import controllers
 from . import seiban_flow
+from . import param_view
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1473,6 +1474,143 @@ class ControllerMasterDialog(QtWidgets.QDialog):
         self.reload()
 
 
+class ParamViewerDialog(QtWidgets.QDialog):
+    """パラメータ閲覧・比較。番地ごとの値を一覧（スクロール）、2ファイルの差分を強調、
+    番号範囲(例 1000〜3000)や「差分のみ」で絞り込む。FANUC/ヘッダ+CSV両対応。
+    """
+
+    def __init__(self, parent, settings, file_a="", file_b=""):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("パラメータを見る／比較")
+        self.resize(900, 640)
+        v = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+        self.e_a = QtWidgets.QLineEdit(file_a)
+        self.e_a.setPlaceholderText("ファイルA（BASIC / 製品データ / 作成した.prm）")
+        form.addRow("ファイルA", self._browse_row(self.e_a))
+        self.e_b = QtWidgets.QLineEdit(file_b)
+        self.e_b.setPlaceholderText("ファイルB（比較する場合だけ。空＝Aだけ表示）")
+        form.addRow("ファイルB（任意）", self._browse_row(self.e_b))
+        v.addLayout(form)
+
+        # 絞り込み行
+        filt = QtWidgets.QHBoxLayout()
+        filt.addWidget(QtWidgets.QLabel("番号"))
+        self.e_lo = QtWidgets.QLineEdit(); self.e_lo.setPlaceholderText("例 1000")
+        self.e_lo.setFixedWidth(80)
+        self.e_hi = QtWidgets.QLineEdit(); self.e_hi.setPlaceholderText("例 3000")
+        self.e_hi.setFixedWidth(80)
+        filt.addWidget(self.e_lo); filt.addWidget(QtWidgets.QLabel("〜")); filt.addWidget(self.e_hi)
+        for label, lo, hi in (("全部", "", ""), ("1000〜3000", "1000", "3000"),
+                              ("2000番台", "2000", "2999")):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(lambda _=False, a=lo, z=hi: self._set_range(a, z))
+            filt.addWidget(b)
+        self.chk_diff = QtWidgets.QCheckBox("差分のみ")
+        self.chk_diff.setToolTip("AとBで値が違う番地だけ表示（Bを指定したとき）")
+        self.chk_diff.stateChanged.connect(self.refresh)
+        filt.addWidget(self.chk_diff)
+        b_show = QtWidgets.QPushButton("表示更新")
+        b_show.setObjectName("primary"); b_show.clicked.connect(self.refresh)
+        filt.addWidget(b_show)
+        filt.addStretch(1)
+        v.addLayout(filt)
+        self.e_lo.returnPressed.connect(self.refresh)
+        self.e_hi.returnPressed.connect(self.refresh)
+        self.e_a.editingFinished.connect(self.refresh)
+        self.e_b.editingFinished.connect(self.refresh)
+
+        self.tbl = QtWidgets.QTableWidget(0, 5)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(self.tbl, 1)
+        self.lbl = QtWidgets.QLabel("")
+        v.addWidget(self.lbl)
+        b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
+        rr = QtWidgets.QHBoxLayout(); rr.addStretch(1); rr.addWidget(b_close)
+        v.addLayout(rr)
+        self.refresh()
+
+    def _browse_row(self, line):
+        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0); h.addWidget(line, 1)
+        b = QtWidgets.QPushButton("参照...")
+        b.clicked.connect(lambda: self._browse(line))
+        h.addWidget(b)
+        return w
+
+    def _browse(self, line):
+        start = line.text() or self.settings.get("param_basic_dir", "") \
+            or self.settings.get("param_product_dir", "")
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "パラメータファイル", start,
+            "パラメータ (*.prm *.PRM *.txt *.dat *.DAT);;すべて (*.*)")
+        if p:
+            line.setText(p); self.refresh()
+
+    def _set_range(self, lo, hi):
+        self.e_lo.setText(lo); self.e_hi.setText(hi); self.refresh()
+
+    @staticmethod
+    def _read(path):
+        from pathlib import Path
+        if not path or not Path(path).is_file():
+            return None
+        try:
+            return Path(path).read_bytes().decode("cp932", errors="replace")
+        except Exception:
+            return None
+
+    def refresh(self, *_):
+        lo = int(self.e_lo.text()) if self.e_lo.text().strip().isdigit() else None
+        hi = int(self.e_hi.text()) if self.e_hi.text().strip().isdigit() else None
+        a_text = self._read(self.e_a.text().strip())
+        b_text = self._read(self.e_b.text().strip())
+        compare = bool(self.e_b.text().strip())
+        self.chk_diff.setEnabled(compare)
+        if a_text is None and not compare:
+            self.tbl.setRowCount(0); self.lbl.setText("ファイルAを指定してください。")
+            return
+        if compare:
+            rows = param_view.compare(a_text or "", b_text or "")
+            rows = param_view.filter_rows(rows, lo, hi, self.chk_diff.isChecked())
+            cols = ["番号", "軸", "A の値", "B の値", "説明"]
+        else:
+            rows = param_view.filter_rows(param_view.read_rows(a_text), lo, hi)
+            cols = ["番号", "軸", "値", "説明"]
+        self.tbl.setColumnCount(len(cols))
+        self.tbl.setHorizontalHeaderLabels(cols)
+        self.tbl.setRowCount(len(rows))
+        ndiff = 0
+        for r, row in enumerate(rows):
+            if compare:
+                differ = row.get("differ")
+                ndiff += 1 if differ else 0
+                cells = [row["num"], row["label"],
+                         "" if row["a"] is None else row["a"],
+                         "" if row["b"] is None else row["b"], row["desc"]]
+            else:
+                cells = [row["num"], row["label"], row["value"], row["desc"]]
+                differ = False
+            for c, t in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(str(t))
+                it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+                if differ:
+                    it.setBackground(QtGui.QBrush(QtGui.QColor("#fef3c7")))
+                    if compare and c in (2, 3):
+                        it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+                self.tbl.setItem(r, c, it)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        rng = (f"  番号 {lo if lo is not None else '先頭'}〜{hi if hi is not None else '末尾'}"
+               if (lo is not None or hi is not None) else "")
+        self.lbl.setText((f"{len(rows)} 行" + rng
+                          + (f"　差分 {ndiff} 件" if compare else "")))
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -1571,10 +1709,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
         b_adv = QtWidgets.QPushButton("詳細設定（フォルダ/CSV/手動）…")
         b_adv.setToolTip("BASICや製品データの場所、変更表CSV、軸の手動指定などの従来画面を開く")
         b_adv.clicked.connect(self._open_advanced)
+        b_view = QtWidgets.QPushButton("パラメータを見る/比較…")
+        b_view.setToolTip("BASIC・製品・作成した.prm の中身を番地ごとに一覧。2つ選んで差分比較も")
+        b_view.clicked.connect(self._open_viewer)
         b_make = QtWidgets.QPushButton("作成 → 出力先")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.create)
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
-        row.addWidget(b_adv); row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
+        row.addWidget(b_adv); row.addWidget(b_view)
+        row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
         v.addLayout(row)
 
         if model:
@@ -1627,6 +1769,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         dlg.exec()
         # 詳細画面でフォルダ設定が変わっているかもしれないので注記を更新
         self._refresh_basic_dir_note()
+
+    def _open_viewer(self):
+        """パラメータ閲覧/比較。A=使うBASIC、B=選択中の製品データ を初期値にする。"""
+        a = self.e_basic.text().strip()
+        sel = self._selected_files()
+        b = sel[0]["path"] if sel else (self._files[0]["path"] if self._files else "")
+        ParamViewerDialog(self, self.settings, file_a=a, file_b=b).exec()
 
     def _scan_basics(self):
         """制御装置マスタの管理（手入力 追加/編集/削除・BASICから取り込み）を開く。"""
@@ -2084,9 +2233,12 @@ class ParamDialog(QtWidgets.QDialog):
         b_db.setToolTip("登録済みの変更を検索・フィルタし、リピート品を瞬時に作成"
                         "（制御/軸の変更可）。セミ/フルも表示")
         b_db.clicked.connect(self.open_db)
+        b_view = QtWidgets.QPushButton("パラメータを見る/比較…")
+        b_view.setToolTip("BASIC・製品・作成した.prm の中身を番地ごとに一覧。2つ選んで差分比較も")
+        b_view.clicked.connect(self._open_viewer)
         b_close = QtWidgets.QPushButton("閉じる")
         b_close.clicked.connect(self.accept)
-        for b in (b_reload, b_check, b_file, b_both, b_prm, b_db):
+        for b in (b_reload, b_check, b_file, b_both, b_prm, b_db, b_view):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(b_close)
@@ -2659,6 +2811,12 @@ class ParamDialog(QtWidgets.QDialog):
         self._persist()
         ParamDBDialog(self).exec()
         self.reload()  # DB側で登録が増えた場合に表へ反映
+
+    def _open_viewer(self):
+        """パラメータ閲覧/比較。A=使うBASIC、B=製品データ を初期値にする。"""
+        ParamViewerDialog(self, self.settings,
+                          file_a=self.e_master_prm.text().strip(),
+                          file_b=self.e_product.text().strip()).exec()
 
     def _persist(self):
         try:

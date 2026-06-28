@@ -1717,6 +1717,19 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                             or settings.get("nc_send_folder", "")))
         self.e_out.setPlaceholderText(r"出力先（カード E:\ や LAN共有 \\192.168.0.10\nc）")
         f3.addRow("出力先", self._with_browse(self.e_out, self._browse_out))
+        # 作成時オプション（チェック→作成前プレビューで旧→新を確認できる）
+        zp = settings.get("motor_zero_param", "2000")
+        self.chk_zero = QtWidgets.QCheckBox(f"パラメータ{zp}を0にする（モーター番号変更時）")
+        self.chk_zero.setToolTip(f"チェックすると、作成する軸の{zp}を 0 にして書き込みます")
+        f3.addRow("オプション", self.chk_zero)
+        op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
+        self.cmb_origin = QtWidgets.QComboBox()
+        self.cmb_origin.addItem("変更しない", "")
+        self.cmb_origin.addItem(f"原点を確立する（{op} #{ob} = ON）", "on")
+        self.cmb_origin.addItem(f"原点を確立しない（{op} #{ob} = OFF）", "off")
+        self.cmb_origin.setToolTip("レファレンス点復帰/原点確立のビットをON/OFFします。"
+                                   "既定は1815 #5(APZ)。違うビットなら設定で変更可")
+        f3.addRow("原点確立", self.cmb_origin)
         v.addWidget(box3)
 
         self.lbl_basic_dir = QtWidgets.QLabel("")
@@ -2013,6 +2026,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
                     f"{f['kind']}（{f['name']}）から変更値を取り出せませんでした。"
                     "BASICと製品データの形式が合っているか確認してください。")
                 return
+            # 作成時オプション（2000を0／原点確立 ON/OFF）を反映。旧→新はプレビューで確認
+            vals = param_build.with_servo_options(
+                raw, axnum, vals,
+                zero_motor=self.chk_zero.isChecked(),
+                zero_param=self.settings.get("motor_zero_param", "2000"),
+                origin=(self.cmb_origin.currentData() or None),
+                origin_param=self.settings.get("origin_param", "1815"),
+                origin_bit=int(self.settings.get("origin_bit", 5)))
             axis_values[axnum] = vals
             per_meta[axnum] = (f, a)
         # 頭文字・ファイル名

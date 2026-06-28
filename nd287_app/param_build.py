@@ -104,6 +104,35 @@ def product_axis_values(basic_text: str, product_text: str) -> tuple:
     return fanuc_param.diff_by_axis(basic_text, product_text)
 
 
+def with_servo_options(raw: str, axis, values: dict, *, zero_motor=False,
+                       zero_param="2000", origin=None, origin_param="1815",
+                       origin_bit=5) -> dict:
+    """作成時のサーボ設定オプションを values({番号:値}) に上書きして返す（対象軸ぶん）。
+
+    zero_motor=True → zero_param(既定2000)を 0 にする（モーター番号変更時）。
+    origin='on'/'off' → origin_param(既定1815)の origin_bit(既定#5 APZ＝原点確立)を 1/0 に。
+      基準値は「製品が持つその番号の値（'/* を解決後）」、無ければ BASIC の当該軸の値。
+    origin=None なら原点はいじらない。戻り値は新しい dict（元は変更しない）。
+    """
+    out = dict(values)
+    if zero_motor and zero_param:
+        out[str(zero_param)] = "0"
+    if origin in ("on", "off") and origin_param:
+        key = None
+        for k in out:                              # 既に同番号があればそれを基準に
+            if fanuc_param._norm_num(k) == fanuc_param._norm_num(origin_param):
+                key = k
+                break
+        if key is not None:
+            base = resolve_product_values(raw, {key: out[key]}, axis).get(key, out[key])
+        else:
+            base = (fanuc_param.get_value(raw, origin_param, f"A{axis}")
+                    or fanuc_param.get_value(raw, origin_param) or "00000000")
+            key = str(origin_param)
+        out[key] = fanuc_param.set_bit_value(base, int(origin_bit), origin == "on")
+    return out
+
+
 def product_change_values(basic_text: str, product_text: str) -> dict:
     """完成製品 .prm から「BASICへ入れる変更値 {番号:値}」を平坦に取り出す。
 

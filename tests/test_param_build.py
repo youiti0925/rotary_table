@@ -157,6 +157,43 @@ class TestResolveProductValues(unittest.TestCase):
         self.assertEqual(d["01815"], ("00000010", "00100000"))  # 旧→解決後の新
 
 
+class TestServoOptions(unittest.TestCase):
+    """作成時オプション: 2000を0／1815原点ビットON-OFF。"""
+
+    def test_set_bit_value(self):
+        self.assertEqual(F.set_bit_value("00000000", 5, True), "00100000")
+        self.assertEqual(F.set_bit_value("00100000", 5, False), "00000000")
+        self.assertEqual(F.set_bit_value("'00000010", 5, True), "00100010")  # ' 除去
+        self.assertEqual(F.set_bit_value("0", 1, True), "00000010")          # ビット列扱い
+        self.assertEqual(F.set_bit_value("12", 1, True), "14")               # 非ビット=整数
+
+    def test_zero_motor(self):
+        v = B.with_servo_options(BASIC_N, 4, {"01825": "2500"}, zero_motor=True,
+                                 zero_param="2020")
+        self.assertEqual(v["2020"], "0")
+        self.assertEqual(v["01825"], "2500")     # 他は不変
+
+    def test_origin_on_off_from_basic(self):
+        # BASIC_N の 1815/A4 = 00000010。原点(#5)ON → 00100010、OFF → 00000010
+        on = B.with_servo_options(BASIC_N, 4, {}, origin="on",
+                                  origin_param="1815", origin_bit=5)
+        self.assertEqual(on["1815"], "00100010")
+        off = B.with_servo_options(BASIC_N, 4, {}, origin="off",
+                                   origin_param="1815", origin_bit=5)
+        self.assertEqual(off["1815"], "00000010")
+
+    def test_origin_uses_product_value_when_present(self):
+        # 製品が 1815='001*0000' を持つ → 解決(A4=...0010で*埋め)後に #5 を立てる
+        v = B.with_servo_options(BASIC_N, 4, {"1815": "'001*0000"}, origin="on",
+                                 origin_param="1815", origin_bit=5)
+        # '001*0000' を A4(00000010)へ解決 → 00100000、#5は既に1なのでそのまま
+        self.assertEqual(v["1815"], "00100000")
+
+    def test_origin_none_leaves_alone(self):
+        v = B.with_servo_options(BASIC_N, 4, {"01825": "2500"}, origin=None)
+        self.assertNotIn("1815", v)
+
+
 class TestDetectMode(unittest.TestCase):
     def test_full_on_axis4(self):
         # A4 は #1=1 → フル、A1 は #1=0 → セミ（軸で違う）

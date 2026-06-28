@@ -263,6 +263,27 @@ def _bit_of(value, bit: int):
     return (n >> bit) & 1
 
 
+def set_bit_value(value, bit: int, on: bool) -> str:
+    """ビットパラメータ value の bit 番ビットを on(True=1/False=0) にした値を返す。
+
+    value がビット列('00000000' 左がMSB #7…#0)ならビット列のまま該当桁を変更（8桁未満は
+    8桁にそろえる）。10進整数文字列なら整数として ON/OFF。先頭の ' は除去して扱う。
+    """
+    s = str(value).strip().lstrip("'\"").strip()
+    if s and set(s) <= {"0", "1"}:                 # ビット列
+        s = s.zfill(max(8, bit + 1))
+        idx = len(s) - 1 - bit
+        s = s[:idx] + ("1" if on else "0") + s[idx + 1:]
+        return s
+    try:
+        n = int(s or "0", 10)
+    except ValueError:
+        # 数値でもビット列でもない（'*'残り等）→ 0基準で立てる
+        n = 0
+    n = (n | (1 << bit)) if on else (n & ~(1 << bit))
+    return str(n)
+
+
 def closed_loop_mode(value, bit: int = 1, full_when: int = 1) -> str:
     """クローズドループ種別を返す: 'フル' / 'セミ' / ''（判別不能）。
 

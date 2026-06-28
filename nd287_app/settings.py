@@ -115,6 +115,12 @@ DEFAULTS = dict(
     closed_loop_number="1815",
     closed_loop_bit=1,
     closed_loop_full=1,
+    # 作成時オプション: モーター番号変更時に 0 にするパラメータ（既定 2000）と、
+    # 「原点確立」ON/OFF するパラメータ・ビット（既定 1815 の #5 APZ=原点確立済み）。
+    # ★機種でビットが違う場合があるので変更可。作成前プレビューで旧→新を必ず確認する。
+    motor_zero_param="2000",
+    origin_param="1815",
+    origin_bit=5,
     # パラメータ作成ログ（追記式の厳密な履歴）。作成のたびに1行追記する。
     param_log_csv=r"マスタ/パラメータ作成ログ.csv",
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）

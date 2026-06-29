@@ -1648,12 +1648,24 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
         v = QtWidgets.QVBoxLayout(self)
         title = QtWidgets.QLabel("受注番号から かんたん作成")
-        title.setStyleSheet("font-size:15px; font-weight:bold;")
+        title.setStyleSheet("font-size:16px; font-weight:bold;")
         v.addWidget(title)
+        flow = QtWidgets.QLabel("① 受注番号で探す → ② 号機を選ぶ → ③ 作成。"
+                                "（特注/DDは『型式で探す』）")
+        flow.setStyleSheet("color:#475569;")
+        v.addWidget(flow)
+        # 「次にやること」を常に表示（初心者でも迷わないライブガイド）
+        self.lbl_guide = QtWidgets.QLabel("")
+        self.lbl_guide.setWordWrap(True)
+        v.addWidget(self.lbl_guide)
 
-        # --- 場所（最初に一度だけ。ここで設定すれば保存され、詳細設定は不要） ---
-        box0 = QtWidgets.QGroupBox("場所（共有サーバ。最初に一度だけ設定すればOK）")
-        f0 = QtWidgets.QFormLayout(box0)
+        # --- 場所（最初に一度だけ。設定済みなら折りたためる） ---
+        box0 = QtWidgets.QGroupBox("場所（共有サーバ・最初に一度だけ／クリックで開閉）")
+        box0.setCheckable(True)
+        b0v = QtWidgets.QVBoxLayout(box0)
+        inner0 = QtWidgets.QWidget(); b0v.addWidget(inner0)
+        box0.toggled.connect(inner0.setVisible)
+        f0 = QtWidgets.QFormLayout(inner0)
         self.e_pdir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
         self.e_pdir.setPlaceholderText(r"製品データ(R/T〇〇.prm)を置くフォルダ")
         self.e_pdir.editingFinished.connect(self._save_dirs)
@@ -1679,6 +1691,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_cidx = QtWidgets.QLabel("")
         self.lbl_cidx.setStyleSheet("color:#6b7280; font-size:11px;")
         f0.addRow("", self.lbl_cidx)
+        # 製品データ・BASIC が両方設定済みなら畳んでおく（日常は①②③に集中）
+        _set = bool(self.e_pdir.text().strip()) and bool(self.e_bdir.text().strip())
+        box0.setChecked(not _set)
+        inner0.setVisible(not _set)
         v.addWidget(box0)
 
         # 横長レイアウト: 場所(上・全幅) の下を 左(検索＋結果) / 右(制御装置＋出力) に分割
@@ -1804,9 +1820,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
         if model:
             self.e_model.setText(model)   # 本体の型式を「型式で探す」に初期表示
+        for w in (self.e_seiban, self.e_basic, self.e_out):
+            w.textChanged.connect(self._update_guide)
         self.e_seiban.setFocus()
         self._refresh_basic_dir_note()
         self._refresh_cidx_note()
+        self._update_guide()
 
     # ----- 補助 -----
     def _with_browse(self, line, slot):
@@ -1866,6 +1885,35 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 "※ " + "・".join(miss) + " が未設定/存在しません。上の「場所」欄で指定してください。")
         else:
             self.lbl_basic_dir.setText(f"製品データ: {pd}　／　BASIC: {bd}")
+
+    def _update_guide(self, *_):
+        """『次にやること』を状態から自動表示（誰でも迷わないライブガイド）。"""
+        pd = self._abs_dir("param_product_dir")
+        sel = self._selected_files()
+        ok = False
+        if not (pd and Path(pd).is_dir()):
+            msg = "まず『場所』で製品データのフォルダを指定（右上の▶で開く）"
+        elif not self._files:
+            msg = "受注番号を入れて『探す』（特注/DDは『型式で探す』）"
+        elif not sel:
+            msg = "見つかった中から、作るもの（傾斜／回転）にチェック"
+        elif any(f["meta"].get("system", "FANUC") != "FANUC" for f in sel):
+            msg = "⚠ FANUC以外が選ばれています。FANUC製品だけにチェックしてください"
+        elif self.cmb_ctrl.currentData() in (None, -1):
+            msg = "② 制御装置（号機）を選んでください"
+        elif not self.e_basic.text().strip():
+            msg = "③ 使うBASIC を指定してください（号機選択で自動で入ります）"
+        elif not self.e_out.text().strip():
+            msg = "③ 出力先 を指定してください"
+        elif not self.e_seiban.text().strip():
+            msg = "③ Seiban（出力ファイル名用）を入れてください"
+        else:
+            msg, ok = "準備OK。右下の『作成 → 出力先』を押してください", True
+        self.lbl_guide.setText(("✓ " if ok else "▶ ") + "次にやること： " + msg)
+        self.lbl_guide.setStyleSheet(
+            "padding:6px; border-radius:4px; "
+            + ("background:#dcfce7; color:#166534; font-weight:bold;" if ok
+               else "background:#eff6ff; color:#1d4ed8;"))
 
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
@@ -2118,6 +2166,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         sel = self._selected_files()
         if idx is None or idx < 0 or idx >= len(self._cand):
             self.lbl_assign.setText("")
+            self._update_guide()
             return
         c, asg = self._cand[idx]
         parts = []
@@ -2132,6 +2181,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         elif not self.e_basic.text().strip():
             self.lbl_assign.setText(self.lbl_assign.text()
                                     + f"\n※ 号機 {c.unit} のBASICが見つかりません。『使うBASIC』を指定してください。")
+        self._update_guide()
 
     # ----- ③ 作成 -----
     def create(self):

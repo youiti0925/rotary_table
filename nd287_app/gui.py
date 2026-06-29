@@ -2361,6 +2361,13 @@ class ParamDialog(QtWidgets.QDialog):
         inner = QtWidgets.QWidget(); scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
         v = QtWidgets.QVBoxLayout(inner)
+        intro = QtWidgets.QLabel(
+            "詳細設定／手動作成の画面です。<b>普段は『かんたん作成』でOK</b>。"
+            "ここはフォルダ設定・手動の軸指定・変更表CSV運用など細かい操作をするときに使います。")
+        intro.setTextFormat(QtCore.Qt.RichText)
+        intro.setWordWrap(True)
+        intro.setStyleSheet("background:#eff6ff; color:#1d4ed8; padding:6px; border-radius:4px;")
+        v.addWidget(intro)
 
         # 画面を3つに分ける: ①場所(共有サーバ・一度だけ) ②今回の作業 ③任意/CSV運用。
         # 各 self.e_* の参照名はそのまま（reload/find_product/make_prm から使うため）。
@@ -2534,10 +2541,12 @@ class ParamDialog(QtWidgets.QDialog):
         b_view.clicked.connect(self._open_viewer)
         b_close = QtWidgets.QPushButton("閉じる")
         b_close.clicked.connect(self.accept)
-        for b in (b_reload, b_check, b_file, b_both, b_prm, b_db, b_view):
+        # 左＝表示/ツール、右＝出力/作成(主) と分けて見やすく（機能はそのまま）
+        for b in (b_reload, b_view, b_db):
             row.addWidget(b)
         row.addStretch(1)
-        row.addWidget(b_close)
+        for b in (b_check, b_file, b_both, b_prm, b_close):
+            row.addWidget(b)
         outer.addLayout(row)   # ボタンはスクロール外＝常に見える位置に固定
 
         self._all = {}
@@ -3435,6 +3444,13 @@ class ParamDBDialog(QtWidgets.QDialog):
         self.resize(1060, 680)
         self._entries = []
         v = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel(
+            "登録済みの作成履歴から<b>リピート作成</b>する画面です。"
+            "上で<b>検索／絞り込み</b> → 下の表で<b>1件選ぶ</b> → 下部のボタンで作成。"
+            "（同じ制御装置なら『前回と同じ…』、別号機なら『制御装置を選んで…』、2軸は『2軸で作成』）")
+        intro.setTextFormat(QtCore.Qt.RichText); intro.setWordWrap(True)
+        intro.setStyleSheet("background:#eff6ff; color:#1d4ed8; padding:6px; border-radius:4px;")
+        v.addWidget(intro)
 
         # --- 検索・フィルタ ---
         filt = QtWidgets.QHBoxLayout()

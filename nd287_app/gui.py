@@ -1638,6 +1638,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if cpath and not Path(cpath).is_absolute():
             cpath = str(app_dir() / cpath)
         self._motor_caps = seiban_flow.load_motor_caps(cpath)
+        # 特注パラ索引（型式で引く。再索引で更新。毎回フォルダを解析しないため）
+        ipath = settings.get("param_custom_index_csv", "")
+        if ipath and not Path(ipath).is_absolute():
+            ipath = str(app_dir() / ipath)
+        self._cindex_path = ipath
+        self._custom_index = xls_param.read_index(ipath)
         self._cand = []           # 候補 [(controller, [軸文字,...])]
 
         v = QtWidgets.QVBoxLayout(self)
@@ -1656,10 +1662,23 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_bdir.setPlaceholderText(r"BASIC(F〇〇BASIC)を置くフォルダ")
         self.e_bdir.editingFinished.connect(self._save_dirs)
         f0.addRow("BASICの場所", self._dir_row(self.e_bdir, "param_basic_dir"))
+        crow = QtWidgets.QWidget(); ch = QtWidgets.QHBoxLayout(crow)
+        ch.setContentsMargins(0, 0, 0, 0)
         self.e_cdir = QtWidgets.QLineEdit(str(settings.get("param_custom_dir", "")))
         self.e_cdir.setPlaceholderText(r"特注パラ(Excel)の場所＝MKPRMで作れない/DD等（任意）")
         self.e_cdir.editingFinished.connect(self._save_dirs)
-        f0.addRow("特注パラの場所", self._dir_row(self.e_cdir, "param_custom_dir"))
+        ch.addWidget(self.e_cdir, 1)
+        b_cb = QtWidgets.QPushButton("参照..."); b_cb.clicked.connect(
+            lambda: self._browse_dir(self.e_cdir, "param_custom_dir"))
+        ch.addWidget(b_cb)
+        b_reidx = QtWidgets.QPushButton("索引を更新")
+        b_reidx.setToolTip("特注パラ(Excel)を全件読み込んで索引に登録。フォルダ更新時に押す（少し時間がかかる）")
+        b_reidx.clicked.connect(self._reindex_custom)
+        ch.addWidget(b_reidx)
+        f0.addRow("特注パラの場所", crow)
+        self.lbl_cidx = QtWidgets.QLabel("")
+        self.lbl_cidx.setStyleSheet("color:#6b7280; font-size:11px;")
+        f0.addRow("", self.lbl_cidx)
         v.addWidget(box0)
 
         # --- ① 受注伝票番号 ---
@@ -1674,6 +1693,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
         srow.addWidget(QtWidgets.QLabel("Seiban")); srow.addWidget(self.e_seiban, 1)
         srow.addWidget(b_search)
         f1.addLayout(srow)
+        # 型式でも探せる（特注パラ＝製番が無いので型式で引く）
+        mrow = QtWidgets.QHBoxLayout()
+        self.e_model = QtWidgets.QLineEdit()
+        self.e_model.setPlaceholderText("型式で特注パラを探す（例 RTT-135 / MZF-50010）")
+        self.e_model.returnPressed.connect(self.search_by_model)
+        b_msearch = QtWidgets.QPushButton("型式で探す")
+        b_msearch.clicked.connect(self.search_by_model)
+        mrow.addWidget(QtWidgets.QLabel("型式")); mrow.addWidget(self.e_model, 1)
+        mrow.addWidget(b_msearch)
+        f1.addLayout(mrow)
         self.found_box = QtWidgets.QWidget()
         self.found_lay = QtWidgets.QVBoxLayout(self.found_box)
         self.found_lay.setContentsMargins(0, 0, 0, 0)
@@ -1760,9 +1789,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addLayout(row)
 
         if model:
-            pass  # 型式はここでは使わない（Seiban起点）
+            self.e_model.setText(model)   # 本体の型式を「型式で探す」に初期表示
         self.e_seiban.setFocus()
         self._refresh_basic_dir_note()
+        self._refresh_cidx_note()
 
     # ----- 補助 -----
     def _with_browse(self, line, slot):
@@ -1872,16 +1902,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
     # ----- ① 探す -----
     def search(self):
         seiban = self.e_seiban.text().strip()
-        for f in self._files:                       # 既存のチェックUIを消す
-            f["chk"].setParent(None)
-        self._files = []
+        self._clear_found()
         if not seiban:
-            self.lbl_found.setText("Seiban を入力してください。")
+            self.lbl_found.setText("Seiban を入力してください（型式だけで探すなら下の『型式で探す』）。")
             self._update_candidates(); return
         pd = self._abs_dir("param_product_dir")
-        cd = self._abs_dir("param_custom_dir")
         items = []
-        # ① 製品データ(.prm) を探す
+        models = set()
+        # ① 製品データ(.prm) を探す（フォルダ名一致だけ＝速い）。型式が分かる。
         if pd and Path(pd).is_dir():
             for fdict in seiban_flow.find_seiban_files(pd, seiban):
                 try:
@@ -1890,46 +1918,115 @@ class ParamWizardDialog(QtWidgets.QDialog):
                     text = ""
                 fdict["meta"] = seiban_flow.read_product_meta(
                     text, kind=fdict["kind"], motor_caps=self._motor_caps)
+                if fdict["meta"].get("model"):
+                    models.add(fdict["meta"]["model"])
                 items.append(fdict)
-        # ② 特注パラ(Excel) を探す（製番でフォルダ再帰検索）
-        if cd and Path(cd).is_dir():
-            for cf in xls_param.find_custom_files(cd, seiban):
-                for sheet in cf["sheets"]:
-                    items.append(self._custom_item(cf, sheet))
+        # ② 特注パラ＝索引から「製品の型式」で引く（特注は製番が無い）＋製番直一致も
+        recs = []
+        for m in models:
+            recs += xls_param.search_index(self._custom_index, model=m)
+        recs += xls_param.search_index(self._custom_index, seiban=seiban)
+        for rec in self._dedup_recs(recs):
+            items.append(self._custom_item(rec))
         if not items:
-            where = []
-            if not pd or not Path(pd).is_dir():
-                where.append("製品データの場所")
-            if not cd or not Path(cd).is_dir():
-                where.append("特注パラの場所")
-            msg = (f"Seiban『{seiban}』の製品データ／特注パラが見つかりませんでした。")
-            if where:
-                msg += "\n（未設定: " + "・".join(where) + " → 上の「場所」欄で指定）"
-            else:
-                msg += "\n頭文字 T/R＋Seiban の.prm か、特注パラのExcel(ファイル名に製番)を確認してください。"
-            self.lbl_found.setText(msg)
+            self.lbl_found.setText(self._not_found_msg(seiban, models))
             self._update_candidates(); return
-        self.lbl_found.setText("見つかったものにチェックを入れてください（両方／必要な方だけ）:")
+        note = ("見つかったものにチェック（両方／必要な方）"
+                + (f"　※特注は型式 {('・'.join(sorted(models)))} で照合" if models and recs else ""))
+        self.lbl_found.setText(note)
         for fdict in items:
             self.found_lay.addWidget(self._make_found_checkbox(fdict))
             self._files.append(fdict)
         self._update_candidates()
 
-    def _custom_item(self, cf, sheet):
-        """特注Excelの1シート → 検索結果アイテム（製品.prmと同じ扱いにする）。"""
-        motor = sheet.get("motor", "")
+    def search_by_model(self):
+        """型式で特注パラ索引を引いて候補を出す（受注番号が無い/特注を直接出すとき）。"""
+        model = self.e_model.text().strip()
+        self._clear_found()
+        if not model:
+            self.lbl_found.setText("型式を入力してください。")
+            self._update_candidates(); return
+        recs = self._dedup_recs(xls_param.search_index(self._custom_index, model=model))
+        if not recs:
+            n = len(self._custom_index)
+            self.lbl_found.setText(
+                f"型式『{model}』の特注パラは索引にありません（索引 {n}件）。"
+                + ("" if n else "　まず『索引を更新』を押してください。"))
+            self._update_candidates(); return
+        self.lbl_found.setText(
+            f"型式『{model}』の特注パラ {len(recs)}件。チェックして作成（出力名用にSeibanも入力）:")
+        for rec in recs:
+            fdict = self._custom_item(rec)
+            self.found_lay.addWidget(self._make_found_checkbox(fdict))
+            self._files.append(fdict)
+        self._update_candidates()
+
+    def _clear_found(self):
+        for f in self._files:
+            if f.get("chk"):
+                f["chk"].setParent(None)
+        self._files = []
+
+    @staticmethod
+    def _dedup_recs(recs):
+        seen, out = set(), []
+        for r in recs:
+            k = (r.get("path", ""), r.get("sheet", ""))
+            if k in seen:
+                continue
+            seen.add(k); out.append(r)
+        return out
+
+    def _not_found_msg(self, seiban, models):
+        pd = self._abs_dir("param_product_dir")
+        if not pd or not Path(pd).is_dir():
+            return ("製品データの場所が未設定です。上の「場所」欄で指定してください。"
+                    "（特注パラだけ探すなら『型式で探す』）")
+        base = f"Seiban『{seiban}』の製品データが見つかりませんでした。"
+        if not self._custom_index:
+            return base + "\n特注パラを使うなら『索引を更新』を押してから『型式で探す』。"
+        return base + "\n特注パラは『型式で探す』で型式から探せます。"
+
+    def _custom_item(self, rec):
+        """特注パラ索引レコード → 検索結果アイテム（値は作成時に1枚だけ読む＝速い）。"""
+        motor = rec.get("motor", "")
         cap = seiban_flow.standard_capacity(motor)         # DiSは""→手入力
         src = "標準" if cap else ""
         if not cap and self._motor_caps:
-            cap = seiban_flow.capacity_for_motor(
-                self._motor_caps, "", motor, sheet.get("values", {}).get("2020", ""))
+            cap = seiban_flow.capacity_for_motor(self._motor_caps, "", motor)
             src = "対応表" if cap else ""
-        meta = {"model": sheet.get("model", ""), "kind": sheet.get("kind", "") or "回転",
+        meta = {"model": rec.get("model", ""), "kind": rec.get("kind", "") or "回転",
                 "motor": motor, "system": "FANUC", "capacity": cap, "capacity_src": src,
-                "voltage": seiban_flow.motor_voltage(motor), "dd": sheet.get("dd", False)}
-        nm = cf["name"] + (f"：{sheet['sheet']}" if sheet.get("sheet") else "")
-        return {"kind": meta["kind"], "name": nm, "meta": meta,
-                "values": dict(sheet.get("values", {})), "source": "custom"}
+                "voltage": seiban_flow.motor_voltage(motor), "dd": str(rec.get("dd", "")) == "1"}
+        nm = rec.get("name", "") + (f"：{rec['sheet']}" if rec.get("sheet") else "")
+        return {"kind": meta["kind"], "name": nm, "meta": meta, "source": "custom",
+                "path": rec.get("path", ""), "sheet_name": rec.get("sheet", "")}
+
+    def _reindex_custom(self):
+        """特注パラフォルダを全件読み込んで索引を作り直す（少し時間がかかる）。"""
+        cd = self._abs_dir("param_custom_dir")
+        if not cd or not Path(cd).is_dir():
+            QtWidgets.QMessageBox.warning(self, "索引", "特注パラの場所を指定してください。")
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            recs = xls_param.index_records(cd)
+            if self._cindex_path:
+                p = Path(self._cindex_path)
+                if p.parent and not p.parent.exists():
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                xls_param.write_index(self._cindex_path, recs)
+            self._custom_index = recs
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._refresh_cidx_note()
+        QtWidgets.QMessageBox.information(
+            self, "索引", f"特注パラを索引に登録しました（{len(self._custom_index)}件）。")
+
+    def _refresh_cidx_note(self):
+        n = len(self._custom_index)
+        self.lbl_cidx.setText(f"特注パラ索引: {n}件" + ("（『索引を更新』で再作成）" if n
+                              else "　← まだ空。『索引を更新』を押して登録してください"))
 
     def _make_found_checkbox(self, fdict):
         meta = fdict["meta"]
@@ -2062,7 +2159,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         for f, a in zip(sel, asg):
             axnum = seiban_flow_axis(a)
             if f.get("source") == "custom":
-                vals = dict(f.get("values") or {})   # 特注Excelは解析済みの{番号:値}
+                sh = xls_param.sheet_values(f.get("path", ""), f.get("sheet_name", ""))
+                vals = dict(sh.get("values", {})) if sh else {}   # 特注Excelを1枚だけ読む
             else:
                 try:
                     ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")

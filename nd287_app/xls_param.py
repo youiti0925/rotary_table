@@ -16,6 +16,8 @@
 Qt非依存。ローダ(.xls=xlrd / .xlsx=openpyxl)とグリッド解析を分離して単体試験可能にする。
 """
 
+import csv
+import io
 import re
 from pathlib import Path
 
@@ -232,6 +234,113 @@ def sheets_with_params(path) -> list:
 
 
 # ---- 特注フォルダから 製番 で探す ------------------------------------------
+def sheet_values(path, sheet_name="") -> dict:
+    """指定ファイル・シートの解析結果（{番号:値}入り）を返す。作成時に1枚だけ読む用。"""
+    for sh in read_sheets(path):
+        if sh.get("values") and (not sheet_name or sh.get("sheet") == sheet_name):
+            return sh
+    return None
+
+
+# ===== 特注パラ索引（事前登録＝毎回walkせず型式で引く） =====
+INDEX_HEADER = ["型式", "製番", "種別", "モーター", "DD", "番地数", "シート",
+                "ファイル名", "パス", "更新"]
+
+
+def _normmodel(s) -> str:
+    """型式照合キー（大文字・記号/空白/カンマ除去）。'RTT-135,BA'→'RTT135BA'。"""
+    return re.sub(r"[\s\-_/.,]", "", str(s or "")).upper()
+
+
+def index_records(custom_dir, progress=None) -> list:
+    """特注パラフォルダを再帰走査して索引レコード（値を持つシート単位）を作る（遅い＝随時更新）。
+
+    progress(name) を渡すと進捗通知。OLD配下は除外。戻り値は dict のリスト。
+    """
+    base = Path(custom_dir)
+    out = []
+    if not custom_dir or not base.is_dir():
+        return out
+    for p in sorted(base.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in (".xls", ".xlsx"):
+            continue
+        if "/OLD/" in (str(p).replace("\\", "/") + "/").upper():
+            continue
+        try:
+            mtime = int(p.stat().st_mtime)
+        except Exception:
+            mtime = 0
+        try:
+            sheets = read_sheets(str(p))
+        except Exception:
+            sheets = []
+        for sh in sheets:
+            if not sh.get("values"):
+                continue
+            out.append({"model": sh.get("model", ""), "serial": sh.get("serial", ""),
+                        "kind": sh.get("kind", ""), "motor": sh.get("motor", ""),
+                        "dd": "1" if sh.get("dd") else "", "naddr": len(sh["values"]),
+                        "sheet": sh.get("sheet", ""), "name": p.name, "path": str(p),
+                        "mtime": mtime})
+        if progress:
+            progress(p.name)
+    return out
+
+
+def write_index(path, records):
+    with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(INDEX_HEADER)
+        for r in records:
+            w.writerow([r.get("model", ""), r.get("serial", ""), r.get("kind", ""),
+                        r.get("motor", ""), r.get("dd", ""), r.get("naddr", ""),
+                        r.get("sheet", ""), r.get("name", ""), r.get("path", ""),
+                        r.get("mtime", "")])
+
+
+def read_index(path) -> list:
+    if not path or not Path(path).exists():
+        return []
+    raw = Path(path).read_bytes()
+    text = raw.decode("cp932", errors="replace")
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return []
+    keys = ["model", "serial", "kind", "motor", "dd", "naddr", "sheet", "name",
+            "path", "mtime"]
+    out = []
+    for row in rows[1:]:
+        if not any(c.strip() for c in row):
+            continue
+        out.append({k: (row[i] if i < len(row) else "") for i, k in enumerate(keys)})
+    return out
+
+
+def search_index(records, model="", seiban="") -> list:
+    """索引を型式（前方一致を含む）・製番（部分一致）で絞る。両方空なら空を返す。"""
+    nm = _normmodel(model)
+    sb = str(seiban or "").strip()
+    if not nm and not sb:
+        return []
+    out = []
+    for r in records:
+        if nm:
+            rm = _normmodel(r.get("model", ""))
+            if not (rm and (rm == nm or rm.startswith(nm) or nm.startswith(rm))):
+                continue
+        if sb:
+            if sb not in (r.get("serial", "") or "") and sb not in (r.get("name", "") or ""):
+                continue
+        out.append(r)
+    return out
+
+
 def find_custom_files(custom_dir, seiban) -> list:
     """特注パラフォルダ(再帰)から、製番に対応する Excel を探す。
 

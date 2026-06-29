@@ -104,6 +104,7 @@ DEFAULTS = dict(
     param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
     param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
     param_custom_dir="",      # 特注パラ(Excel)の置き場（MKPRMで作れない=DD等。系列別フォルダ）
+    param_custom_index_csv=r"マスタ/特注パラ索引.csv",  # 特注パラの索引（型式で引く・再索引で更新）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
     # 制御装置マスタ（号機・CNC・軸ごとの容量等）。必要容量で制御装置を絞り込むのに使う
     controller_master_csv=r"マスタ/制御装置マスタ.csv",

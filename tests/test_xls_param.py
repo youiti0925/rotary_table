@@ -131,5 +131,51 @@ class TestLoaderAndFind(unittest.TestCase):
         self.assertEqual(X.find_custom_files(d, "99999"), [])
 
 
+class TestIndex(unittest.TestCase):
+    def _make_xlsx(self, path, serial="", model_row=None):
+        import openpyxl
+        wb = openpyxl.Workbook(); ws = wb.active
+        for r in grid_template_A():
+            ws.append(list(r))
+        ws["C3"] = serial
+        if model_row:
+            ws["C2"] = model_row
+        wb.save(path)
+
+    def _tree(self):
+        d = tempfile.mkdtemp()
+        Path(d, "RTT", "RTT-135").mkdir(parents=True)
+        Path(d, "RTV", "OLD").mkdir(parents=True)
+        self._make_xlsx(str(Path(d, "RTT", "RTT-135", "20240101_RTT-135,BA.xlsx")),
+                        model_row="RTT-135,BA")
+        self._make_xlsx(str(Path(d, "RTV", "OLD", "old.xlsx")), model_row="RTV-313")
+        return d
+
+    def test_index_build_skips_old(self):
+        recs = X.index_records(self._tree())
+        self.assertEqual(len(recs), 1)                 # OLDは除外
+        self.assertEqual(recs[0]["model"], "RTT-135,BA")
+        self.assertEqual(recs[0]["dd"], "1")           # 2300 #2=1
+
+    def test_index_roundtrip_and_search(self):
+        d = self._tree()
+        recs = X.index_records(d)
+        idx = Path(d, "idx.csv")
+        X.write_index(str(idx), recs)
+        loaded = X.read_index(str(idx))
+        self.assertEqual(len(loaded), 1)
+        # 型式の前方一致: テンプレ "RTT-135" で製品 "RTT-135,BA" がヒット
+        self.assertEqual(len(X.search_index(loaded, model="RTT-135")), 1)
+        self.assertEqual(len(X.search_index(loaded, model="RTT-135,BA")), 1)
+        self.assertEqual(len(X.search_index(loaded, model="RTH-999")), 0)
+        self.assertEqual(len(X.search_index(loaded, model="")), 0)   # 空は何も出さない
+
+    def test_sheet_values(self):
+        d = self._tree()
+        recs = X.index_records(d)
+        sh = X.sheet_values(recs[0]["path"], recs[0]["sheet"])
+        self.assertEqual(sh["values"]["2300"], "1***111*")
+
+
 if __name__ == "__main__":
     unittest.main()

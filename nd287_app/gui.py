@@ -113,6 +113,7 @@ from . import param_build
 from . import controllers
 from . import seiban_flow
 from . import param_view
+from . import xls_param
 
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現")
@@ -1655,6 +1656,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_bdir.setPlaceholderText(r"BASIC(F〇〇BASIC)を置くフォルダ")
         self.e_bdir.editingFinished.connect(self._save_dirs)
         f0.addRow("BASICの場所", self._dir_row(self.e_bdir, "param_basic_dir"))
+        self.e_cdir = QtWidgets.QLineEdit(str(settings.get("param_custom_dir", "")))
+        self.e_cdir.setPlaceholderText(r"特注パラ(Excel)の場所＝MKPRMで作れない/DD等（任意）")
+        self.e_cdir.editingFinished.connect(self._save_dirs)
+        f0.addRow("特注パラの場所", self._dir_row(self.e_cdir, "param_custom_dir"))
         v.addWidget(box0)
 
         # --- ① 受注伝票番号 ---
@@ -1786,6 +1791,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         """ウィザードの場所欄を設定へ保存（詳細設定を開かなくても反映・永続化）。"""
         self.settings["param_product_dir"] = self.e_pdir.text().strip()
         self.settings["param_basic_dir"] = self.e_bdir.text().strip()
+        self.settings["param_custom_dir"] = self.e_cdir.text().strip()
         try:
             from .settings import save_settings
             save_settings(self.settings)
@@ -1799,6 +1805,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return self.e_pdir.text().strip()
         if key == "param_basic_dir" and hasattr(self, "e_bdir"):
             return self.e_bdir.text().strip()
+        if key == "param_custom_dir" and hasattr(self, "e_cdir"):
+            return self.e_cdir.text().strip()
         return str(self.settings.get(key, "") or "")
 
     def _refresh_basic_dir_note(self):
@@ -1840,8 +1848,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _open_viewer(self):
         """パラメータ閲覧/比較。A=使うBASIC、B=選択中の製品データ を初期値にする。"""
         a = self.e_basic.text().strip()
-        sel = self._selected_files()
-        b = sel[0]["path"] if sel else (self._files[0]["path"] if self._files else "")
+        sel = self._selected_files() or self._files
+        # 特注(Excel)は番地一覧ビューア(製品.prm前提)では開けないので .prm のものだけ
+        b = next((f["path"] for f in sel if f.get("path")), "")
         ParamViewerDialog(self, self.settings, file_a=a, file_b=b).exec()
 
     def _scan_basics(self):
@@ -1863,55 +1872,89 @@ class ParamWizardDialog(QtWidgets.QDialog):
     # ----- ① 探す -----
     def search(self):
         seiban = self.e_seiban.text().strip()
-        # 既存のチェックUIを消す
-        for f in self._files:
+        for f in self._files:                       # 既存のチェックUIを消す
             f["chk"].setParent(None)
         self._files = []
-        pd = self._abs_dir("param_product_dir")
         if not seiban:
             self.lbl_found.setText("Seiban を入力してください。")
             self._update_candidates(); return
-        if not pd or not Path(pd).is_dir():
-            self.lbl_found.setText("製品データの場所が未設定です。「詳細設定…」で設定してください。")
-            self._update_candidates(); return
-        files = seiban_flow.find_seiban_files(pd, seiban)
-        if not files:
-            self.lbl_found.setText(
-                f"Seiban『{seiban}』の製品データ（T…/R…）が見つかりませんでした。\n"
-                "頭文字 T(傾斜)/R(回転)＋Seiban の名前か、「詳細設定…」で手動指定してください。")
+        pd = self._abs_dir("param_product_dir")
+        cd = self._abs_dir("param_custom_dir")
+        items = []
+        # ① 製品データ(.prm) を探す
+        if pd and Path(pd).is_dir():
+            for fdict in seiban_flow.find_seiban_files(pd, seiban):
+                try:
+                    text = Path(fdict["path"]).read_text(encoding="cp932", errors="replace")
+                except Exception:
+                    text = ""
+                fdict["meta"] = seiban_flow.read_product_meta(
+                    text, kind=fdict["kind"], motor_caps=self._motor_caps)
+                items.append(fdict)
+        # ② 特注パラ(Excel) を探す（製番でフォルダ再帰検索）
+        if cd and Path(cd).is_dir():
+            for cf in xls_param.find_custom_files(cd, seiban):
+                for sheet in cf["sheets"]:
+                    items.append(self._custom_item(cf, sheet))
+        if not items:
+            where = []
+            if not pd or not Path(pd).is_dir():
+                where.append("製品データの場所")
+            if not cd or not Path(cd).is_dir():
+                where.append("特注パラの場所")
+            msg = (f"Seiban『{seiban}』の製品データ／特注パラが見つかりませんでした。")
+            if where:
+                msg += "\n（未設定: " + "・".join(where) + " → 上の「場所」欄で指定）"
+            else:
+                msg += "\n頭文字 T/R＋Seiban の.prm か、特注パラのExcel(ファイル名に製番)を確認してください。"
+            self.lbl_found.setText(msg)
             self._update_candidates(); return
         self.lbl_found.setText("見つかったものにチェックを入れてください（両方／必要な方だけ）:")
-        for fdict in files:
-            try:
-                text = Path(fdict["path"]).read_text(encoding="cp932", errors="replace")
-            except Exception:
-                text = ""
-            meta = seiban_flow.read_product_meta(
-                text, kind=fdict["kind"], motor_caps=self._motor_caps)
-            fdict["meta"] = meta
-            is_fanuc = meta.get("system", "FANUC") == "FANUC"
-            # 作業者が一目で安心できる並び: 型式 / 系統 / 回転傾斜 / モーター / 容量
-            parts = [f"型式 {meta.get('model') or '—'}",
-                     meta.get("system") or "FANUC",
-                     fdict["kind"]]
-            if meta.get("motor"):
-                parts.append(meta["motor"])
-            if is_fanuc:
-                parts.append(f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
-                             if meta.get("capacity") else "容量不明→手で選択")
-                if meta.get("voltage"):
-                    parts.append(meta["voltage"])
-            else:
-                parts.append("⚠ 今はFANUCのみ作成可")
-            chk = QtWidgets.QCheckBox(" / ".join(parts) + f"　（{fdict['name']}）")
-            chk.setChecked(is_fanuc)            # 非FANUCは既定オフ（作成対象外）
-            if not is_fanuc:
-                chk.setStyleSheet("color:#b45309;")
-            chk.stateChanged.connect(self._update_candidates)
-            fdict["chk"] = chk
-            self.found_lay.addWidget(chk)
+        for fdict in items:
+            self.found_lay.addWidget(self._make_found_checkbox(fdict))
             self._files.append(fdict)
         self._update_candidates()
+
+    def _custom_item(self, cf, sheet):
+        """特注Excelの1シート → 検索結果アイテム（製品.prmと同じ扱いにする）。"""
+        motor = sheet.get("motor", "")
+        cap = seiban_flow.standard_capacity(motor)         # DiSは""→手入力
+        src = "標準" if cap else ""
+        if not cap and self._motor_caps:
+            cap = seiban_flow.capacity_for_motor(
+                self._motor_caps, "", motor, sheet.get("values", {}).get("2020", ""))
+            src = "対応表" if cap else ""
+        meta = {"model": sheet.get("model", ""), "kind": sheet.get("kind", "") or "回転",
+                "motor": motor, "system": "FANUC", "capacity": cap, "capacity_src": src,
+                "voltage": seiban_flow.motor_voltage(motor), "dd": sheet.get("dd", False)}
+        nm = cf["name"] + (f"：{sheet['sheet']}" if sheet.get("sheet") else "")
+        return {"kind": meta["kind"], "name": nm, "meta": meta,
+                "values": dict(sheet.get("values", {})), "source": "custom"}
+
+    def _make_found_checkbox(self, fdict):
+        meta = fdict["meta"]
+        is_fanuc = meta.get("system", "FANUC") == "FANUC"
+        tag = "FANUC特注" + ("DD" if meta.get("dd") else "") if fdict.get("source") == "custom" \
+            else (meta.get("system") or "FANUC")
+        parts = [f"型式 {meta.get('model') or '—'}", tag, fdict["kind"]]
+        if meta.get("motor"):
+            parts.append(meta["motor"])
+        if is_fanuc:
+            parts.append(f"容量 {meta['capacity']}（{meta.get('capacity_src') or '自動'}）"
+                         if meta.get("capacity") else "容量不明→手で選択")
+            if meta.get("voltage"):
+                parts.append(meta["voltage"])
+        else:
+            parts.append("⚠ 今はFANUCのみ作成可")
+        chk = QtWidgets.QCheckBox(" / ".join(parts) + f"　（{fdict['name']}）")
+        chk.setChecked(is_fanuc)
+        if not is_fanuc:
+            chk.setStyleSheet("color:#b45309;")
+        elif fdict.get("source") == "custom":
+            chk.setStyleSheet("color:#7c3aed;")    # 特注は紫で区別
+        chk.stateChanged.connect(self._update_candidates)
+        fdict["chk"] = chk
+        return chk
 
     def _selected_files(self):
         return [f for f in self._files if f.get("chk") and f["chk"].isChecked()]
@@ -2018,17 +2061,20 @@ class ParamWizardDialog(QtWidgets.QDialog):
         axis_values, per_meta = {}, {}
         for f, a in zip(sel, asg):
             axnum = seiban_flow_axis(a)
-            try:
-                ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "作成", f"製品データを読めません:\n{e}")
-                return
-            vals = param_build.product_change_values(raw, ptext)
+            if f.get("source") == "custom":
+                vals = dict(f.get("values") or {})   # 特注Excelは解析済みの{番号:値}
+            else:
+                try:
+                    ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "作成", f"製品データを読めません:\n{e}")
+                    return
+                vals = param_build.product_change_values(raw, ptext)
             if not vals:
                 QtWidgets.QMessageBox.warning(
                     self, "作成",
                     f"{f['kind']}（{f['name']}）から変更値を取り出せませんでした。"
-                    "BASICと製品データの形式が合っているか確認してください。")
+                    "BASICと製品/特注データの形式が合っているか確認してください。")
                 return
             # 作成時オプション（2000を0／原点確立 ON/OFF）を反映。旧→新はプレビューで確認
             vals = param_build.with_servo_options(

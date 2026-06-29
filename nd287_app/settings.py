@@ -103,6 +103,7 @@ DEFAULTS = dict(
     # 共有サーバ運用: BASIC(制御装置の基本パラメータ)と、Seiban対応の製品データの置き場所
     param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
     param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
+    param_custom_dir="",      # 特注パラ(Excel)の置き場（MKPRMで作れない=DD等。系列別フォルダ）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）
     # 制御装置マスタ（号機・CNC・軸ごとの容量等）。必要容量で制御装置を絞り込むのに使う
     controller_master_csv=r"マスタ/制御装置マスタ.csv",

@@ -1626,7 +1626,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("受注番号から かんたん作成")
-        self.resize(680, 600)
+        self.resize(1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
         self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
@@ -1681,6 +1681,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
         f0.addRow("", self.lbl_cidx)
         v.addWidget(box0)
 
+        # 横長レイアウト: 場所(上・全幅) の下を 左(検索＋結果) / 右(制御装置＋出力) に分割
+        mid = QtWidgets.QHBoxLayout()
+        col_left = QtWidgets.QVBoxLayout()
+        col_right = QtWidgets.QVBoxLayout()
+        mid.addLayout(col_left, 3)
+        mid.addLayout(col_right, 2)
+        v.addLayout(mid, 1)
+
         # --- ① 受注伝票番号 ---
         box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
         f1 = QtWidgets.QVBoxLayout(box1)
@@ -1709,8 +1717,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_found = QtWidgets.QLabel("製品データの場所から、傾斜(T)・回転(R)を探します。")
         self.lbl_found.setStyleSheet("color:#6b7280;")
         self.found_lay.addWidget(self.lbl_found)
-        f1.addWidget(self.found_box)
-        v.addWidget(box1)
+        # 結果一覧は件数が多いとき用にスクロール（左カラムが縦に伸びすぎないように）
+        self.found_scroll = QtWidgets.QScrollArea()
+        self.found_scroll.setWidgetResizable(True)
+        self.found_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.found_scroll.setWidget(self.found_box)
+        f1.addWidget(self.found_scroll, 1)
+        col_left.addWidget(box1, 1)
 
         # --- ② 制御装置 ---
         box2 = QtWidgets.QGroupBox("② 作れる制御装置（号機）を選ぶ")
@@ -1739,7 +1752,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         b_scan.setToolTip("号機の一覧を管理。手入力で追加・編集・削除、BASICから自動取り込みもできる")
         b_scan.clicked.connect(self._scan_basics)
         f2.addRow("", b_scan)
-        v.addWidget(box2)
+        col_right.addWidget(box2)
 
         # --- ③ 出力 ---
         box3 = QtWidgets.QGroupBox("③ 出力先を確認して「作成」")
@@ -1768,7 +1781,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_origin.setToolTip("レファレンス点復帰/原点確立のビットをON/OFFします。"
                                    "既定は1815 #5(APZ)。違うビットなら設定で変更可")
         f3.addRow("原点確立", self.cmb_origin)
-        v.addWidget(box3)
+        col_right.addWidget(box3)
+        col_right.addStretch(1)             # 右カラムは上詰め
 
         self.lbl_basic_dir = QtWidgets.QLabel("")
         self.lbl_basic_dir.setStyleSheet("color:#6b7280; font-size:11px;")

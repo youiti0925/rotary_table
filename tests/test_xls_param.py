@@ -156,6 +156,7 @@ class TestIndex(unittest.TestCase):
         self.assertEqual(len(recs), 1)                 # OLDは除外
         self.assertEqual(recs[0]["model"], "RTT-135,BA")
         self.assertEqual(recs[0]["dd"], "1")           # 2300 #2=1
+        self.assertEqual(recs[0]["values"]["2300"], "1***111*")  # B案：値も取り込む
 
     def test_index_roundtrip_and_search(self):
         d = self._tree()
@@ -164,6 +165,9 @@ class TestIndex(unittest.TestCase):
         X.write_index(str(idx), recs)
         loaded = X.read_index(str(idx))
         self.assertEqual(len(loaded), 1)
+        # B案：値が JSON で往復し、フォルダを開かずに作成に使える
+        self.assertEqual(loaded[0]["values"]["2300"], "1***111*")
+        self.assertEqual(loaded[0]["values"]["2020"], "563")
         # 型式の前方一致: テンプレ "RTT-135" で製品 "RTT-135,BA" がヒット
         self.assertEqual(len(X.search_index(loaded, model="RTT-135")), 1)
         self.assertEqual(len(X.search_index(loaded, model="RTT-135,BA")), 1)

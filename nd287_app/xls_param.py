@@ -18,6 +18,7 @@ Qt非依存。ローダ(.xls=xlrd / .xlsx=openpyxl)とグリッド解析を分�
 
 import csv
 import io
+import json
 import re
 from pathlib import Path
 
@@ -243,8 +244,10 @@ def sheet_values(path, sheet_name="") -> dict:
 
 
 # ===== 特注パラ索引（事前登録＝毎回walkせず型式で引く） =====
+# 「値」列にパラメータ {番号:値} を JSON で取り込む＝登録後はフォルダ無しでも作成できる。
+# 「パス」「ファイル名」は元Excelの所在として残し、何かあったとき調査に使う。
 INDEX_HEADER = ["型式", "製番", "種別", "モーター", "DD", "番地数", "シート",
-                "ファイル名", "パス", "更新"]
+                "ファイル名", "パス", "更新", "値"]
 
 
 def _normmodel(s) -> str:
@@ -281,7 +284,7 @@ def index_records(custom_dir, progress=None) -> list:
                         "kind": sh.get("kind", ""), "motor": sh.get("motor", ""),
                         "dd": "1" if sh.get("dd") else "", "naddr": len(sh["values"]),
                         "sheet": sh.get("sheet", ""), "name": p.name, "path": str(p),
-                        "mtime": mtime})
+                        "mtime": mtime, "values": dict(sh["values"])})
         if progress:
             progress(p.name)
     return out
@@ -292,10 +295,11 @@ def write_index(path, records):
         w = csv.writer(f)
         w.writerow(INDEX_HEADER)
         for r in records:
+            vj = json.dumps(r.get("values") or {}, ensure_ascii=False)
             w.writerow([r.get("model", ""), r.get("serial", ""), r.get("kind", ""),
                         r.get("motor", ""), r.get("dd", ""), r.get("naddr", ""),
                         r.get("sheet", ""), r.get("name", ""), r.get("path", ""),
-                        r.get("mtime", "")])
+                        r.get("mtime", ""), vj])
 
 
 def read_index(path) -> list:
@@ -318,7 +322,13 @@ def read_index(path) -> list:
     for row in rows[1:]:
         if not any(c.strip() for c in row):
             continue
-        out.append({k: (row[i] if i < len(row) else "") for i, k in enumerate(keys)})
+        rec = {k: (row[i] if i < len(row) else "") for i, k in enumerate(keys)}
+        vj = row[10] if len(row) > 10 else ""   # 「値」列＝取り込んだ {番号:値}
+        try:
+            rec["values"] = json.loads(vj) if vj else {}
+        except Exception:
+            rec["values"] = {}
+        out.append(rec)
     return out
 
 

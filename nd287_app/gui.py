@@ -2062,7 +2062,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 "voltage": seiban_flow.motor_voltage(motor), "dd": str(rec.get("dd", "")) == "1"}
         nm = rec.get("name", "") + (f"：{rec['sheet']}" if rec.get("sheet") else "")
         return {"kind": meta["kind"], "name": nm, "meta": meta, "source": "custom",
-                "path": rec.get("path", ""), "sheet_name": rec.get("sheet", "")}
+                "path": rec.get("path", ""), "sheet_name": rec.get("sheet", ""),
+                "values": dict(rec.get("values") or {})}   # 索引に取り込んだ数値（フォルダ不要）
 
     def _reindex_custom(self):
         """特注パラフォルダを全件読み込んで索引を作り直す（少し時間がかかる）。"""
@@ -2083,7 +2084,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
             QtWidgets.QApplication.restoreOverrideCursor()
         self._refresh_cidx_note()
         QtWidgets.QMessageBox.information(
-            self, "索引", f"特注パラを索引に登録しました（{len(self._custom_index)}件）。")
+            self, "索引",
+            f"特注パラを索引に登録しました（{len(self._custom_index)}件）。\n"
+            "パラメータの数値も索引に取り込んだので、登録後はフォルダが無くても作成できます。\n"
+            "元Excelの場所も索引に残しているので、何かあればすぐ調べられます。\n"
+            "※ 新しい特注パラが入った／中身を直したときは、もう一度この『索引を更新』を押してください。")
 
     def _refresh_cidx_note(self):
         n = len(self._custom_index)
@@ -2223,8 +2228,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         for f, a in zip(sel, asg):
             axnum = seiban_flow_axis(a)
             if f.get("source") == "custom":
-                sh = xls_param.sheet_values(f.get("path", ""), f.get("sheet_name", ""))
-                vals = dict(sh.get("values", {})) if sh else {}   # 特注Excelを1枚だけ読む
+                vals = dict(f.get("values") or {})         # 索引に取り込んだ数値（フォルダ不要）
+                if not vals:                               # 古い索引（値未取込）→元Excelを読む
+                    sh = xls_param.sheet_values(f.get("path", ""), f.get("sheet_name", ""))
+                    vals = dict(sh.get("values", {})) if sh else {}
             else:
                 try:
                     ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")

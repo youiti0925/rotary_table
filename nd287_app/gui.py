@@ -1644,6 +1644,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
             ipath = str(app_dir() / ipath)
         self._cindex_path = ipath
         self._custom_index = xls_param.read_index(ipath)
+        # パラメータDB（実機ダンプ由来などの登録済み変更点）。型式/受注番号で候補に混ぜる
+        dbpath = settings.get("param_change_csv", "")
+        if dbpath and not Path(dbpath).is_absolute():
+            dbpath = str(app_dir() / dbpath)
+        self._db_path = dbpath
+        self._db_entries = nc_param.load_entries(dbpath)
         self._cand = []           # 候補 [(controller, [軸文字,...])]
 
         v = QtWidgets.QVBoxLayout(self)
@@ -1651,7 +1657,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         v.addWidget(title)
         flow = QtWidgets.QLabel("① 受注番号で探す → ② 号機を選ぶ → ③ 作成。"
-                                "（特注/DDは『型式で探す』）")
+                                "（特注/DD・登録(DB)は『型式で探す』でも出ます）")
         flow.setStyleSheet("color:#475569;")
         v.addWidget(flow)
         # 「次にやること」を常に表示（初心者でも迷わないライブガイド）
@@ -1990,11 +1996,23 @@ class ParamWizardDialog(QtWidgets.QDialog):
         recs += xls_param.search_index(self._custom_index, seiban=seiban)
         for rec in self._dedup_recs(recs):
             items.append(self._custom_item(rec))
+        # ③ パラメータDB（実機ダンプ由来など登録済みの変更点）も型式・受注番号で候補に
+        db_hits = []
+        for m in models:
+            db_hits += self._db_by_model(m)
+        db_hits += self._db_by_seiban(seiban)
+        for e in self._dedup_entries(db_hits):
+            items.append(self._db_item(e))
         if not items:
             self.lbl_found.setText(self._not_found_msg(seiban, models))
             self._update_candidates(); return
+        extra = []
+        if models and recs:
+            extra.append(f"特注は型式 {('・'.join(sorted(models)))} で照合")
+        if db_hits:
+            extra.append("DB＝登録済みの変更点（実機吸い取り等）")
         note = ("見つかったものにチェック（両方／必要な方）"
-                + (f"　※特注は型式 {('・'.join(sorted(models)))} で照合" if models and recs else ""))
+                + (f"　※{' / '.join(extra)}" if extra else ""))
         self.lbl_found.setText(note)
         for fdict in items:
             self.found_lay.addWidget(self._make_found_checkbox(fdict))
@@ -2002,23 +2020,33 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._update_candidates()
 
     def search_by_model(self):
-        """型式で特注パラ索引を引いて候補を出す（受注番号が無い/特注を直接出すとき）。"""
+        """型式で特注パラ索引＋パラメータDBを引いて候補を出す（受注番号が無い/特注やDBを直接出す）。"""
         model = self.e_model.text().strip()
         self._clear_found()
         if not model:
             self.lbl_found.setText("型式を入力してください。")
             self._update_candidates(); return
         recs = self._dedup_recs(xls_param.search_index(self._custom_index, model=model))
-        if not recs:
+        db_hits = self._dedup_entries(self._db_by_model(model))
+        if not recs and not db_hits:
             n = len(self._custom_index)
             self.lbl_found.setText(
-                f"型式『{model}』の特注パラは索引にありません（索引 {n}件）。"
-                + ("" if n else "　まず『索引を更新』を押してください。"))
+                f"型式『{model}』の特注パラ・登録(DB)は見つかりません（特注索引 {n}件）。"
+                + ("" if n else "　特注を使うなら、まず『索引を更新』を押してください。"))
             self._update_candidates(); return
+        bits = []
+        if recs:
+            bits.append(f"特注パラ {len(recs)}件")
+        if db_hits:
+            bits.append(f"登録(DB) {len(db_hits)}件")
         self.lbl_found.setText(
-            f"型式『{model}』の特注パラ {len(recs)}件。チェックして作成（出力名用にSeibanも入力）:")
+            f"型式『{model}』の {('・'.join(bits))}。チェックして作成（出力名用にSeibanも入力）:")
         for rec in recs:
             fdict = self._custom_item(rec)
+            self.found_lay.addWidget(self._make_found_checkbox(fdict))
+            self._files.append(fdict)
+        for e in db_hits:
+            fdict = self._db_item(e)
             self.found_lay.addWidget(self._make_found_checkbox(fdict))
             self._files.append(fdict)
         self._update_candidates()
@@ -2044,10 +2072,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if not pd or not Path(pd).is_dir():
             return ("製品データの場所が未設定です。上の「場所」欄で指定してください。"
                     "（特注パラだけ探すなら『型式で探す』）")
-        base = f"Seiban『{seiban}』の製品データが見つかりませんでした。"
+        base = f"Seiban『{seiban}』の製品データ・登録(DB)が見つかりませんでした。"
         if not self._custom_index:
             return base + "\n特注パラを使うなら『索引を更新』を押してから『型式で探す』。"
-        return base + "\n特注パラは『型式で探す』で型式から探せます。"
+        return base + "\n特注パラ・登録(DB)は『型式で探す』で型式から探せます。"
 
     def _custom_item(self, rec):
         """特注パラ索引レコード → 検索結果アイテム（値は作成時に1枚だけ読む＝速い）。"""
@@ -2064,6 +2092,54 @@ class ParamWizardDialog(QtWidgets.QDialog):
         return {"kind": meta["kind"], "name": nm, "meta": meta, "source": "custom",
                 "path": rec.get("path", ""), "sheet_name": rec.get("sheet", ""),
                 "values": dict(rec.get("values") or {})}   # 索引に取り込んだ数値（フォルダ不要）
+
+    def _db_item(self, e):
+        """パラメータDBエントリ → 検索結果アイテム（登録済みの変更点をそのまま使う）。
+
+        実機ダンプ−BASICで起こして登録した変更点（source=="diff"）や手入力登録など。
+        値はDBが持っているので、製品データ/特注フォルダが無くても作成できる。
+        """
+        motor = e.motor or ""
+        cap = seiban_flow.standard_capacity(motor)         # DiSは""→手入力
+        src = "標準" if cap else ""
+        if not cap and self._motor_caps:
+            cap = seiban_flow.capacity_for_motor(self._motor_caps, "", motor)
+            src = "対応表" if cap else ""
+        kind = e.kind or "回転"
+        meta = {"model": e.model, "kind": kind, "motor": motor, "system": "FANUC",
+                "capacity": cap, "capacity_src": src,
+                "voltage": seiban_flow.motor_voltage(motor),
+                "dd": xls_param.is_dd(e.values(), motor=motor, gear=e.gear)}
+        tail = "　".join(b for b in (e.controller, e.axis, e.seiban, e.date) if b)
+        nm = "DB" + (f"：{tail}" if tail else f"：{e.model}")
+        return {"kind": kind, "name": nm, "meta": meta, "source": "db",
+                "values": dict(e.values())}
+
+    def _db_by_model(self, model):
+        """パラメータDBを型式（前方一致を含む）で引く。特注索引と同じ照合にする。"""
+        nm = xls_param._normmodel(model)
+        if not nm:
+            return []
+        out = []
+        for e in self._db_entries:
+            em = xls_param._normmodel(e.model)
+            if em and (em == nm or em.startswith(nm) or nm.startswith(em)):
+                out.append(e)
+        return out
+
+    def _db_by_seiban(self, seiban):
+        s = (seiban or "").strip()
+        return [e for e in self._db_entries if s and (e.seiban or "").strip() == s]
+
+    @staticmethod
+    def _dedup_entries(entries):
+        seen, out = set(), []
+        for e in entries:
+            k = e.id or id(e)
+            if k in seen:
+                continue
+            seen.add(k); out.append(e)
+        return out
 
     def _reindex_custom(self):
         """特注パラフォルダを全件読み込んで索引を作り直す（少し時間がかかる）。"""
@@ -2098,8 +2174,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _make_found_checkbox(self, fdict):
         meta = fdict["meta"]
         is_fanuc = meta.get("system", "FANUC") == "FANUC"
-        tag = "FANUC特注" + ("DD" if meta.get("dd") else "") if fdict.get("source") == "custom" \
-            else (meta.get("system") or "FANUC")
+        src = fdict.get("source")
+        if src == "custom":
+            tag = "FANUC特注" + ("DD" if meta.get("dd") else "")
+        elif src == "db":
+            tag = "登録(DB)" + ("DD" if meta.get("dd") else "")
+        else:
+            tag = meta.get("system") or "FANUC"
         parts = [f"型式 {meta.get('model') or '—'}", tag, fdict["kind"]]
         if meta.get("motor"):
             parts.append(meta["motor"])
@@ -2114,8 +2195,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         chk.setChecked(is_fanuc)
         if not is_fanuc:
             chk.setStyleSheet("color:#b45309;")
-        elif fdict.get("source") == "custom":
+        elif src == "custom":
             chk.setStyleSheet("color:#7c3aed;")    # 特注は紫で区別
+        elif src == "db":
+            chk.setStyleSheet("color:#0f766e;")    # 登録(DB)は緑で区別
         chk.stateChanged.connect(self._update_candidates)
         fdict["chk"] = chk
         return chk
@@ -2227,7 +2310,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         axis_values, per_meta = {}, {}
         for f, a in zip(sel, asg):
             axnum = seiban_flow_axis(a)
-            if f.get("source") == "custom":
+            if f.get("source") == "db":
+                vals = dict(f.get("values") or {})         # パラメータDBの登録済み変更点
+            elif f.get("source") == "custom":
                 vals = dict(f.get("values") or {})         # 索引に取り込んだ数値（フォルダ不要）
                 if not vals:                               # 古い索引（値未取込）→元Excelを読む
                     sh = xls_param.sheet_values(f.get("path", ""), f.get("sheet_name", ""))

@@ -55,7 +55,7 @@ def get_value(text: str, number, label: str = None):
     """
     num = _norm_num(number)
     for line in text.splitlines():
-        if param_number(line) == num:
+        if _norm_num(param_number(line)) == num:   # 行側のゼロ詰めゆらぎも吸収
             for (g, t, v) in segments(line):
                 if label is None or g.upper() == label.upper():
                     return v
@@ -73,7 +73,7 @@ def set_value(text: str, number, value, label: str = None) -> tuple:
     lines = text.split("\n")
     done = False
     for i, line in enumerate(lines):
-        if done or param_number(line) != num:
+        if done or _norm_num(param_number(line)) != num:
             continue
         m = _LINE.match(line)
         prefix, head, body = m.group(1), m.group(2), m.group(4)  # 先頭余白/N#####Q1/本体

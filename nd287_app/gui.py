@@ -2192,7 +2192,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         else:
             parts.append("⚠ 今はFANUCのみ作成可")
         chk = QtWidgets.QCheckBox(" / ".join(parts) + f"　（{fdict['name']}）")
-        chk.setChecked(is_fanuc)
+        # 同じ種別（傾斜/回転）が既にチェック済みなら2件目以降は外して出す。
+        # 製品ファイル＋同型式のDB登録などの重複を「2軸ぶん必要」と誤解釈しないため
+        # （必要ならユーザーがチェックを付け替える）。
+        covered = {f["kind"] for f in self._files
+                   if f.get("chk") and f["chk"].isChecked()}
+        chk.setChecked(is_fanuc and fdict["kind"] not in covered)
         if not is_fanuc:
             chk.setStyleSheet("color:#b45309;")
         elif src == "custom":
@@ -7170,8 +7175,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ※ピッチエラー補正(P補正)はここには入れない（明示操作のときだけ）。
         """
         devs = {}
+        data = self.data or {}                 # 測定前(None)に呼ばれても落ちない
         for key in SERIES_KEYS:
-            targets, measured = self.data.get(key, ([], []))
+            targets, measured = data.get(key, ([], []))
             if not targets:
                 continue
             dev = list(deviation_sec(targets, measured))

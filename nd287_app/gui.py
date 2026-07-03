@@ -46,6 +46,7 @@ from .analysis import (
     slope,
     summarize,
 )
+from . import iso230
 from .pcorr import apply_compensation, compensation_table
 from .bs_format import (SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs,
                         save_bs, unpack_dms)
@@ -5245,6 +5246,92 @@ class GraphZoomDialog(QtWidgets.QDialog):
         layout.addLayout(bottom)
 
 
+class Iso230Dialog(QtWidgets.QDialog):
+    """JIS B 6190-2（ISO 230-2）の位置決め精度評価を表示する（読み取り専用）。
+
+    再現性測定のデータから A（双方向位置決め精度）/ R（繰返し性）/ E / M / B を
+    計算して一覧にする。既存の再現性の数値・保存・.RS出力には影響しない追加表示。
+    """
+
+    def __init__(self, win, stats, meta=None):
+        super().__init__(win)
+        self.setWindowTitle("JIS B 6190-2（ISO 230-2）評価")
+        self.resize(760, 560)
+        self._stats = stats
+        self._meta = meta or {}
+        v = QtWidgets.QVBoxLayout(self)
+
+        intro = QtWidgets.QLabel(
+            "再現性測定の読みを JIS B 6190-2（ISO 230-2）の式で評価した結果です。"
+            "検査成績書・お客様への提出値に使えます（↑=CW、↓=CCW、単位は秒[\"]）。")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe;"
+                            "border-radius:4px; padding:6px;")
+        v.addWidget(intro)
+
+        # 軸まとめ（A/R/E/M/B）
+        rows = iso230.axis_rows(stats)
+        t1 = QtWidgets.QTableWidget(len(rows), 2)
+        t1.setHorizontalHeaderLabels(["項目", "値"])
+        t1.verticalHeader().setVisible(False)
+        t1.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for i, (label, val) in enumerate(rows):
+            it0 = QtWidgets.QTableWidgetItem(label)
+            it1 = QtWidgets.QTableWidgetItem(val)
+            if i in (0, 3):                       # A と R は主要値なので太字
+                f = it0.font(); f.setBold(True)
+                it0.setFont(f); it1.setFont(f)
+            t1.setItem(i, 0, it0); t1.setItem(i, 1, it1)
+        t1.resizeColumnsToContents()
+        t1.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(t1, 2)
+
+        # 位置別（x̄i↑/2si↑/Bi/Ri）
+        headers = ["角度", "n↑", "x̄i↑", "2si↑", "n↓", "x̄i↓", "2si↓", "Bi", "Ri"]
+        prow = iso230.position_rows(stats)
+        t2 = QtWidgets.QTableWidget(len(prow), len(headers))
+        t2.setHorizontalHeaderLabels(headers)
+        t2.verticalHeader().setVisible(False)
+        t2.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for i, row in enumerate(prow):
+            for j, text in enumerate(row):
+                t2.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+        t2.resizeColumnsToContents()
+        v.addWidget(t2, 3)
+
+        notes = QtWidgets.QLabel("\n".join(f"※ {n}" for n in stats["notes"]))
+        notes.setWordWrap(True)
+        notes.setStyleSheet("color:#64748b;")
+        v.addWidget(notes)
+
+        bottom = QtWidgets.QHBoxLayout()
+        b_csv = QtWidgets.QPushButton("CSVで保存…")
+        b_csv.setToolTip("この評価表をCSVに保存（Excelで開いて成績書に貼れる）")
+        b_csv.clicked.connect(self._save_csv)
+        bottom.addWidget(b_csv)
+        bottom.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        bottom.addWidget(b_close)
+        v.addLayout(bottom)
+
+    def _save_csv(self):
+        name = "JIS評価"
+        if self._meta.get("機番"):
+            name = f"{self._meta['機番']}_JIS評価"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "JIS評価をCSVで保存", f"{name}.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
+                f.write(iso230.to_csv_text(self._stats, self._meta))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "保存", f"保存に失敗しました:\n{e}")
+            return
+        self.parent().statusBar().showMessage(f"JIS評価を保存しました: {path}")
+
+
 class HelpDialog(QtWidgets.QDialog):
     """アプリ全体＋新機能の詳細ヘルプ（左に見出し一覧・右に本文）。"""
 
@@ -5926,9 +6013,15 @@ class MainWindow(QtWidgets.QMainWindow):
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(2, 0, 2, 0)
         bar.setSpacing(10)
+        self.b_jis = QtWidgets.QPushButton("JIS評価")
+        self.b_jis.setToolTip(
+            "再現性データを JIS B 6190-2（ISO 230-2）の A/R/E/M/B で評価して表示"
+            "（再現性・分割+再現の測定後／ロード後に使えます）")
+        self.b_jis.clicked.connect(self.show_iso230)
         bar.addWidget(ops_group)
         bar.addWidget(self.corr_bar)        # 補正前/後（分割系のみ表示）
         bar.addWidget(self.b_zoom)          # グラフ拡大（全モードで常に表示）
+        bar.addWidget(self.b_jis)           # JIS B 6190-2 評価（再現データがあるとき）
         bar.addWidget(self.b_adjmark)       # 隣接位置マークの表示トグル
         bar.addWidget(self.counts)          # データ数（グラフ拡大の右・小さめ）
         bar.addWidget(self.live)
@@ -8203,6 +8296,20 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = GraphZoomDialog(self)
         dlg.setWindowState(QtCore.Qt.WindowMaximized)
         dlg.exec()
+
+    def show_iso230(self):
+        """再現性データを JIS B 6190-2（ISO 230-2）で評価して表示する"""
+        if not self.has_repeat_data():
+            self.statusBar().showMessage(
+                "JIS評価には再現性データが必要です（回転/傾斜再現性、または分割+再現の測定・ロード後）")
+            return
+        stats = iso230.iso_stats(self.rep_points, self.rep_data)
+        meta = {"型式": self.e_model.text().strip(),
+                "機番": self.e_machine.text().strip(),
+                "測定日": self.e_date.date().toString("yyyy/MM/dd"),
+                "測定者": self.e_operator.text().strip(),
+                "温度": self.e_temp.text().strip()}
+        Iso230Dialog(self, stats, meta).exec()
 
     def show_pitch_correction(self):
         """ピッチエラー補正（提出用）ダイアログを開く（分割のホイールデータが必要）"""

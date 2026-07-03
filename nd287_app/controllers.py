@@ -67,7 +67,9 @@ def controller_from_basic_text(text, unit):
         amr = g("2165", lab)
         caps[letter] = amr_to_capacity(amr)
         mid = g("2020", lab)
-        amps[letter] = f"ID{mid}/AMR{amr}" if (mid or amr) else ""
+        # 片方しか無い軸で "IDNone/…" のような文字列をマスタへ書かない
+        amps[letter] = "/".join(
+            p for p in (f"ID{mid}" if mid else "", f"AMR{amr}" if amr else "") if p)
     return Controller(unit, caps=caps, amps=amps)
 
 

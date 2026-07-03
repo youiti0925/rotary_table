@@ -39,9 +39,12 @@ def find_seiban_files(folder, seiban) -> list:
         if not m:
             continue
         prefix = m.group(1)
-        # 頭文字の直後（または名前のどこか）に Seiban を含む
+        # 頭文字の「直後」に Seiban が続くものだけ（出力名の規則そのまま）。
+        # 「名前のどこかに含む」まで緩めると、型式名ファイル（RTT-137_<製番>.prm が
+        # 回転扱い）や 2軸出力（TR<製番>.prm が傾斜扱い）を誤って拾ってしまう。
+        # "R50014364 (1).prm" のような直後＋補足つきは引き続きヒットする。
         rest = stem[1:]
-        if s.upper() in rest and prefix not in found:
+        if rest.startswith(s.upper()) and prefix not in found:
             found[prefix] = {"kind": PREFIX_KIND[prefix], "prefix": prefix,
                              "path": str(p), "name": p.name}
     return [found[k] for k in ("T", "R") if k in found]
@@ -255,7 +258,13 @@ def read_product_meta(text: str, *, kind="", motor_caps=None) -> dict:
             "voltage": "", "system": "", "amp_model": "", "motor": "", "motor_no": "",
             "motor_id": "", "gear": "", "direction": "", "sep_detector": "",
             "mode_hint": ""}
-    if not text or fanuc_param.looks_like_fanuc_prm(text):
+    if not text:
+        return meta
+    if fanuc_param.looks_like_fanuc_prm(text):
+        # N#####Q1…はFANUC実機ネイティブ形式そのもの。ヘッダが無く型式・モーター
+        # は不明だが、系統は FANUC として扱う（""のままだと かんたん作成が
+        # 「FANUC以外」と誤ブロックしてしまう）。容量は空＝手動選択になる。
+        meta["system"] = "FANUC"
         return meta
     try:
         doc = prm_format.parse_prm(text)

@@ -46,6 +46,17 @@ class TestFindSeibanFiles(unittest.TestCase):
         (Path(d) / "T111.prm").write_text("%\n", encoding="cp932")
         self.assertEqual(S.find_seiban_files(d, "999"), [])
 
+    def test_model_named_and_tr_output_not_matched(self):
+        # 型式名ファイル(RTT-137_…)や2軸出力(TR…)を誤って製品と判定しない
+        d = tempfile.mkdtemp()
+        for n in ("RTT-137_50013078.prm", "TR50013078.prm"):
+            (Path(d) / n).write_text("%\n", encoding="cp932")
+        self.assertEqual(S.find_seiban_files(d, "50013078"), [])
+        # 頭文字直後＋補足つき（コピー等）は引き続きヒットする
+        (Path(d) / "R50013078 (1).prm").write_text("%\n", encoding="cp932")
+        got = S.find_seiban_files(d, "50013078")
+        self.assertEqual([f["kind"] for f in got], ["回転"])
+
 
 class TestDeriveCapacity(unittest.TestCase):
     def test_alpha_amp(self):

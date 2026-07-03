@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .analysis import deviation_sec, judge_minmax
+from .analysis import deviation_sec, judge_minmax, rep_unwrap
 from .sequence import SERIES_KEYS, SERIES_LABELS
 
 RESULT_LABELS = {
@@ -183,8 +183,9 @@ def save_repeat_csv(path, points, data, rsum, meta=None):
         for i, angle in enumerate(points):
             for dirn, label in (("cw", "CW"), ("ccw", "CCW")):
                 for r, v in enumerate(data.get((dirn, i), []), start=1):
+                    dev = (rep_unwrap(angle, v) - angle) * 3600.0  # 0/360またぎ対策
                     w.writerow(
-                        [i + 1, f"{angle:.4f}", label, r, f"{v:.6f}", f"{(v - angle) * 3600.0:.2f}"]
+                        [i + 1, f"{angle:.4f}", label, r, f"{v:.6f}", f"{dev:.2f}"]
                     )
         w.writerow([])
         w.writerow(["項目", "値"])

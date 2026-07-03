@@ -63,6 +63,17 @@ def pack_dms(deg: float) -> int:
     return -val if deg < 0 else val
 
 
+def unpack_dms(val) -> float:
+    """DDMMSS パック整数 → 十進度（pack_dms の逆変換）。
+
+    例: 223000 → 22.5°、3000 → 0.5°、-1800000 → -180°。
+    """
+    v = abs(int(val))
+    d, m, s = v // 10000, (v // 100) % 100, v % 100
+    deg = join_dms(d, m, s)
+    return -deg if val < 0 else deg
+
+
 def parse_bs(text: str) -> dict:
     """.BSテキストを解析する。"""
     lines = text.splitlines()

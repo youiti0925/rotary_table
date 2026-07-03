@@ -63,8 +63,8 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "") -> tuple:
     doc = prm_format.parse_prm(raw)
     if seiban:
         prm_format.header_set(doc, "Seiban", seiban)
-    missing = [n for n in values if prm_format.param_value(doc, n) is None]
-    prm_format.apply_values(doc, values)
+    # missing は「実際に書けたか」で決める（列数が足りない行を書けたことにしない）
+    missing = prm_format.apply_values(doc, values)
     return prm_format.format_prm(doc), missing, "headercsv"
 
 
@@ -126,8 +126,8 @@ def with_servo_options(raw: str, axis, values: dict, *, zero_motor=False,
         if key is not None:
             base = resolve_product_values(raw, {key: out[key]}, axis).get(key, out[key])
         else:
-            base = (fanuc_param.get_value(raw, num, f"A{axis}")
-                    or fanuc_param.get_value(raw, num) or "00000000")
+            # 実際に書き込むスロットの値を基準に（別軸の値をビット基準にしない）
+            base = fanuc_param.value_on_axis(raw, num, axis) or "00000000"
             key = str(num)
         out[key] = fanuc_param.set_bit_value(base, int(bit), on)
 
@@ -215,14 +215,13 @@ def preview_rows_multi(raw: str, axis_values: dict, common: dict = None) -> list
         for num, newv in vals.items():
             if newv == "":
                 continue
-            old = fanuc_param.get_value(raw, num, f"A{ax}")
-            if old is None:
-                old = fanuc_param.get_value(raw, num)
+            # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
+            old = fanuc_param.value_on_axis(raw, num, ax)
             rows.append((str(num), ax, "" if old is None else str(old), str(newv)))
     for num, newv in resolve_product_values(raw, common, None).items():
         if newv == "":
             continue
-        old = fanuc_param.get_value(raw, num)
+        old = fanuc_param.common_value(raw, num)
         rows.append((str(num), "", "" if old is None else str(old), str(newv)))
     return rows
 
@@ -267,9 +266,8 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
         if newv == "":
             continue
         if is_fanuc:
-            old = fanuc_param.get_value(raw, num, f"A{axis}")
-            if old is None:
-                old = fanuc_param.get_value(raw, num)
+            # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
+            old = fanuc_param.value_on_axis(raw, num, axis)
         else:
             old = prm_format.param_value(doc, num) if doc else None
         rows.append((str(num), "" if old is None else str(old), str(newv)))
@@ -284,7 +282,10 @@ def detect_mode(raw: str, values: dict, axis: int, *, number="1815", bit=1,
     N形式は指定軸の値、ヘッダ＋CSV形式は番号の値を見る。
     """
     if fanuc_param.looks_like_fanuc_prm(raw):
-        eff = fanuc_param.effective_value(raw, values, number, f"A{axis}")
+        # 表示用の ' や不問ビット * を実際に書く値へ解決してから判定する
+        # （'0000001* のような製品値でもモードが読めるように）
+        vals = resolve_product_values(raw, values, axis)
+        eff = fanuc_param.effective_value(raw, vals, number, f"A{axis}")
     else:
         eff = None
         for k, v in values.items():

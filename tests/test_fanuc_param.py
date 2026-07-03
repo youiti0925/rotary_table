@@ -164,6 +164,28 @@ class TestApplyToAxis(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(F.get_value(new, "00982", "S1"), "1")
 
+    def test_set_on_axis_missing_axis_does_not_touch_other_axis(self):
+        # 行に A1..A4 しか無いのに軸5を要求 → 失敗を返し、A1(X軸)には書かない
+        new, ok = F.set_on_axis(SAMPLE, "1825", "9999", 5)
+        self.assertFalse(ok)
+        self.assertEqual(new, SAMPLE)                      # 1バイトも変えない
+        self.assertEqual(F.get_value(SAMPLE, "1825", "A1"), "3000")
+
+    def test_set_common_does_not_touch_axis_segments(self):
+        # 軸(A1..A4)にしか無い番号を共通スロットへ → 失敗（A1へ書かない）
+        new, ok = F.set_common(SAMPLE, "1825", "9999")
+        self.assertFalse(ok)
+        self.assertEqual(new, SAMPLE)
+
+    def test_value_on_axis_mirrors_write_slot(self):
+        # プレビューの旧値 = 実際に書くスロットの値（無ければ None）
+        self.assertEqual(F.value_on_axis(SAMPLE, "1825", 2), "3000")
+        self.assertEqual(F.value_on_axis(SAMPLE, "00002", 3), "00000000")  # 無ラベル
+        self.assertEqual(F.value_on_axis(SAMPLE, "00982", 3), "0")         # S1
+        self.assertIsNone(F.value_on_axis(SAMPLE, "1825", 5))              # 軸なし
+        self.assertEqual(F.common_value(SAMPLE, "00982"), "0")
+        self.assertIsNone(F.common_value(SAMPLE, "1825"))
+
     def test_apply_product_values_axis4(self):
         # 製品の値を A4（回転軸）へ。工程「その軸のパラメータだけ変更」を再現
         values = {"1825": "2500", "02020": "300", "00020": "8", "9999": "1"}

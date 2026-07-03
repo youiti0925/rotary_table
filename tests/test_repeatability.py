@@ -141,6 +141,21 @@ class TestRepeatabilitySummary(unittest.TestCase):
         self.assertIsNone(rsum["ccw"])
         self.assertAlmostEqual(rsum["overall"], 1.0, places=6)
 
+    def test_zero_wrap_normalized(self):
+        # 0°ブロックでカウンタが 359.9999… に巻き戻った読みが混ざっても、
+        # ±360°折り返して正しい範囲になる（以前は約129.6万秒の異常値になった）
+        rsum = repeatability_summary(
+            [0.0], {("cw", 0): [360.0 - 1 * SEC, 0.0, 1 * SEC]})
+        self.assertAlmostEqual(rsum["blocks"][0]["cw"], 2.0, places=6)
+        self.assertAlmostEqual(rsum["overall"], 2.0, places=6)
+
+    def test_no_wrap_bit_identical(self):
+        # またがない通常値は折り返し導入前と完全一致（浮動小数点まで不変）
+        vals = [90.0, 90.0 + 5 * SEC, 90.0 + 1.23456 * SEC]
+        rsum = repeatability_summary([90.0], {("cw", 0): vals})
+        self.assertEqual(rsum["blocks"][0]["cw"],
+                         (max(vals) - min(vals)) * 3600.0)
+
     def test_result_rows(self):
         points = [0.0, 90.0]
         data = {

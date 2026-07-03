@@ -218,6 +218,24 @@ class TestDetectMode(unittest.TestCase):
         mode, eff = B.detect_mode(BASIC_N, {"01815": "00000000"}, axis=4)
         self.assertEqual(mode, "セミ")
 
+    def test_quoted_star_value_resolves_before_detect(self):
+        # ヘッダ＋CSV由来の "'0000001*"（表示クォート＋不問ビット）でも、
+        # 実際に書く値へ解決してからモード判定する（以前は判定不能で""）
+        mode, eff = B.detect_mode(BASIC_N, {"1815": "'0000001*"}, axis=4)
+        self.assertEqual(mode, "フル")
+
+
+class TestHeaderCsvMissing(unittest.TestCase):
+    def test_short_row_reported_missing_not_silently_kept(self):
+        # 5列しかない行は書き換えられない → missing に出す（黙って旧値のままにしない）
+        raw = ('System Version=1\nModel=X\nSeiban=1\n'
+               '"番号","軸","和名","英名","値","説明"\n'
+               '"1815","---","","","00000010"\n')
+        new, missing, fmt = B.build_text(raw, {"1815": "00000000"}, 0, "")
+        self.assertEqual(fmt, "headercsv")
+        self.assertEqual(missing, ["1815"])
+        self.assertIn("00000010", new)     # 旧値のまま＝ただし missing で報告済み
+
 
 if __name__ == "__main__":
     unittest.main()

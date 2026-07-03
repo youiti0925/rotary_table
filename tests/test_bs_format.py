@@ -8,8 +8,10 @@ from nd287_app.bs_format import (
     doc_to_data,
     format_bs,
     join_dms,
+    pack_dms,
     parse_bs,
     split_dms,
+    unpack_dms,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "260976K_fragment.bs"
@@ -29,6 +31,16 @@ class TestDmsColumns(unittest.TestCase):
     def test_roundtrip_no_60_seconds(self):
         d, m, s = split_dms(10.0 - 1e-10)
         self.assertEqual((d, m, s), (10.0, 0.0, 0.0))
+
+    def test_unpack_dms(self):
+        # pack_dms の逆変換（.KS評価範囲の読み戻しに使用）
+        self.assertAlmostEqual(unpack_dms(223000), 22.5)     # 22°30'00"
+        self.assertAlmostEqual(unpack_dms(3000), 0.5)        # 0°30'00"
+        self.assertAlmostEqual(unpack_dms(900000), 90.0)
+        self.assertAlmostEqual(unpack_dms(-1800000), -180.0)
+        self.assertAlmostEqual(unpack_dms(0), 0.0)
+        for deg in (0.0, 0.5, 22.5, 90.5, 110.0, -30.0):
+            self.assertAlmostEqual(unpack_dms(pack_dms(deg)), deg, places=6)
 
 
 class TestParseRealFile(unittest.TestCase):

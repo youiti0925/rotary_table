@@ -40,13 +40,15 @@ from .analysis import (
     adjacent_peak,
     deviation_sec,
     pp,
+    rep_unwrap,
     repeatability_summary,
     single,
     slope,
     summarize,
 )
 from .pcorr import apply_compensation, compensation_table
-from .bs_format import SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs, save_bs
+from .bs_format import (SECTION_TO_SERIES, data_to_doc, doc_to_data, load_bs,
+                        save_bs, unpack_dms)
 from .ks_format import (
     data_to_doc as ks_data_to_doc,
     doc_to_data as ks_doc_to_data,
@@ -1947,8 +1949,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         """パラメータ閲覧/比較。A=使うBASIC、B=選択中の製品データ を初期値にする。"""
         a = self.e_basic.text().strip()
         sel = self._selected_files() or self._files
-        # 特注(Excel)は番地一覧ビューア(製品.prm前提)では開けないので .prm のものだけ
-        b = next((f["path"] for f in sel if f.get("path")), "")
+        # 特注(Excel)は番地一覧ビューア(製品.prm前提)では開けないので .prm/.txt のものだけ
+        b = next((f["path"] for f in sel
+                  if f.get("path")
+                  and Path(f["path"]).suffix.lower() in (".prm", ".txt")), "")
         ParamViewerDialog(self, self.settings, file_a=a, file_b=b).exec()
 
     def _scan_basics(self):
@@ -2300,6 +2304,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         master = self.e_basic.text().strip()
         out = self.e_out.text().strip()
         seiban = self.e_seiban.text().strip()
+        if not seiban:
+            # 型式検索から来ると未入力のことがある。空のまま作ると「R.prm」の
+            # ような名無しファイル・Seiban無しの履歴ができてしまうので必須にする
+            QtWidgets.QMessageBox.warning(
+                self, "作成", "Seiban（受注伝票番号）を入力してください（出力ファイル名になります）")
+            return
         if not master or not Path(master).is_file():
             QtWidgets.QMessageBox.warning(self, "作成", "使うBASIC（.prm）を指定してください")
             return
@@ -2346,11 +2356,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 origin_bit=int(self.settings.get("origin_bit", 5)))
             axis_values[axnum] = vals
             per_meta[axnum] = (f, a)
-        # 頭文字・ファイル名
+        # 頭文字・ファイル名（T+R が選択順で並ぶ。種別不明や重複は "TR"）
         if len(sel) >= 2:
             kinds = {"傾斜": "T", "回転": "R"}
-            ps = "".join(kinds.get(f["kind"], "") for f in sel)
-            prefix = ps if len(set(ps)) == len(sel) and "" not in ps else "TR"
+            parts = [kinds.get(f["kind"], "") for f in sel]
+            prefix = ("".join(parts) if all(parts) and len(set(parts)) == len(parts)
+                      else "TR")
         else:
             prefix = seiban_flow.KIND_PREFIX.get(sel[0]["kind"], "T")
         fname = param_build.filename(prefix, seiban)
@@ -2371,7 +2382,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         controller = nc_param.controller_from_basic(master)
         total = sum(len(v) for v in axis_values.values())
         reg = []
-        csv_path = self.settings.get("param_change_csv", "")
+        csv_path = self._db_path      # 読み込みと同じ解決済みパスへ登録（app_dir基準）
         for axnum, vals in axis_values.items():
             f, _a = per_meta[axnum]
             meta = f.get("meta", {})
@@ -2380,12 +2391,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 number=self.settings.get("closed_loop_number", "1815"),
                 bit=int(self.settings.get("closed_loop_bit", 1)),
                 full_when=int(self.settings.get("closed_loop_full", 1)))
+            n_miss = sum(1 for (_m, a) in missing if a == axnum)
             _log_param_creation(
                 self.settings, model=meta.get("model", ""), kind=f["kind"], mode=mode,
                 motor=meta.get("motor", ""), controller=controller,
                 axis=nc_param.axis_name(axnum), seiban=seiban,
                 basic=Path(master).name, out=fname,
-                applied=len(vals), total=len(vals))
+                applied=len(vals) - n_miss, total=len(vals))
             if csv_path:
                 entry = nc_param.ParamEntry(
                     model=meta.get("model", ""), kind=f["kind"], mode=mode,
@@ -3088,11 +3100,12 @@ class ParamDialog(QtWidgets.QDialog):
         reg_lines = []
         for ax in axes:
             mode, _eff = self._detect_mode(raw, per_axis[ax], ax)
+            n_miss = sum(1 for (_m, a) in missing if a == ax)
             _log_param_creation(
                 self.settings, model=model, mode=mode,
                 controller=controller, axis=nc_param.axis_name(ax),
                 seiban=seiban, basic=Path(master_path).name, out=fname,
-                applied=len(per_axis[ax]), total=len(per_axis[ax]))
+                applied=len(per_axis[ax]) - n_miss, total=len(per_axis[ax]))
             csv_path = self.e_csv.text().strip()
             if model and csv_path:
                 entry = nc_param.ParamEntry(
@@ -4047,11 +4060,13 @@ class ParamDBDialog(QtWidgets.QDialog):
         # 軸ごとにログ＋履歴登録（制御/軸/Seibanが変われば別エントリ＝履歴）
         reg = []
         for ent, ax in ((e, a1), (partner, a2)):
+            n_miss = sum(1 for (_m, a) in missing if a == ax)
             _log_param_creation(
                 self.settings, model=ent.model, kind=ent.kind, mode=ent.mode,
                 motor=ent.motor, controller=controller,
                 axis=nc_param.axis_name(ax), seiban=seiban, basic=Path(master).name,
-                out=out_path.name, applied=len(ent.values()), total=len(ent.values()))
+                out=out_path.name, applied=len(ent.values()) - n_miss,
+                total=len(ent.values()))
             if self._csv_path():
                 hist = nc_param.ParamEntry(
                     model=ent.model, kind=ent.kind, mode=ent.mode, motor=ent.motor,
@@ -5167,7 +5182,7 @@ class GraphZoomDialog(QtWidgets.QDialog):
                 angle = win.rep_points[i]
                 for v in vals:
                     xs[dirn].append(angle)
-                    ys[dirn].append((v - angle) * 3600.0)
+                    ys[dirn].append((rep_unwrap(angle, v) - angle) * 3600.0)
             plot.plot(xs["cw"], ys["cw"], pen=None, symbol="o",
                       symbolBrush="#1f77b4", symbolSize=8, name="CW")
             plot.plot(xs["ccw"], ys["ccw"], pen=None, symbol="o",
@@ -7203,7 +7218,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 angle = self.rep_points[i]
                 for v in vals:
                     xs[dirn].append(angle)
-                    ys[dirn].append((v - angle) * 3600.0)
+                    ys[dirn].append((rep_unwrap(angle, v) - angle) * 3600.0)
             self.curves["rep_cw"].setData(xs["cw"], ys["cw"])
             self.curves["rep_ccw"].setData(xs["ccw"], ys["ccw"])
             return
@@ -8051,14 +8066,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_worm.setValue(abs(worm_targets[1] - worm_targets[0]))
             self.e_range.setValue(worm_targets[-1] - worm_targets[0])
             self.e_start.setValue(worm_targets[0])
-        # 評価範囲1/2をヘッダから復元（0.0001°単位）
-        if doc.get("range1_start") is not None and doc.get("range1_end"):
-            self.e_r1s.setValue(doc["range1_start"] * 1e-4)
-            self.e_r1e.setValue(doc["range1_end"] * 1e-4)
+        # 評価範囲1/2をヘッダから復元（保存と同じ DDMMSS パック。22.5°=223000）
+        if doc.get("range1_start") is not None and doc.get("range1_end") is not None:
+            self.e_r1s.setValue(unpack_dms(doc["range1_start"]))
+            self.e_r1e.setValue(unpack_dms(doc["range1_end"]))
             self.c_r1.setChecked(True)
-        if doc.get("range2_start") is not None and doc.get("range2_end"):
-            self.e_r2s.setValue(doc["range2_start"] * 1e-4)
-            self.e_r2e.setValue(doc["range2_end"] * 1e-4)
+        if doc.get("range2_start") is not None and doc.get("range2_end") is not None:
+            self.e_r2s.setValue(unpack_dms(doc["range2_start"]))
+            self.e_r2e.setValue(unpack_dms(doc["range2_end"]))
             self.c_r2.setChecked(True)
         else:
             self.c_r2.setChecked(False)
@@ -8318,13 +8333,18 @@ class MainWindow(QtWidgets.QMainWindow):
             graphs = "<p style='margin:2px;'><img src='wheel.png' width='930'></p>"
         if self.view_kind == "repeat":
             rsum = repeatability_summary(self.rep_points, self.rep_data)
+
+            def _sec(v):
+                # 片方向しか読みが無い等で None のときは「―」（finish_repeatと同じ）
+                return f'{v:.2f}"' if v is not None else "―"
+
             rows = [(f"ブロック{i + 1} ({b['angle']:g}°)",
-                     f'CW {b["cw"]:.2f}" / CCW {b["ccw"]:.2f}"')
+                     f'CW {_sec(b["cw"])} / CCW {_sec(b["ccw"])}')
                     for i, b in enumerate(rsum["blocks"])
-                    if b["cw"] is not None and b["ccw"] is not None]
-            rows += [("再現性 CW（全ブロック最大）", f'{rsum["cw"]:.2f}"'),
-                     ("再現性 CCW（全ブロック最大）", f'{rsum["ccw"]:.2f}"'),
-                     ("再現性 総合", f'{rsum["overall"]:.2f}"')]
+                    if b["cw"] is not None or b["ccw"] is not None]
+            rows += [("再現性 CW（全ブロック最大）", _sec(rsum["cw"])),
+                     ("再現性 CCW（全ブロック最大）", _sec(rsum["ccw"])),
+                     ("再現性 総合", _sec(rsum["overall"]))]
             results = "<table style='font-size:7pt;' cellspacing='0'>" + "".join(
                 f"<tr><td style='border:1px solid #999; padding:1px 5px;'>{k}</td>"
                 f"<td style='border:1px solid #999; padding:1px 5px;'>{v}</td></tr>"

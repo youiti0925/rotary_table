@@ -30,6 +30,23 @@ def deviation_sec(targets, measured):
     return diff * 3600.0
 
 
+def rep_unwrap(angle, value):
+    """再現性の測定値を、指令角度に最も近い表現へ折り返して返す（0/360またぎ対策）。
+
+    ND287のカウンタは[0,360)へ巻き戻るため、0°ブロックで 359.9999↔0.0001 の
+    ようにまたいだ読みが混ざると生差が±360°近い異常値になる。差が±180°を
+    超えるときだけ±360°して返す。またがない通常の読みは値をそのまま返す
+    （浮動小数点まで不変＝既存出力のバイト一致を保つ）。
+    """
+    v = float(value)
+    d = v - float(angle)
+    if d > 180.0:
+        return v - 360.0
+    if d < -180.0:
+        return v + 360.0
+    return v
+
+
 def pp(dev):
     """精度PP[秒] = 偏差の最大 - 最小"""
     dev = np.asarray(dev, dtype=float)
@@ -230,6 +247,8 @@ def repeatability_summary(points, data):
         row = dict(angle=float(angle))
         for dirn in ("cw", "ccw"):
             vals = data.get((dirn, i)) or []
+            # 0/360またぎだけ折り返してから最大−最小（またがない値はビット同一）
+            vals = [rep_unwrap(angle, v) for v in vals]
             row[dirn] = (max(vals) - min(vals)) * 3600.0 if len(vals) >= 2 else None
         blocks.append(row)
 

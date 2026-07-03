@@ -114,12 +114,28 @@ def set_on_axis(text: str, number, value, axis_num) -> tuple:
     """指定軸(A<axis_num>)の値を差し替える。軸が無いパラメータは単一値(L1/S1/T1/番号なし)へ。
 
     工程: BASICの「その軸だけ」を製品値に変える、を実現する。戻り値 (新text, 成否)。
+    最後のフォールバックは「無ラベル」限定（""）。None（=先頭セグメント何でも）に
+    すると、行に A1..A4 しか無いのに軸5を要求されたとき A1（X軸）へ黙って書いて
+    しまう。該当スロットが無ければ失敗を返し、呼び側が「未反映」として報告する。
     """
-    for label in (f"A{axis_num}", "L1", "S1", "T1", None):
+    for label in (f"A{axis_num}", "L1", "S1", "T1", ""):
         new, ok = set_value(text, number, value, label)
         if ok:
             return new, True
     return text, False
+
+
+def value_on_axis(text: str, number, axis_num):
+    """set_on_axis が実際に書き込むスロットの現在値を返す（同じ探索順。無ければ None）。
+
+    プレビューの「旧値」表示に使う。単純に「最初の値」へフォールバックすると、
+    書き込み先が無いのに別軸(A1)の値が旧値として出て誤りを隠してしまう。
+    """
+    for label in (f"A{axis_num}", "L1", "S1", "T1", ""):
+        v = get_value(text, number, label)
+        if v is not None:
+            return v
+    return None
 
 
 def apply_product_values(text: str, values: dict, axis_num) -> tuple:
@@ -141,13 +157,23 @@ def set_common(text: str, number, value) -> tuple:
     """軸に属さない値(L1/S1/T1/無ラベル)だけを差し替える（A軸は触らない）。
 
     2軸テーブルで「共通(系統)パラメータ」を、誤って片方の軸へ入れないための専用版。
+    フォールバックは「無ラベル」限定（None だと先頭のA軸に書いてしまう）。
     戻り値 (新テキスト, 成否)。
     """
-    for label in ("L1", "S1", "T1", None):
+    for label in ("L1", "S1", "T1", ""):
         new, ok = set_value(text, number, value, label)
         if ok:
             return new, True
     return text, False
+
+
+def common_value(text: str, number):
+    """set_common が実際に書き込むスロットの現在値（同じ探索順。無ければ None）。"""
+    for label in ("L1", "S1", "T1", ""):
+        v = get_value(text, number, label)
+        if v is not None:
+            return v
+    return None
 
 
 def apply_common_values(text: str, values: dict) -> tuple:

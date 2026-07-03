@@ -37,6 +37,22 @@ def _mean(xs):
     return sum(xs) / len(xs) if xs else 0.0
 
 
+def _unwrap(nominal, m):
+    """0/360またぎの読みを指令角度に近い側へ折り返す（analysis.rep_unwrap と同じ規則）。
+
+    ND287カウンタは[0,360)へ巻き戻るため、0°ブロックに 359.9999 のような読みが
+    混ざると生差が±360°近い異常値として .RS に書かれてしまう。またがない通常の
+    読みは値をそのまま返す（浮動小数点まで不変＝既存出力のバイト一致を保つ）。
+    """
+    m = float(m)
+    d = m - float(nominal)
+    if d > 180.0:
+        return m - 360.0
+    if d < -180.0:
+        return m + 360.0
+    return m
+
+
 def data_to_rs_doc(rep_points, rep_data, *, model, close="", date="", operator="",
                    repeats=None) -> dict:
     """アプリの再現性データ → .RS/.RSK 構造。
@@ -47,8 +63,10 @@ def data_to_rs_doc(rep_points, rep_data, *, model, close="", date="", operator="
     """
     blocks = []
     for b, nominal in enumerate(rep_points):
-        cw = [(m - nominal) * 3600.0 for m in rep_data.get(("cw", b), [])]
-        ccw = [(m - nominal) * 3600.0 for m in rep_data.get(("ccw", b), [])]
+        cw = [(_unwrap(nominal, m) - nominal) * 3600.0
+              for m in rep_data.get(("cw", b), [])]
+        ccw = [(_unwrap(nominal, m) - nominal) * 3600.0
+               for m in rep_data.get(("ccw", b), [])]
         blocks.append((cw, ccw))
     if repeats is None:
         repeats = max((len(cw) for cw, _ in blocks), default=0)

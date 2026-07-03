@@ -141,6 +141,23 @@ class TestDataToRsDoc(unittest.TestCase):
         self.assertEqual(lines[-2], "1.000000,2.000000,1.500000")
         self.assertEqual(lines[-1], "2.000000,1.000000,1.500000")
 
+    def test_zero_wrap_normalized(self):
+        # 0°ブロックで 359.9999…（巻き戻り）の読みが混ざっても偏差±に折り返す。
+        # 以前は −1295999.x" のような異常値が .RS に書かれた
+        rep_points = [0.0]
+        rep_data = {
+            ("cw", 0): [360.0 - 1.0 / 3600.0, 1.0 / 3600.0],   # -1" と +1"
+            ("ccw", 0): [0.0, 0.0],
+        }
+        doc = data_to_rs_doc(rep_points, rep_data, model="X", close="",
+                             date="2026/01/01", operator="t", repeats=2)
+        cw, ccw = doc["blocks"][0]
+        self.assertAlmostEqual(cw[0], -1.0, places=6)
+        self.assertAlmostEqual(cw[1], 1.0, places=6)
+        text = format_rs(doc)
+        # ブロック行の CW範囲 = 2.0"（129万秒にならない）
+        self.assertIn("1,2.0,0.0,", text)
+
 
 if __name__ == "__main__":
     unittest.main()

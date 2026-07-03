@@ -105,6 +105,15 @@ class TestBasicScan(unittest.TestCase):
         self.assertEqual(ctl.caps_text(), "X:20A Y:40A Z:80A A:160A")
         self.assertIn("ID255", ctl.amps["X"])
 
+    def test_missing_2020_does_not_write_none(self):
+        # 2020(モーターID)が無いBASIC → "IDNone/AMR25" をマスタに書かない
+        basic = ("N01020Q1A1P88A2P89\r\n"
+                 "N02165Q1A1P25A2P45\r\n")
+        ctl = C.controller_from_basic_text(basic, "9")
+        self.assertEqual(ctl.amps["X"], "AMR25")
+        self.assertEqual(ctl.amps["Y"], "AMR45")
+        self.assertNotIn("None", ctl.amps["X"])
+
     def test_scan_basic_folder(self):
         d = tempfile.mkdtemp()
         (Path(d) / "F30BASIC.DAT").write_bytes(self.BASIC.encode("cp932"))

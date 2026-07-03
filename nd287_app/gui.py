@@ -4512,6 +4512,8 @@ class AnalysisDialog(QtWidgets.QDialog):
     どちらも CSV / Excel(.xlsx・グラフ入り) で出力でき、印刷もできる。
     """
 
+    _cmp_done = QtCore.Signal(int, list)   # 検索世代, 結果（過去データと同じ非同期方式）
+
     def __init__(self, win):
         super().__init__(win)
         self.win = win
@@ -4524,6 +4526,8 @@ class AnalysisDialog(QtWidgets.QDialog):
         self.single_result_rows = []
         self.single_series = None
         self._models_loaded = False
+        self._cmp_gen = 0
+        self._cmp_done.connect(self._on_compare_done)
 
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._build_compare_tab(), "横断比較")
@@ -4659,19 +4663,43 @@ class AnalysisDialog(QtWidgets.QDialog):
         return w
 
     def reload_compare(self, *args):
+        """過去データ検索をバックグラウンドで実行する。
+
+        ネットワーク共有の走査は数秒〜固まりうるので、過去データ画面と同じく
+        ワーカースレッド＋世代番号で行う（古い検索結果は捨てる）。
+        """
         root = str(self.win.settings.get("bs_save_root") or "").strip()
+        self._cmp_gen += 1
+        gen = self._cmp_gen
         if not root:
-            self.records = []
             self.win.statusBar().showMessage(
                 "分析できません：設定の「.BS/.KS保存先」が空です")
-        elif not Path(root).exists():
-            self.records = []
+            self._cmp_done.emit(gen, [])
+            return
+        if not Path(root).exists():
             self.win.statusBar().showMessage(
                 f"分析できません：保存先フォルダが存在しません（{root}）")
-        else:
-            self.records = report.search_inspection(
-                root, model=self.e_cmp_model.text(),
-                machine=self.e_cmp_machine.text(), limit=self.sp_count.value())
+            self._cmp_done.emit(gen, [])
+            return
+        self.win.statusBar().showMessage("過去データを検索中...")
+        model = self.e_cmp_model.text()
+        machine = self.e_cmp_machine.text()
+        limit = self.sp_count.value()
+
+        def work():
+            try:
+                recs = report.search_inspection(
+                    root, model=model, machine=machine, limit=limit)
+            except Exception:
+                recs = []
+            self._cmp_done.emit(gen, recs)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_compare_done(self, gen, records):
+        if gen != self._cmp_gen:
+            return                      # 新しい検索が始まっている＝古い結果は捨てる
+        self.records = records
         # 種別（回転分割/傾斜分割/再現…）で絞る＝表がごちゃつかない
         sel_mode = self.cmb_cmp_mode.currentData()
         if sel_mode:
@@ -4689,6 +4717,8 @@ class AnalysisDialog(QtWidgets.QDialog):
             self.cmb_metric.setCurrentIndex(idx)
         self.cmb_metric.blockSignals(False)
         self.update_compare_plot()
+        if self.records:
+            self.win.statusBar().showMessage(f"分析: {len(self.records)}件")
 
     def _compare_options(self):
         """グラフの選択状態 (指標, 横軸キー, 集計キー, グラフ種別) を返す"""
@@ -5352,6 +5382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dev = device
         self.settings = settings
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない
+        self._conn_dev = None     # 接続を試みているデバイス（切替の取り残し検出用）
         self.auto_mode = False    # 自動測定（SwitchBot起動＋NG自動再測定）中か
         self.auto_retries = 0
         self.auto_tilt_retries = 0      # 傾きNGでの再測定回数
@@ -5503,7 +5534,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_corr = QtWidgets.QPushButton("補正適用")
         self.b_corr.setEnabled(False)
         self.b_corr.clicked.connect(self.apply_correction)
-        self.applied_blcorr = 0.0  # 補正適用ボタンで確定した補正値
+        self.applied_blcorr = 0.0  # 補正適用ボタンで確定した実シフト量
+        self.applied_blcorr_field = 0.0  # そのとき入力欄にあった値（未適用判定用）
         self.box_blcorr, self.l_blcorr = field_box(
             "バックラッシ補正", self.e_blcorr, self.b_corr)
 
@@ -6021,6 +6053,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.active_work_id = None     # 現在処理中の作業ID（相関ID）
         self.cmd_bus = None
         self._handled_commands = set()
+        self._cmd_poll_busy = False    # 指令ポーリングの多重起動防止（二重実行対策）
         if (self.settings.get("webapp_commands_enabled")
                 and str(self.settings.get("webapp_station") or "").strip()):
             self.cmd_bus = FirestoreSync(
@@ -6043,22 +6076,32 @@ class MainWindow(QtWidgets.QMainWindow):
         """Firestoreの指令を監視し、自ステーション宛の未処理分を実行する"""
         if self.cmd_bus is None or self._connecting:
             return
+        # 前回のワーカーが生きている間は起動しない（list_documents は最長20秒。
+        # ポーリング3秒毎に重ねて起動すると、同じ pending 指令を2本のワーカーが
+        # 同時に見つけて二重実行＝SwitchBot二度押し・測定作り直しになる）
+        if getattr(self, "_cmd_poll_busy", False):
+            return
+        self._cmd_poll_busy = True
         station = str(self.settings.get("webapp_station") or "").strip()
 
         def work():
             try:
-                docs = self.cmd_bus.list_documents()
-            except Exception:
-                return
-            pending = []
-            for doc_id, fields in docs:
-                if (str(fields.get("station") or "") == station
-                        and str(fields.get("status") or "") == "pending"
-                        and doc_id not in self._handled_commands):
-                    pending.append((doc_id, fields))
-            for doc_id, fields in pending:
-                self._handled_commands.add(doc_id)
-                self._command_signal.emit({"id": doc_id, **fields})
+                try:
+                    docs = self.cmd_bus.list_documents()
+                except Exception:
+                    return
+                for doc_id, fields in docs:
+                    if (str(fields.get("station") or "") == station
+                            and str(fields.get("status") or "") == "pending"
+                            and doc_id not in self._handled_commands):
+                        # 判定と同時に処理済みへ（判定→後で追加、の隙間を無くす）
+                        self._handled_commands.add(doc_id)
+                        self._command_signal.emit({"id": doc_id, **fields})
+                # 肥大化防止（statusはdoneに更新されるので古いIDは再実行されない）
+                if len(self._handled_commands) > 2000:
+                    self._handled_commands.clear()
+            finally:
+                self._cmd_poll_busy = False
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -6616,6 +6659,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_misc.setRowCount(0)
         self._shrink_result_tables()
         self.applied_blcorr = 0.0
+        self.applied_blcorr_field = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_corr.setEnabled(False)
         self.b_take.setEnabled(True)
@@ -6682,7 +6726,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def auto_tilt_ok(self):
         """傾き判定: マスタの傾きH/W規格と突き合わせる（無ければOK扱い）"""
-        if self.view_kind != "indexing" or not self.master_judge:
+        # 分割+再現（combined）も分割データを持つので判定対象にする
+        # （indexing 限定だと複合モードでNGでも「OK」と報告してしまう）
+        if (self.view_kind not in ("indexing", "combined") or not self.data
+                or not self.master_judge):
             return True
         summary, _ = summarize(self.data, self.applied_blcorr)
         for key, limit in (
@@ -6697,7 +6744,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def auto_precision_ok(self):
         """精度判定: 単一誤差≦5/隣接誤差≦10（統一規格）を全系列で満たすか"""
-        if self.view_kind != "indexing":
+        if self.view_kind not in ("indexing", "combined") or not self.data:
             return True
         summary, _ = summarize(self.data, self.applied_blcorr)
         for key in ("wheel_cw", "wheel_ccw", "worm_cw", "worm_ccw"):
@@ -6805,6 +6852,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_conn.setEnabled(False)
         self.statusBar().showMessage("ND287を検索中...（画面はそのまま操作できます）")
         dev = self.dev
+        self._conn_dev = dev
 
         def work():
             try:
@@ -6819,6 +6867,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_connect_done(self, ok, message):
         self._connecting = False
         self.b_conn.setEnabled(True)
+        if self._conn_dev is not None and self._conn_dev is not self.dev:
+            # 接続中にプロファイル切替/設定変更で self.dev が差し替わった。
+            # 旧デバイスが開いたままだとポートを掴み続け、「接続:」表示なのに
+            # 実際は未接続になる。旧を閉じて新しいデバイスで接続し直す
+            try:
+                self._conn_dev.close()
+            except Exception:
+                pass
+            self._conn_dev = None
+            self.connect_device()
+            return
+        self._conn_dev = None
         self.statusBar().showMessage(message)
 
     def run_diagnostics(self):
@@ -7031,6 +7091,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_misc.setRowCount(0)
         self._shrink_result_tables()
         self.applied_blcorr = 0.0
+        self.applied_blcorr_field = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_corr.setEnabled(False)
         self.b_take.setEnabled(True)
@@ -7154,6 +7215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         「実シフト量」を入れて以降の計算（summarize・総合BL・保存）で共通に足す。
         """
         field = self.e_blcorr.value()
+        self.applied_blcorr_field = field                      # 未適用判定は入力欄値で
         if not field:
             self.applied_blcorr = 0.0
         elif self.is_tilt():
@@ -7697,7 +7759,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not machine_no:
             QtWidgets.QMessageBox.warning(self, "セーブ", "機番を入力してください")
             return
-        if not self.is_repeat() and self.e_blcorr.value() != self.applied_blcorr:
+        # 「未適用」は入力欄と“適用時の入力欄値”の比較で判定する。applied_blcorr は
+        # 変換後の実シフト量（回転: 入力−0°実測、傾斜: −入力）なので、入力欄と
+        # 直接比較すると適用済みでも毎回この確認が出てしまう
+        if not self.is_repeat() and self.e_blcorr.value() != self.applied_blcorr_field:
             answer = QtWidgets.QMessageBox.question(
                 self,
                 "セーブ",
@@ -7862,6 +7927,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.c_r1.setChecked(False)
         self.c_r2.setChecked(False)
         self.applied_blcorr = 0.0
+        self.applied_blcorr_field = 0.0
         self.e_blcorr.setValue(0.0)
         self.e_comment.clear()
 
@@ -7912,6 +7978,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "ロード", "測定データが入っていないファイルです")
                 return
             self.data = payload
+            # 合体測定（分割+再現）は再現性が別CSV（<機番>_再現.csv）に入っている。
+            # 一緒に読み戻さないと、モードは「+再現」なのに再現性の結果だけ
+            # 静かに消えてしまう（画面・印刷・Web同期から欠落）
+            if "+再現" in mode:
+                p = Path(path)
+                rep_path = p.with_name(f"{p.stem}_再現{p.suffix}")
+                loaded_rep = False
+                if rep_path.exists():
+                    try:
+                        _m, rkind, rpayload = load_measurement(str(rep_path))
+                        if rkind == "repeat" and rpayload[1]:
+                            self.rep_points, self.rep_data = rpayload
+                            loaded_rep = True
+                    except Exception:
+                        pass
+                if not loaded_rep:
+                    self.statusBar().showMessage(
+                        f"注意: 再現性データ（{rep_path.name}）が見つからず、分割のみ読み込みました")
 
         self.seq = None  # 取込中状態は解除
         self._reset_eval_state()  # 前回の評価条件を残さない
@@ -7945,7 +8029,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.applied_blcorr = float(meta.get(META_KEYS["blcorr"], 0.0))
         except ValueError:
             self.applied_blcorr = 0.0
-        self.e_blcorr.setValue(self.applied_blcorr)
+        # 入力欄は「入力の意味」（回転=0°位置の実測値、傾斜=減らす量）に逆変換して
+        # 復元する。実シフト量をそのまま入れると、ロード後に補正適用を押した際
+        # 別の補正として再解釈され、値が黙って変わってしまう
+        if not self.applied_blcorr:
+            field = 0.0
+        elif self.is_tilt():
+            field = -self.applied_blcorr
+        else:
+            b0 = composite_backlash_at_zero(self.data)
+            field = (self.applied_blcorr + b0 if b0 is not None
+                     else self.applied_blcorr)
+        self.e_blcorr.setValue(field)
+        self.applied_blcorr_field = self.e_blcorr.value()  # スピンの丸め後の値で一致させる
         self.b_undo.setEnabled(False)
         self.live.setText("")
         self.refresh_master_refs()
@@ -8078,6 +8174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.c_r2.setChecked(False)
         self.applied_blcorr = 0.0
+        self.applied_blcorr_field = 0.0
         self.e_blcorr.setValue(0.0)
         self.b_undo.setEnabled(False)
         self.live.setText("")

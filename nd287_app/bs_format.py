@@ -59,7 +59,14 @@ def pack_dms(deg: float) -> int:
     例: 0.5°=0°30'00"→3000、30°→300000、5°→50000、-180°→-1800000。
     """
     d, m, s = split_dms(abs(deg))
-    val = int(round(d)) * 10000 + int(round(m)) * 100 + int(round(s))
+    di, mi, si = int(round(d)), int(round(m)), int(round(s))
+    if si >= 60:                      # 59.6" などの四捨五入は分へ繰り上げる
+        si -= 60
+        mi += 1
+    if mi >= 60:
+        mi -= 60
+        di += 1
+    val = di * 10000 + mi * 100 + si
     return -val if deg < 0 else val
 
 

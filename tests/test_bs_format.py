@@ -32,6 +32,13 @@ class TestDmsColumns(unittest.TestCase):
         d, m, s = split_dms(10.0 - 1e-10)
         self.assertEqual((d, m, s), (10.0, 0.0, 0.0))
 
+    def test_pack_dms_carries_rounded_seconds(self):
+        # 2°00'59.6" は 2°01'00" へ繰り上げ（以前は 20060 という不正DMSになった）
+        self.assertEqual(pack_dms(2.0 + 59.6 / 3600.0), 20100)
+        self.assertEqual(pack_dms(0.5), 3000)      # 通常値は従来どおり
+        self.assertEqual(pack_dms(30.0), 300000)
+        self.assertEqual(pack_dms(1.0 - 0.4 / 3600.0), 10000)  # 59.6分→1°へも繰り上げ
+
     def test_unpack_dms(self):
         # pack_dms の逆変換（.KS評価範囲の読み戻しに使用）
         self.assertAlmostEqual(unpack_dms(223000), 22.5)     # 22°30'00"

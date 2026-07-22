@@ -66,6 +66,7 @@ from .masters import (
 )
 from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
+from . import controller_import
 from . import help_text
 from .export import (
     MODE_KEY,
@@ -1368,12 +1369,13 @@ class ControllerMasterDialog(QtWidgets.QDialog):
 
     COLS = ["号機", "CNC", "電圧", "容量", "軸数"]
 
-    def __init__(self, parent, master_path, basic_dir=""):
+    def __init__(self, parent, master_path, basic_dir="", settings=None):
         super().__init__(parent)
         self.setWindowTitle("制御装置マスタ（登録・編集）")
         self.resize(640, 520)
         self.master_path = master_path
         self.basic_dir = basic_dir
+        self.settings = settings if settings is not None else {}
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(QtWidgets.QLabel(
             "登録済みの制御装置(号機)一覧です。無い号機は「手入力で追加」または\n"
@@ -1396,6 +1398,8 @@ class ControllerMasterDialog(QtWidgets.QDialog):
             ("編集…", self.edit, "選択した号機を編集"),
             ("削除", self.delete, "選択した号機を削除"),
             ("BASICから取り込む…", self.import_basic, "BASICフォルダから軸数・容量を自動登録"),
+            ("Webから取り込む…", self.import_web,
+             "product-inspection（Webアプリ/Firestore）の制御装置データを取り込む"),
         ):
             b = QtWidgets.QPushButton(label); b.setToolTip(tip); b.clicked.connect(slot)
             row.addWidget(b)
@@ -1478,6 +1482,184 @@ class ControllerMasterDialog(QtWidgets.QDialog):
             return
         BasicScanDialog(self, self.basic_dir, self.master_path).exec()
         self.reload()
+
+    def import_web(self):
+        WebControllerImportDialog(self, self.settings, self.master_path,
+                                  backup=self._backup).exec()
+        self.reload()
+
+
+class WebControllerImportDialog(QtWidgets.QDialog):
+    """product-inspection（Firestore）の制御装置データを制御装置マスタへ取り込む。
+
+    データベースの公開データ配下からコレクションを選び（どれに制御装置情報が入って
+    いるか画面で選べる）、ドキュメントを読み、フィールド名を賢く突き合わせて号機・
+    容量・アンプ・電圧・CNC に写す。写せなかったフィールド名も出すので、実データを
+    見ながら別名を足せる（＝コードを見なくても構造が分かる）。通信は Firestore REST。
+    """
+
+    def __init__(self, parent, settings, master_path, backup=None):
+        super().__init__(parent)
+        self.settings = settings or {}
+        self.master_path = master_path
+        self._backup = backup
+        self._ctls = []
+        self.setWindowTitle("Webから制御装置を取り込む（product-inspection）")
+        self.resize(760, 620)
+        v = QtWidgets.QVBoxLayout(self)
+
+        self.sync = FirestoreSync(
+            api_key=str(self.settings.get("webapp_api_key") or ""),
+            project_id=str(self.settings.get("webapp_project_id") or ""),
+            app_data_id=str(self.settings.get("webapp_data_id") or ""),
+        )
+        if not self.sync.configured():
+            v.addWidget(QtWidgets.QLabel(
+                "Web連携が未設定です。設定（webapp_api_key / webapp_project_id /\n"
+                "webapp_data_id）を入れてから使ってください。"))
+            b = QtWidgets.QPushButton("閉じる"); b.clicked.connect(self.reject)
+            v.addWidget(b)
+            return
+
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("コレクション"))
+        self.cmb = QtWidgets.QComboBox(); self.cmb.setMinimumWidth(240)
+        self.cmb.setEditable(True)   # 一覧に出なくても手入力で指定できる
+        top.addWidget(self.cmb, 1)
+        b_list = QtWidgets.QPushButton("一覧を取得")
+        b_list.clicked.connect(self.fetch_collections)
+        b_load = QtWidgets.QPushButton("読み込み")
+        b_load.clicked.connect(self.load_docs)
+        top.addWidget(b_list); top.addWidget(b_load)
+        v.addLayout(top)
+
+        self.tbl = QtWidgets.QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels(["号機", "CNC", "電圧", "容量", "軸数"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(self.tbl, 2)
+
+        self.note = QtWidgets.QLabel(""); self.note.setWordWrap(True)
+        v.addWidget(self.note)
+        self.raw = QtWidgets.QPlainTextEdit(); self.raw.setReadOnly(True)
+        self.raw.setMaximumHeight(120)
+        self.raw.setStyleSheet("font-family: monospace; font-size:8pt;")
+        v.addWidget(self.raw)
+
+        row = QtWidgets.QHBoxLayout()
+        self.b_import = QtWidgets.QPushButton("制御装置マスタへ取り込み")
+        self.b_import.setEnabled(False)
+        self.b_import.clicked.connect(self.do_import)
+        b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
+        row.addStretch(1); row.addWidget(self.b_import); row.addWidget(b_close)
+        v.addLayout(row)
+
+        # 前回のコレクション名を復元（制御装置用に別キーで覚える）
+        last = str(self.settings.get("webapp_controllers_collection") or "")
+        if last:
+            self.cmb.setEditText(last)
+        QtCore.QTimer.singleShot(0, self.fetch_collections)
+
+    def _busy(self, on):
+        if on:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        else:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    def fetch_collections(self):
+        self._busy(True)
+        try:
+            ids = self.sync.list_collection_ids()
+        except Exception as e:
+            self._busy(False)
+            self.note.setText(f"コレクション一覧の取得に失敗: {e}")
+            return
+        self._busy(False)
+        cur = self.cmb.currentText()
+        self.cmb.clear()
+        self.cmb.addItems(ids)
+        if cur:
+            self.cmb.setEditText(cur)
+        # 制御装置っぽい名前があれば選んでおく
+        for i, name in enumerate(ids):
+            if any(k in name.lower() for k in ("control", "seigyo", "machine", "unit",
+                                               "制御", "号機")):
+                self.cmb.setCurrentIndex(i); break
+        self.note.setText(f"コレクション {len(ids)} 件。制御装置が入っているものを選んで「読み込み」。")
+
+    def load_docs(self):
+        col = self.cmb.currentText().strip()
+        if not col:
+            self.note.setText("コレクション名を選んでください")
+            return
+        self._busy(True)
+        try:
+            docs = self.sync.list_documents(col)
+        except Exception as e:
+            self._busy(False)
+            self.note.setText(f"読み込みに失敗: {e}")
+            return
+        self._busy(False)
+        self._ctls, unmapped = controller_import.map_controllers(docs)
+        self.tbl.setRowCount(len(self._ctls))
+        for r, c in enumerate(self._ctls):
+            vals = [c.unit, c.cnc, c.voltage, c.caps_text(), str(len(c.axes()))]
+            for col_i, t in enumerate(vals):
+                self.tbl.setItem(r, col_i, QtWidgets.QTableWidgetItem(t))
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.b_import.setEnabled(bool(self._ctls))
+        msg = f"{len(docs)} 件読み込み → {len(self._ctls)} 号機に変換。"
+        if unmapped:
+            msg += "　未対応フィールド（マスタに写せなかった項目）: " + "、".join(unmapped[:20])
+        self.note.setText(msg)
+        # 先頭ドキュメントの生フィールドを見せる（構造確認用）
+        if docs:
+            import json as _json
+            self.raw.setPlainText("先頭ドキュメントの中身:\n" +
+                                  _json.dumps(docs[0][1], ensure_ascii=False, indent=1))
+        # 選んだコレクション名を覚える
+        self.settings["webapp_controllers_collection"] = col
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
+    def do_import(self):
+        if not self._ctls:
+            return
+        skipped = [c for c in self._ctls if not c.axes()]
+        target = [c for c in self._ctls if c.axes()]
+        if not target:
+            QtWidgets.QMessageBox.warning(
+                self, "取り込み",
+                "軸容量が読めた号機がありません。フィールド名の対応が合っていない可能性が"
+                "あります（下の『未対応フィールド』を教えてください＝別名を足して確実に"
+                "合わせます）。")
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "取り込みの確認",
+                f"{len(target)} 号機を制御装置マスタへ取り込みます"
+                f"（同じ号機は上書き）。よろしいですか？"
+                + (f"\n※軸容量が空の {len(skipped)} 件は取り込みません。" if skipped else "")
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        if self._backup:
+            self._backup()
+        added = updated = 0
+        for c in target:
+            try:
+                result = controllers.upsert_controller(self.master_path, c)
+                if result == "added":
+                    added += 1
+                else:
+                    updated += 1
+            except Exception:
+                pass
+        self.note.setText(f"取り込み完了: 追加 {added} 件 / 更新 {updated} 件")
+        QtWidgets.QMessageBox.information(
+            self, "取り込み完了", f"追加 {added} 件 / 更新 {updated} 件")
 
 
 class ParamViewerDialog(QtWidgets.QDialog):
@@ -1960,7 +2142,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     def _scan_basics(self):
         """制御装置マスタの管理（手入力 追加/編集/削除・BASICから取り込み）を開く。"""
-        ControllerMasterDialog(self, self._mpath, self._abs_dir("param_basic_dir")).exec()
+        ControllerMasterDialog(self, self._mpath, self._abs_dir("param_basic_dir"),
+                               settings=self.settings).exec()
         # マスタが変わったかもしれないので読み直して候補を更新
         self._controllers = controllers.load_controllers(self._mpath)
         self.cmb_cap.blockSignals(True)

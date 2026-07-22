@@ -178,6 +178,29 @@ class FirestoreSync:
                 f"documents/artifacts/{self.app_data_id}/public/data/"
                 f"{urllib.parse.quote(col)}")
 
+    def _data_document_url(self) -> str:
+        """artifacts/{app_data_id}/public/data ドキュメント（各コレクションの親）。"""
+        return (f"{FIRESTORE_BASE}/projects/{self.project_id}/databases/(default)/"
+                f"documents/artifacts/{self.app_data_id}/public/data")
+
+    def list_collection_ids(self, timeout: float = 20.0):
+        """公開データ配下のコレクション名一覧を返す（rotaryMeasurements や制御装置など）。
+
+        どのコレクションに制御装置情報があるか画面で選べるようにするための一覧。
+        """
+        if not self.configured():
+            return []
+        self._ensure_token()
+        url = self._data_document_url() + ":listCollectionIds"
+        body = json.dumps({"pageSize": 100}).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self._id_token}"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        return payload.get("collectionIds", [])
+
     def list_documents(self, collection: str = None, timeout: float = 20.0):
         """コレクション内の全ドキュメントを [(doc_id, fields_dict), …] で返す。"""
         if not self.configured():

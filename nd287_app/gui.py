@@ -5990,6 +5990,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_save.setEnabled(False)
         self.b_print = QtWidgets.QPushButton("印刷")
         self.b_print.setEnabled(False)
+        self.b_pdf = QtWidgets.QPushButton("PDF成績書")
+        self.b_pdf.setToolTip("検査記録（印刷と同じ内容）を検査成績書PDFとして保存します")
+        self.b_pdf.clicked.connect(self.save_report_pdf)
         self.b_raw = QtWidgets.QPushButton("生データ")
         self.b_raw.clicked.connect(self.show_raw_data)
         self.b_past = QtWidgets.QPushButton("過去データ")
@@ -6035,7 +6038,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(self.b_auto)
         toolbar.addWidget(self.b_partial)
         toolbar.addSeparator()
-        for b in (self.b_save, self.b_print, b_load):
+        for b in (self.b_save, self.b_print, self.b_pdf, b_load):
             toolbar.addWidget(b)
         toolbar.addSeparator()
         for b in (self.b_raw, self.b_past, self.b_analyze):
@@ -8601,6 +8604,54 @@ class MainWindow(QtWidgets.QMainWindow):
         document.print_(printer)
         self.statusBar().showMessage("印刷しました")
 
+    def save_report_pdf(self):
+        """検査記録（印刷と同じ内容）を検査成績書PDFとして保存する。
+
+        印刷と同じ build_report_document を PDF 出力に流すだけなので、レイアウトは
+        既存の印刷と完全に一致する（新しい体裁を作らない＝崩れない）。
+        """
+        if not self.has_view_data():
+            self.statusBar().showMessage("PDFにする測定データがありません")
+            return
+        from PySide6.QtPrintSupport import QPrinter
+
+        # 印刷と同じく、対象があるときだけピッチエラー補正ページを付けるか確認
+        self.include_pcorr = False
+        if self.view_kind in ("indexing", "combined") and not self.is_tilt():
+            interval = float(self.settings.get("p_interval") or 100000) * 1e-4
+            unit = float(self.settings.get("p_unit") or 0.001)
+            if compensation_table(self.data, interval, unit):
+                answer = QtWidgets.QMessageBox.question(
+                    self, "PDF成績書",
+                    "ピッチエラー補正（提出用）のページも付けますか？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                self.include_pcorr = answer == QtWidgets.QMessageBox.Yes
+
+        model = self.e_model.text().strip() or "検査成績書"
+        machine = self.e_machine.text().strip()
+        stem = f"{model}_{machine}" if machine else model
+        default = str(resolve_save_root(self.settings) / f"{stem}_検査成績書.pdf")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "検査成績書PDFの保存", default, "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(path)
+            printer.setPageSize(QtGui.QPageSize(QtGui.QPageSize.A4))
+            printer.setPageOrientation(QtGui.QPageLayout.Landscape)
+            document = self.build_report_document()
+            document.print_(printer)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "PDF成績書", f"保存に失敗しました:\n{e}")
+            return
+        self.statusBar().showMessage(f"検査成績書PDFを保存しました: {path}")
+
     def _plot_image(self, plot):
         return plot.grab().toImage()
 
@@ -8756,6 +8807,15 @@ class MainWindow(QtWidgets.QMainWindow):
             rows += [("再現性 CW（全ブロック最大）", _sec(rsum["cw"])),
                      ("再現性 CCW（全ブロック最大）", _sec(rsum["ccw"])),
                      ("再現性 総合", _sec(rsum["overall"]))]
+            # ISO 230-2 モードは成績書提出値（A/R/E/M/B）も載せる
+            if self.is_iso():
+                axis = iso230.iso_stats(self.rep_points, self.rep_data)["axis"]
+                rows.append(("― JIS B 6190-2（ISO 230-2）―", ""))
+                for k, label in (("A", "A 双方向位置決め精度"), ("R", "R 双方向繰返し性"),
+                                 ("E", "E 双方向系統誤差"), ("M", "M 平均双方向誤差"),
+                                 ("B", "B 反転値")):
+                    v = axis.get(k)
+                    rows.append((label, f'{v:.2f}"' if v is not None else "―"))
             results = "<table style='font-size:7pt;' cellspacing='0'>" + "".join(
                 f"<tr><td style='border:1px solid #999; padding:1px 5px;'>{k}</td>"
                 f"<td style='border:1px solid #999; padding:1px 5px;'>{v}</td></tr>"

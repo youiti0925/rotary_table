@@ -112,6 +112,7 @@ from . import fanuc_alarms
 from . import nc_param
 from . import prm_format
 from . import fanuc_param
+from . import fanuc_pcorr
 from . import param_build
 from . import controllers
 from . import seiban_flow
@@ -5046,13 +5047,18 @@ class PitchCorrectionDialog(QtWidgets.QDialog):
         btns = QtWidgets.QHBoxLayout()
         b_csv = QtWidgets.QPushButton("CSV保存")
         b_print = QtWidgets.QPushButton("印刷")
+        b_fanuc = QtWidgets.QPushButton("FANUCパラメータ生成")
+        b_fanuc.setToolTip("この補正表から実機用のピッチエラー補正パラメータ"
+                           "（No.3620〜＋補正点データ）を作り、.PRMで保存します")
         b_close = QtWidgets.QPushButton("閉じる")
         b_csv.clicked.connect(self.export_csv)
         b_print.clicked.connect(self.print_table)
+        b_fanuc.clicked.connect(self.open_fanuc_params)
         b_close.clicked.connect(self._close)
         btns.addStretch(1)
         btns.addWidget(b_csv)
         btns.addWidget(b_print)
+        btns.addWidget(b_fanuc)
         btns.addWidget(b_close)
         layout.addLayout(btns)
 
@@ -5176,6 +5182,13 @@ class PitchCorrectionDialog(QtWidgets.QDialog):
         document.print_(printer)
         self.win.statusBar().showMessage("印刷しました")
 
+    def open_fanuc_params(self):
+        """この補正表からFANUCピッチエラー補正パラメータを生成するダイアログを開く。"""
+        if not self._rows:
+            self.win.statusBar().showMessage("補正表がありません（分割データが必要）")
+            return
+        FanucPitchParamDialog(self, self._rows, self.sp_interval.value()).exec()
+
     def _close(self):
         if self.c_default.isChecked():
             self.win.settings["p_interval"] = int(round(self.sp_interval.value() * 1e4))
@@ -5186,6 +5199,146 @@ class PitchCorrectionDialog(QtWidgets.QDialog):
             except Exception:
                 pass
         self.accept()
+
+
+class FanucPitchParamDialog(QtWidgets.QDialog):
+    """補正表 → FANUC ピッチエラー補正パラメータ（No.3620〜＋補正点データ）を生成。
+
+    実機に入る値なので、機種差を吸収できるよう軸・検出単位・倍率・回転/符号・データ
+    先頭番号を画面で変えられる。実機の補正設定済みサンプルが来たら既定を合わせる。
+    生成した .PRM は人が PWE=1・電源再投入に注意して取り込む（値の捏造はしない）。
+    """
+
+    def __init__(self, parent, rows, interval_deg):
+        super().__init__(parent)
+        self.parent_dlg = parent
+        self.win = parent.win
+        self._rows = rows
+        self._interval = interval_deg
+        self._params = None
+        self.setWindowTitle("FANUCピッチエラー補正パラメータ生成")
+        self.resize(760, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        info = QtWidgets.QLabel(
+            f"補正間隔 {interval_deg:g}° の補正表（{len(rows)}点）から、実機用の"
+            "ピッチエラー補正パラメータを作ります。機種に合わせて下の値を調整してください。")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QtWidgets.QGridLayout()
+        self.sp_axis = QtWidgets.QSpinBox(); self.sp_axis.setRange(1, 8)
+        self.sp_axis.setValue(int(self.win.settings.get("pcorr_axis", 4)))
+        self.sp_detect = QtWidgets.QDoubleSpinBox(); self.sp_detect.setDecimals(5)
+        self.sp_detect.setRange(0.00001, 1.0); self.sp_detect.setSuffix(" °")
+        self.sp_detect.setValue(float(self.win.settings.get("pcorr_detect", 0.001)))
+        self.sp_mag = QtWidgets.QSpinBox(); self.sp_mag.setRange(1, 100)
+        self.sp_mag.setValue(int(self.win.settings.get("pcorr_mag", 1)))
+        self.c_rotary = QtWidgets.QCheckBox("回転軸（1回転で閉じる）")
+        self.c_rotary.setChecked(bool(self.win.settings.get("pcorr_rotary", True)))
+        self.sp_perrev = QtWidgets.QDoubleSpinBox(); self.sp_perrev.setRange(0.1, 3600.0)
+        self.sp_perrev.setDecimals(3); self.sp_perrev.setSuffix(" °")
+        self.sp_perrev.setValue(float(self.win.settings.get("pcorr_perrev", 360.0)))
+        self.cmb_sign = QtWidgets.QComboBox(); self.cmb_sign.addItems(["+（標準）", "−（反転）"])
+        self.sp_base = QtWidgets.QSpinBox(); self.sp_base.setRange(1, 99999)
+        self.sp_base.setValue(int(self.win.settings.get("pcorr_data_base", 10000)))
+        r = 0
+        for label, w in (("補正軸 A", self.sp_axis), ("検出単位", self.sp_detect),
+                         ("補正倍率", self.sp_mag), ("", self.c_rotary),
+                         ("1回転あたり", self.sp_perrev), ("補正値の符号", self.cmb_sign),
+                         ("データ先頭番号", self.sp_base)):
+            if label:
+                form.addWidget(QtWidgets.QLabel(label), r // 2, (r % 2) * 2)
+            form.addWidget(w, r // 2, (r % 2) * 2 + 1)
+            r += 1
+        layout.addLayout(form)
+        for w in (self.sp_axis, self.sp_detect, self.sp_mag, self.sp_perrev, self.sp_base):
+            w.valueChanged.connect(self.recompute)
+        self.c_rotary.toggled.connect(self.recompute)
+        self.cmb_sign.currentIndexChanged.connect(self.recompute)
+
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["補正点番号", "角度[°]", "絶対補正[検出単位]", "増分[検出単位]"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        layout.addWidget(self.table, 2)
+
+        self.preview = QtWidgets.QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setStyleSheet("font-family: monospace;")
+        layout.addWidget(self.preview, 2)
+        self.notes = QtWidgets.QLabel(""); self.notes.setWordWrap(True)
+        self.notes.setStyleSheet("color:#b45309;")
+        layout.addWidget(self.notes)
+
+        row = QtWidgets.QHBoxLayout()
+        b_save = QtWidgets.QPushButton(".PRMで保存")
+        b_default = QtWidgets.QPushButton("この設定を既定にする")
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_save.clicked.connect(self.save_prm)
+        b_default.clicked.connect(self.save_defaults)
+        b_close.clicked.connect(self.accept)
+        row.addStretch(1)
+        row.addWidget(b_default)
+        row.addWidget(b_save)
+        row.addWidget(b_close)
+        layout.addLayout(row)
+
+        self.recompute()
+
+    def _build(self):
+        return fanuc_pcorr.build_pitch_params(
+            self._rows, axis=self.sp_axis.value(), interval_deg=self._interval,
+            detect_unit_deg=self.sp_detect.value(), magnification=self.sp_mag.value(),
+            rotary=self.c_rotary.isChecked(), per_rev_deg=self.sp_perrev.value(),
+            sign=1 if self.cmb_sign.currentIndex() == 0 else -1,
+            data_base=self.sp_base.value())
+
+    def recompute(self, *args):
+        self.sp_perrev.setEnabled(self.c_rotary.isChecked())
+        self._params = self._build()
+        pts = self._params["points"]
+        self.table.setRowCount(len(pts))
+        for i, (no, ang, cum, incr) in enumerate(pts):
+            for j, text in enumerate((str(no), f"{ang:g}", str(cum), f"{incr:+d}")):
+                self.table.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+        self.table.resizeColumnsToContents()
+        self.preview.setPlainText(fanuc_pcorr.to_prm_text(self._params, newline="\n"))
+        self.notes.setText("　".join(self._params.get("notes", [])))
+
+    def save_defaults(self):
+        self.win.settings["pcorr_axis"] = self.sp_axis.value()
+        self.win.settings["pcorr_detect"] = self.sp_detect.value()
+        self.win.settings["pcorr_mag"] = self.sp_mag.value()
+        self.win.settings["pcorr_rotary"] = self.c_rotary.isChecked()
+        self.win.settings["pcorr_perrev"] = self.sp_perrev.value()
+        self.win.settings["pcorr_data_base"] = self.sp_base.value()
+        try:
+            save_settings(self.win.settings)
+            self.win.statusBar().showMessage("ピッチエラー補正の生成設定を既定として保存しました")
+        except Exception:
+            pass
+
+    def save_prm(self):
+        if not self._params or not self._params.get("data"):
+            self.win.statusBar().showMessage("生成できる補正データがありません")
+            return
+        machine = self.win.e_machine.text().strip() or "pcorr"
+        default = str(resolve_save_root(self.win.settings) / f"{machine}_ピッチ補正.PRM")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "FANUCパラメータ(.PRM)で保存", default, "FANUC (*.PRM *.prm)")
+        if not path:
+            return
+        try:
+            # FANUC取込の標準どおり CRLF・cp932 で書く（新規ファイルなので実機準拠）
+            text = fanuc_pcorr.to_prm_text(self._params, newline="\r\n")
+            with open(path, "w", encoding="cp932", newline="") as f:
+                f.write(text)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "保存", f"失敗しました:\n{e}")
+            return
+        self.win.statusBar().showMessage(f"FANUCピッチエラー補正パラメータを保存しました: {path}")
 
 
 class GraphZoomDialog(QtWidgets.QDialog):

@@ -146,6 +146,34 @@ def iso_stats(points, data) -> dict:
     return {"positions": positions, "axis": axis, "notes": notes}
 
 
+def recommended_targets(base, lo, hi):
+    """JIS B 6190-2 の推奨に沿い、等間隔目標に決定論的な擬似ランダムオフセットを
+    与える（周期的な誤差成分と目標位置が一致してしまうのを避けるため）。
+
+    両端は測定範囲を保つため固定し、内側の点だけをずらす。昇順・単調増加を保証。
+    再現性のため乱数は使わず、インデックスから決まる固定の係数列を使う（同じ設定
+    なら常に同じ目標位置になる＝測定プログラムと評価で必ず一致する）。
+    """
+    pts = [float(b) for b in base]
+    n = len(pts)
+    if n < 3:
+        return pts
+    step = (hi - lo) / (n - 1)
+    amp = step * 0.30
+    # 固定の擬似乱数係数（-1..1）。乱数を使わないので毎回同じ結果になる。
+    coeffs = [-0.6, 0.7, -0.3, 0.5, -0.8, 0.2, 0.9, -0.4, 0.6, -0.7,
+              0.3, -0.5, 0.8, -0.2, 0.4]
+    out = [round(pts[0], 3)]
+    for i in range(1, n - 1):
+        out.append(round(pts[i] + amp * coeffs[i % len(coeffs)], 3))
+    out.append(round(pts[-1], 3))
+    # 単調増加を保証（丸め・係数で逆転しないよう最小間隔を確保）
+    for i in range(1, len(out)):
+        if out[i] <= out[i - 1]:
+            out[i] = round(out[i - 1] + step * 0.1, 3)
+    return out
+
+
 AXIS_LABELS = [
     ("A", "A 双方向位置決め精度"),
     ("A_up", "A↑ 片方向精度（CW）"),

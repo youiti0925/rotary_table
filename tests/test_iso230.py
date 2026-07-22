@@ -114,5 +114,33 @@ class TestEdgeCases(unittest.TestCase):
         self.assertIn("0°", text)
 
 
+class TestRecommendedTargets(unittest.TestCase):
+    """専用ISOモードの目標位置生成（JIS推奨の擬似ランダムオフセット）。"""
+
+    def test_deterministic(self):
+        base = [0, 45, 90, 135, 180, 225, 270, 315]
+        a = I.recommended_targets(base, 0, 315)
+        b = I.recommended_targets(base, 0, 315)
+        self.assertEqual(a, b)                       # 乱数不使用＝毎回同じ
+
+    def test_endpoints_fixed_and_monotonic(self):
+        base = [0, 45, 90, 135, 180, 225, 270, 315]
+        t = I.recommended_targets(base, 0, 315)
+        self.assertEqual(t[0], 0.0)                  # 両端は範囲を保つため固定
+        self.assertEqual(t[-1], 315.0)
+        self.assertTrue(all(t[i] < t[i + 1] for i in range(len(t) - 1)))
+        self.assertNotEqual(t, [float(x) for x in base])  # 内側はずれる
+
+    def test_interior_within_range(self):
+        base = [0, 45, 90, 135, 180, 225, 270, 315]
+        t = I.recommended_targets(base, 0, 315)
+        self.assertTrue(all(0.0 <= v <= 315.0 for v in t))
+
+    def test_small_n_untouched(self):
+        # 2点以下はオフセットせずそのまま（両端しか無いので）
+        self.assertEqual(I.recommended_targets([0, 90], 0, 90), [0.0, 90.0])
+        self.assertEqual(I.recommended_targets([0], 0, 0), [0.0])
+
+
 if __name__ == "__main__":
     unittest.main()

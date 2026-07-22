@@ -118,8 +118,9 @@ from . import seiban_flow
 from . import param_view
 from . import xls_param
 
+ISO230_MODE = "位置決め精度(ISO230)"
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
-         "回転分割+再現", "傾斜分割+再現")
+         "回転分割+再現", "傾斜分割+再現", ISO230_MODE)
 
 CURVE_STYLES = {
     "wheel_cw": dict(pen=pg.mkPen("#1f77b4", width=2), symbol="o", symbolSize=5),
@@ -5753,6 +5754,14 @@ class MainWindow(QtWidgets.QMainWindow):
         rg.addWidget(self.e_rstart, 2, 1)
         rg.addWidget(QtWidgets.QLabel("再現終了"), 2, 2)
         rg.addWidget(self.e_rend, 2, 3)
+        # ISO 230-2 モードのときだけ出す：目標位置に擬似ランダムオフセットを与える
+        self.c_iso_offset = QtWidgets.QCheckBox("目標位置に擬似ランダムオフセット（JIS推奨）")
+        self.c_iso_offset.setChecked(True)
+        self.c_iso_offset.setToolTip(
+            "周期的な誤差成分と目標位置が一致するのを避けるため、内側の目標を少し"
+            "ずらします（両端は範囲を保つため固定）。同じ設定なら常に同じ位置。")
+        self.c_iso_offset.setVisible(False)
+        rg.addWidget(self.c_iso_offset, 3, 0, 1, 4)
         rg.setColumnStretch(4, 1)
 
         # ホイール/ウォーム/再現を横並びにして縦の高さを詰める（全モードで全部見える）
@@ -6527,8 +6536,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def is_tilt(self):
         return self.current_mode().startswith("傾斜")
 
+    def is_iso(self):
+        """ISO 230-2（JIS B 6190-2）位置決め精度の専用測定モードか。
+
+        再現性の測定プラミングをそのまま使う（回転軸・双方向・複数回接近）ので
+        is_repeat() にも含める。ISO固有なのは目標位置の作り方と既定値だけ。
+        """
+        return self.current_mode() == ISO230_MODE
+
     def is_repeat(self):
-        return self.current_mode() in ("回転再現性", "傾斜再現性")
+        return self.current_mode() in ("回転再現性", "傾斜再現性") or self.is_iso()
 
     def is_combined(self):
         return "+再現" in self.current_mode()
@@ -6552,8 +6569,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_worm.setVisible(show_division)
         self.legend_worm.setVisible(show_division)
         self.update_legends()
+        # ISO 230-2 モードの追加UI（目標オフセット）と既定値
+        self.c_iso_offset.setVisible(self.is_iso())
+        if self.is_iso():
+            self._apply_iso_defaults()
         self.plot_wheel.setTitle(
-            "再現性（ブロックごとのばらつき）" if is_repeat else "ホイール")
+            ("位置決め精度（ISO 230-2 / JIS B 6190-2）" if self.is_iso()
+             else "再現性（ブロックごとのばらつき）") if is_repeat else "ホイール")
         # モードを変えたら取込中の測定はキャンセル
         self.view_kind = "repeat" if is_repeat else ("combined" if is_combined else "indexing")
         self.discard_measurement()
@@ -7113,14 +7135,33 @@ class MainWindow(QtWidgets.QMainWindow):
             missing.append("測定温度")
         return missing
 
+    def _apply_iso_defaults(self):
+        """ISO 230-2 モードに入ったとき、規格推奨のサイクルを既定値として入れる。
+
+        JIS B 6190-2：各方向5回接近、360°軸で 0/90/180/270°を含む8点以上。
+        既定 8点・5回・0〜315°（等間隔8点＝0/45/…/315、擬似ランダムオフセット併用）。
+        ロード時は setCurrentText の直後に meta 値で上書きされるので影響しない。
+        """
+        self.e_blocks.setValue(8)
+        self.e_repeats.setValue(5)
+        self.e_rstart.setValue(0.0)
+        self.e_rend.setValue(315.0)
+
     def repeat_blocks(self):
         """現在の設定での再現ブロック角度リスト。
 
         再現開始・再現終了・ブロック数で「両端を含む等間隔」を作る。
         例: 開始0・終了270・4箇所 → 0,90,180,270
+
+        ISO 230-2 モードでオフセットが有効なときは、JIS推奨に沿って内側の目標を
+        擬似ランダムにずらす（analysis 等の既存モードには影響しない）。
         """
-        return tilt_blocks(self.e_rstart.value(), self.e_rend.value(),
+        base = tilt_blocks(self.e_rstart.value(), self.e_rend.value(),
                            self.e_blocks.value())
+        if self.is_iso() and self.c_iso_offset.isChecked():
+            return iso230.recommended_targets(
+                base, self.e_rstart.value(), self.e_rend.value())
+        return base
 
     def build_division_sequence(self):
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
@@ -7735,7 +7776,20 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             if rsum.get(key) is not None:
                 rows.append((label, f'{rsum[key]:.1f}"'))
+        # ISO 230-2 モードは規格の主要値も一覧に出す（詳細は「JIS評価」ボタン）
+        if self.is_iso():
+            axis = iso230.iso_stats(self.rep_points, self.rep_data)["axis"]
+            rows.append(("― JIS B 6190-2 ―", ""))
+            for k, label in (("A", "A 双方向位置決め精度"), ("R", "R 双方向繰返し性"),
+                             ("E", "E 双方向系統誤差"), ("M", "M 平均双方向誤差"),
+                             ("B", "B 反転値")):
+                v = axis.get(k)
+                rows.append((label, f'{v:.2f}"' if v is not None else "―"))
         self.fill_misc_table(rows)
+        if self.is_iso():
+            self.statusBar().showMessage(
+                "測定完了：ISO 230-2 の主要値を表示中。「JIS評価」で位置別の詳細と"
+                "CSV保存（成績書提出値）ができます")
 
     def _fit_table_height(self, table):
         """全行が確実に見える高さに固定する（空でもヘッダ分だけ＝場所を食わない）。

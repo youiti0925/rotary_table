@@ -6111,17 +6111,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.order_list.setToolTip(
             "上から順に測定します。チェックを外すとその系列は測りません。\n"
             "↑↓で並べ替え。型式マスタに測定順があれば初期値に入ります。")
-        # 幅・高さは _populate_order_list が内容（フォント）に合わせて決める
-        og.addWidget(self.order_list, 1, 0, 3, 1)
+        self.order_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.order_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # 4行ぶんの高さは _populate_order_list が実フォントに合わせて確定させる。
+        # 行スパンは使わない（余った行に高さを吸われて末尾が切れるのを避ける）。
+        og.addWidget(self.order_list, 1, 0, 2, 1)
         b_up = QtWidgets.QToolButton(); b_up.setText("↑")
         b_up.setToolTip("選んだ系列を上へ（先に測る）")
         b_up.clicked.connect(lambda: self._move_order(-1))
         b_dn = QtWidgets.QToolButton(); b_dn.setText("↓")
         b_dn.setToolTip("選んだ系列を下へ（後で測る）")
         b_dn.clicked.connect(lambda: self._move_order(1))
-        og.addWidget(b_up, 1, 1)
-        og.addWidget(b_dn, 2, 1)
-        og.setRowStretch(3, 1)
+        og.addWidget(b_up, 1, 1, QtCore.Qt.AlignBottom)
+        og.addWidget(b_dn, 2, 1, QtCore.Qt.AlignTop)
         self._populate_order_list()
 
         # 群は2段のグリッドに折り返す。横1列に全部並べると「傾斜分割+再現」で幅が
@@ -6136,8 +6138,9 @@ class MainWindow(QtWidgets.QMainWindow):
         _tl = QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft
         groups_grid.addWidget(self.wheel_group, 0, 0, _tl)
         groups_grid.addWidget(self.worm_group, 0, 1, _tl)
-        groups_grid.addWidget(self.order_group, 0, 2, _tl)
-        groups_grid.addWidget(self.repeat_group, 1, 0, 1, 2, _tl)
+        # 測定順は4行ぶん縦に高いので2段にまたがらせる（上段に空白を作らない）
+        groups_grid.addWidget(self.order_group, 0, 2, 2, 1, _tl)
+        groups_grid.addWidget(self.repeat_group, 1, 0, _tl)
         groups_grid.setColumnStretch(3, 1)
         cond_v.addLayout(groups_grid)
 
@@ -6153,9 +6156,8 @@ class MainWindow(QtWidgets.QMainWindow):
         eg.addWidget(self.e_blcorr, 1, 1)
         eg.addWidget(self.b_corr, 1, 2)
         eg.setColumnStretch(3, 1)
-        # 主点評価・バックラッシ補正は2段目のウォーム列の下（分割系のみ表示）。
-        # 分割単独では2段目がこれだけになり、合体では再現の隣に収まる。
-        groups_grid.addWidget(self.eval_group, 1, 2, _tl)
+        # 主点評価・バックラッシ補正は2段目・再現の隣（分割系のみ表示）。
+        groups_grid.addWidget(self.eval_group, 1, 1, _tl)
 
         cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
         comment_row = QtWidgets.QHBoxLayout()
@@ -6379,11 +6381,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # 左上: 測定情報＋測定条件。測定条件は中身ぶんの幅だけ取り（無駄に伸ばさない）、
         # 余った横は右側のあき（クリーンな余白）にする。短い行の横に大きな空白が
         # できないよう、主点評価/バックラッシ補正は群の横帯にまとめてある。
+        # 測定条件はスクロール領域に入れる。モード・フォント・画面幅がどうでも
+        # 「入力欄が潰れる／末尾が切れる／グラフと右の結果を押し潰す」が起きない。
+        # 中身が小さいモードでは中身ぶんの高さしか取らない（_fit_cond_box が調整）。
+        self.cond_scroll = QtWidgets.QScrollArea()
+        self.cond_scroll.setWidget(cond_group)
+        self.cond_scroll.setWidgetResizable(True)
+        self.cond_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.cond_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.cond_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.cond_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                       QtWidgets.QSizePolicy.Preferred)
+        # 最小幅を小さくしておく。こうしないと中身の最小幅がそのまま左カラムの最小幅に
+        # なり、狭い画面や大きいフォントで右の測定結果が画面外へ押し出される。
+        # 足りないぶんは横スクロールで見る（潰さない）。
+        self.cond_scroll.setMinimumWidth(240)
+
         top_left = QtWidgets.QHBoxLayout()
         top_left.setSpacing(8)
         top_left.addWidget(info_group, 0, QtCore.Qt.AlignTop)
-        top_left.addWidget(cond_group, 0, QtCore.Qt.AlignTop)
-        top_left.addStretch(1)
+        top_left.addWidget(self.cond_scroll, 1)
 
         # グラフのすぐ上に「取込中の操作・補正前/後・グラフ拡大・データ数」を常時表示。
         # データ数はグラフ拡大ボタンのすぐ右に小さめで置く（左カラム内なので精度結果に被らない）。
@@ -6404,7 +6421,20 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.counts)          # データ数（グラフ拡大の右・小さめ）
         bar.addWidget(self.live)
         bar.addStretch(1)
+        # 操作バーもスクロール領域に入れる。ボタンが並ぶこの帯の最小幅がそのまま
+        # 左カラムの最小幅になり、大きいフォント・狭い画面で右の測定結果を画面外へ
+        # 押し出してしまうため。入りきらないときは横スクロールで出す（潰さない）。
+        bar_widget = QtWidgets.QWidget()
+        bar_widget.setLayout(bar)
+        self.bar_scroll = QtWidgets.QScrollArea()
+        self.bar_scroll.setWidget(bar_widget)
+        self.bar_scroll.setWidgetResizable(True)
+        self.bar_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.bar_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.bar_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.bar_scroll.setMinimumWidth(240)
         plots_widget.setMinimumHeight(240)
+        plots_widget.setMinimumWidth(240)
 
         # 左カラム: 測定情報/条件 → 操作バー(データ数を含む) → グラフ。
         # （ロード名/取込手順のガイドは最上部ツールバーへ移したのでここには置かない）
@@ -6413,7 +6443,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
         lv.addLayout(top_left, 0)
-        lv.addLayout(bar, 0)
+        lv.addWidget(self.bar_scroll, 0)
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
 
         # 右カラム（縦長）: 精度PP・傾き → 単一・隣接 → バックラッシ を上下に積み、
@@ -6738,6 +6768,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # フォント変更後に右カラムの幅と各表の高さを実寸へ合わせ直す
         # （幅だけだと、行が新フォントで高くなったとき固定高が足りず最終行が切れる）
         QtCore.QTimer.singleShot(0, self._shrink_result_tables)
+        # 測定順リストと測定条件の高さも新フォントの実寸に合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_order_list)
+        QtCore.QTimer.singleShot(0, self._fit_cond_box)
 
     def current_result_rows(self):
         """表示中データの (項目, 値) 行（印刷・分析で使う。画面と同じ内容）。
@@ -6955,7 +6988,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # モードを変えたら取込中の測定はキャンセル
         self.view_kind = "repeat" if is_repeat else ("combined" if is_combined else "indexing")
         self.discard_measurement()
-        # 群の表示/非表示で右カラムの必要幅が変わるので合わせ直す
+        # 群の表示/非表示で測定条件の高さ・右カラムの必要幅が変わるので合わせ直す
+        QtCore.QTimer.singleShot(0, self._fit_cond_box)
         QtCore.QTimer.singleShot(0, self._fit_right_col_width)
 
     def discard_measurement(self):
@@ -7588,13 +7622,24 @@ class MainWindow(QtWidgets.QMainWindow):
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Checked if key in order else QtCore.Qt.Unchecked)
             self.order_list.addItem(it)
-        # 4行が常に全部見える高さ・文字が切れない幅に合わせる（スクロールさせない）
-        fm = self.order_list.fontMetrics()
-        row_h = max(self.order_list.sizeHintForRow(0), fm.height() + 4)
-        frame = 2 * self.order_list.frameWidth()
-        self.order_list.setFixedHeight(row_h * self.order_list.count() + frame + 4)
+        self._fit_order_list()
+
+    def _fit_order_list(self):
+        """測定順リストを「4行が必ず全部見える」大きさに確定させる。
+
+        行の高さ・文字幅は実フォントから測る（フォント設定を変えても切れない）。
+        余白を多めに取り、スクロールバーは出さない（全行が常に見える）。
+        """
+        lst = getattr(self, "order_list", None)
+        if lst is None or lst.count() == 0:
+            return
+        fm = lst.fontMetrics()
+        rows = [lst.sizeHintForRow(i) for i in range(lst.count())]
+        row_h = max(max(rows), fm.height() + 6, 16)
+        frame = 2 * lst.frameWidth()
+        lst.setFixedHeight(row_h * lst.count() + frame + 6)
         text_w = max(fm.horizontalAdvance(SERIES_LABELS[k]) for k in SERIES_KEYS)
-        self.order_list.setFixedWidth(text_w + 46 + frame)  # チェック+余白ぶん
+        lst.setFixedWidth(text_w + 52 + frame)   # チェックボックス＋余白ぶん
 
     def _move_order(self, delta):
         row = self.order_list.currentRow()
@@ -8298,6 +8343,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_table_height(self.table_misc)
         self._fit_right_col_width()
 
+    def _fit_cond_box(self):
+        """測定条件スクロールの高さを決める。
+
+        中身が収まるモード（再現性など）は中身ぶんだけ＝余白を作らない。
+        収まらないモード（傾斜分割+再現など）は画面高さの一定割合で頭打ちにし、
+        あふれた分はスクロールで見る。こうするとグラフと右の結果の場所を必ず残せる。
+        """
+        sc = getattr(self, "cond_scroll", None)
+        if sc is None:
+            return
+        need = self.cond_group.sizeHint().height() + 4
+        if sc.horizontalScrollBar().isVisible():
+            need += sc.horizontalScrollBar().sizeHint().height()
+        cap = max(150, int(self.height() * 0.40))
+        sc.setMaximumHeight(min(need, cap))
+        sc.setMinimumHeight(min(need, 130))
+        # 操作バーは中身1行ぶんの高さに固定（縦に伸びてグラフを削らない）
+        bs = getattr(self, "bar_scroll", None)
+        if bs is not None:
+            bh = bs.widget().sizeHint().height()
+            if bs.horizontalScrollBar().isVisible():
+                bh += bs.horizontalScrollBar().sizeHint().height()
+            bs.setFixedHeight(bh + 2)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 窓の大きさが変わったら測定条件の頭打ち高さ・右カラムの頭打ち幅を合わせ直す
+        self._fit_cond_box()
+        self._fit_right_col_width()
+
     def _fit_right_col_width(self):
         """右スクロール領域の幅を精度表（系列＋数値2列）の中身ぶんに合わせる。
 
@@ -8319,7 +8394,10 @@ class MainWindow(QtWidgets.QMainWindow):
             need = max(need, s)
         if need > 0:
             sbw = sc.verticalScrollBar().sizeHint().width() or 16
-            sc.setFixedWidth(max(220, min(need, 480)) + sbw + 2)
+            want = max(220, min(need, 480)) + sbw + 2
+            # 画面幅の一定割合で頭打ちにする。大きいフォント・狭い画面で右カラムが
+            # 画面外へはみ出して「結果が見えない」状態になるのを防ぐ。
+            sc.setFixedWidth(min(want, max(240, int(self.width() * 0.34))))
 
     def fill_misc_table(self, rows):
         # バックラッシ表は「項目＋値」を1行まるごと（全列結合）で表示する。

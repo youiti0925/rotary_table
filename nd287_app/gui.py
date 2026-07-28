@@ -6026,12 +6026,17 @@ class MainWindow(QtWidgets.QMainWindow):
         cond_v = QtWidgets.QVBoxLayout(cond_group)
         cond_v.setSpacing(3)
         cond_v.setContentsMargins(6, 4, 6, 4)
+        # モードとコメントは同じ行に置く（1行ぶん詰めてグラフに場所を回す）
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.setContentsMargins(0, 0, 0, 0)
         lbl_mode = QtWidgets.QLabel("モード")
-        lbl_mode.setMinimumWidth(104)
+        lbl_mode.setMinimumWidth(52)
         mode_row.addWidget(lbl_mode)
-        mode_row.addWidget(self.mode_combo, 1)
+        mode_row.addWidget(self.mode_combo, 2)
+        lbl_comment = QtWidgets.QLabel("コメント")
+        mode_row.addSpacing(8)
+        mode_row.addWidget(lbl_comment)
+        mode_row.addWidget(self.e_comment, 3)
         cond_v.addLayout(mode_row)
         # ホイール／ウォーム／再現 を見出しで分けて並べる（混在させない）
         def cond_header(text):
@@ -6160,13 +6165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         groups_grid.addWidget(self.eval_group, 1, 1, _tl)
 
         cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
-        comment_row = QtWidgets.QHBoxLayout()
-        comment_row.setContentsMargins(0, 0, 0, 0)
-        lbl_comment = QtWidgets.QLabel("コメント")
-        lbl_comment.setMinimumWidth(104)
-        comment_row.addWidget(lbl_comment)
-        comment_row.addWidget(self.e_comment, 1)
-        cond_v.addLayout(comment_row)
+        # コメントはモード行に同居させたのでここには置かない
 
         # ===== 操作グループ（取込のメイン操作）=====
         self.b_start = QtWidgets.QPushButton("取込開始")
@@ -6212,24 +6211,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_raw.clicked.connect(self.show_raw_data)
         self.b_past = QtWidgets.QPushButton("過去データ")
         self.b_past.clicked.connect(self.show_past_data)
-        self.b_analyze = QtWidgets.QPushButton("分析")
-        self.b_analyze.setToolTip("過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷")
-        self.b_analyze.clicked.connect(self.show_analysis)
         self.b_cond = QtWidgets.QPushButton("条件編集")
         self.b_cond.clicked.connect(self.show_condition_editor)
-        self.b_program = QtWidgets.QPushButton("プログラム作成")
-        self.b_program.setToolTip("現在の測定条件からFANUC測定プログラム(Gコード)を作成")
-        self.b_program.clicked.connect(self.show_program_dialog)
-        self.b_param = QtWidgets.QPushButton("パラメータ")
-        self.b_param.setToolTip("受注番号から かんたん作成: Seibanで傾斜/回転を探し、作れる制御装置を選んで"
-                                "パラメータ.prmを作成（2軸テーブルは1ファイル）。詳細設定も中から開けます")
-        self.b_param.clicked.connect(self.show_param_dialog)
         self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
         self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
         self.b_pcorr.clicked.connect(self.show_pitch_correction)
-        self.b_alarm = QtWidgets.QPushButton("アラーム")
-        self.b_alarm.setToolTip("FANUCのアラーム番号・メッセージから意味と対処の目安を調べる")
-        self.b_alarm.clicked.connect(self.show_alarm_help)
+        # 分析・プログラム作成・パラメータ・アラームは「ツール ▾」メニューへまとめる
+        # （下のツールバー組み立てで作る）
         b_load = QtWidgets.QPushButton("ロード")
         b_settings = QtWidgets.QPushButton("設定")
         b_help = QtWidgets.QPushButton("ヘルプ")
@@ -6256,10 +6244,32 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.b_save, self.b_print, self.b_pdf, b_load):
             toolbar.addWidget(b)
         toolbar.addSeparator()
-        for b in (self.b_raw, self.b_past, self.b_analyze):
+        for b in (self.b_raw, self.b_past):
             toolbar.addWidget(b)
         toolbar.addSeparator()
-        for b in (self.b_cond, self.b_program, self.b_param, self.b_pcorr, self.b_alarm):
+        # 分析・プログラム作成・パラメータ・アラームは1つのメニューボタンにまとめる
+        # （ツールバーを短くして、測定条件とグラフに場所を回す）
+        self.b_tools = QtWidgets.QToolButton()
+        self.b_tools.setText("ツール ▾")
+        self.b_tools.setToolTip("分析／プログラム作成／パラメータ／アラーム")
+        self.b_tools.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        tools_menu = QtWidgets.QMenu(self.b_tools)
+        for text, slot, tip in (
+            ("分析…", self.show_analysis,
+             "過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷"),
+            ("プログラム作成…", self.show_program_dialog,
+             "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
+            ("パラメータ…", self.show_param_dialog,
+             "受注番号から かんたん作成（詳細設定・パラメータDBも中から）"),
+            ("アラーム…", self.show_alarm_help,
+             "FANUCのアラーム番号・メッセージから意味と対処の目安を調べる"),
+        ):
+            act = tools_menu.addAction(text)
+            act.setToolTip(tip)
+            act.triggered.connect(slot)
+        self.b_tools.setMenu(tools_menu)
+        toolbar.addWidget(self.b_tools)
+        for b in (self.b_cond, self.b_pcorr):
             toolbar.addWidget(b)
         toolbar.addSeparator()
         toolbar.addWidget(self.guide)        # ロード名・取込手順（アラームの右）
@@ -8356,9 +8366,11 @@ class MainWindow(QtWidgets.QMainWindow):
         need = self.cond_group.sizeHint().height() + 4
         if sc.horizontalScrollBar().isVisible():
             need += sc.horizontalScrollBar().sizeHint().height()
-        cap = max(150, int(self.height() * 0.40))
+        # 測定条件はグラフを優先して控えめに（画面高さの約28%で頭打ち）。
+        # あふれた分はスクロールで読む。
+        cap = max(130, int(self.height() * 0.28))
         sc.setMaximumHeight(min(need, cap))
-        sc.setMinimumHeight(min(need, 130))
+        sc.setMinimumHeight(min(need, 110))
         # 操作バーは中身1行ぶんの高さに固定（縦に伸びてグラフを削らない）
         bs = getattr(self, "bar_scroll", None)
         if bs is not None:

@@ -30,9 +30,17 @@ def parse_angle(raw: bytes):
     """
     if not raw:
         return None
+    raw = raw.replace(ACK, b"")
+    # ND287 は7ビットASCIIで送る。ポートを8ビット(8E1)で開いていると偶数パリティが
+    # bit7 に紛れ込み、'4'(0x34)→0xB4('´') のように先頭の桁が数字と認識されず落ちて
+    # しまう（→0.000000と誤読）。度記号 '°'(0xB0) だけは本物の8ビット文字なので残し、
+    # それ以外は bit7 を落として素の7ビットASCIIへ戻す。'0'(0x30)は偶数パリティで
+    # 0xB0 にはならないので、この処理で '°' と混同することはない。正しく7ビット/8ビットが
+    # 一致している通常時は bit7 が立たないので、この変換は何も変えない（無害）。
+    raw = bytes(b if b == 0xB0 else b & 0x7F for b in raw)
     # latin-1 は全バイトを1:1で文字化する。ascii+ignore だと度記号(0xB0等)が
     # 消えて「123°45」→「12345」のように桁が合体する事故が起きるため不可。
-    text = raw.replace(ACK, b"").decode("latin-1").strip()
+    text = raw.decode("latin-1").strip()
     if not text:
         return None
     nums = re.findall(r"[-+]?\d+(?:\.\d+)?", text)

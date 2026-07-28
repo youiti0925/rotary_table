@@ -35,6 +35,29 @@ class TestParseAngle(unittest.TestCase):
         self.assertIsNone(parse_angle(b"\r\n"))
         self.assertIsNone(parse_angle(b"ERROR\r\n"))
 
+    def test_seven_bit_even_parity_contamination(self):
+        # 実機報告: 8ビットで受けると7ビット偶数パリティがbit7に紛れ、'4'(0x34)が
+        # 0xB4 になって先頭桁が落ち 0.000000 と誤読された。bit7を外して復元する。
+        raw = bytes([0x2B, 0xA0, 0xA0, 0xB4, 0x30, 0x2E, 0x30, 0x30, 0x2E,
+                     0x30, 0x30, 0x2E, 0x30, 0xA0, 0x4D, 0xA0, 0xA0, 0x8D])
+        self.assertAlmostEqual(parse_angle(raw), 40.0, places=6)  # 0ではなく40.00.00.0
+
+    def test_parity_contaminated_ten_degrees(self):
+        # 「+ 10.00.00.0」を7ビット偶数パリティで送った場合（'1'=0x31→0xB1 も復元）
+        clean = b"+ 10.00.00.0 M\r"
+        raw = bytes(b | 0x80 if bin(b).count("1") % 2 else b for b in clean)
+        self.assertAlmostEqual(parse_angle(raw), 10.0, places=6)
+
+    def test_degree_symbol_preserved_not_masked(self):
+        # 正常な8ビットの度記号 '°'(0xB0) はマスクで '0' に化けさせない
+        v = parse_angle("12°30'00.0\"\r\n".encode("latin-1"))
+        self.assertAlmostEqual(v, 12.5, places=9)
+
+    def test_clean_ascii_unchanged_by_mask(self):
+        # 正常時（bit7が立たない）は変換が無害＝従来どおり
+        self.assertAlmostEqual(parse_angle(b"123.4567\r\n"), 123.4567)
+        self.assertAlmostEqual(parse_angle(b"-10 30 00.0\r\n"), -10.5, places=9)
+
 
 class TestExtractAngles(unittest.TestCase):
     def test_multiple_complete_lines(self):

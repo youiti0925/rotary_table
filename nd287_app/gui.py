@@ -5785,6 +5785,29 @@ class AlarmHelpDialog(QtWidgets.QDialog):
         )
 
 
+class _NoWheelFilter(QtCore.QObject):
+    """フォーカスが無い入力欄のホイールを、値の増減ではなく親のスクロールに回す。
+
+    測定条件をスクロール領域に入れたため、パネルをスクロールしようとしたホイールが
+    ポインタ下のスピンボックス/コンボの値を無言で書き換えてしまう（刻み・ブロック数・
+    主点評価・バックラッシ補正・さらにはモードそのもの）。測定条件が黙って変わるのは
+    測定アプリとして致命的なので、フォーカスが当たっていないときは値を変えず、
+    親のスクロール領域へイベントを渡す。クリック/Tabでフォーカスしていれば従来どおり
+    ホイールで増減できる。
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() != QtCore.QEvent.Wheel or obj.hasFocus():
+            return False
+        parent = obj.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QAbstractScrollArea):
+                QtWidgets.QApplication.sendEvent(parent.viewport(), event)
+                return True
+            parent = parent.parentWidget()
+        return True   # スクロール先が無くても値は変えない
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -6406,6 +6429,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # なり、狭い画面や大きいフォントで右の測定結果が画面外へ押し出される。
         # 足りないぶんは横スクロールで見る（潰さない）。
         self.cond_scroll.setMinimumWidth(240)
+        # スクロール領域の中の入力欄は、フォーカスが無いときホイールで値を変えない
+        # （パネルをスクロールしたつもりで測定条件が黙って変わるのを防ぐ）
+        self._nowheel = _NoWheelFilter(self)
+        for _w in (cond_group.findChildren(QtWidgets.QAbstractSpinBox)
+                   + cond_group.findChildren(QtWidgets.QComboBox)):
+            _w.setFocusPolicy(QtCore.Qt.StrongFocus)
+            _w.installEventFilter(self._nowheel)
 
         top_left = QtWidgets.QHBoxLayout()
         top_left.setSpacing(8)
@@ -8369,8 +8399,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # 測定条件はグラフを優先して控えめに（画面高さの約28%で頭打ち）。
         # あふれた分はスクロールで読む。
         cap = max(130, int(self.height() * 0.28))
-        sc.setMaximumHeight(min(need, cap))
-        sc.setMinimumHeight(min(need, 110))
+        h = min(need, cap)
+        # 最小・最大を同じ値にする。maximumHeight は「上限」であってウィジェットを
+        # 伸ばす力が無く、左カラムの余りは stretch のグラフが全部持っていくため、
+        # 最小を上げないと QScrollArea は sizeHint（Qtが内部で頭打ちする値）で止まり、
+        # 場所が空いているのに評価範囲などが隠れてスクロール送りになってしまう。
+        sc.setMinimumHeight(h)
+        sc.setMaximumHeight(h)
         # 操作バーは中身1行ぶんの高さに固定（縦に伸びてグラフを削らない）
         bs = getattr(self, "bar_scroll", None)
         if bs is not None:

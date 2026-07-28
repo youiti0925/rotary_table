@@ -11,14 +11,16 @@ from pathlib import Path
 
 DEFAULTS = dict(
     port="auto",       # "auto" = COMポート自動検出、または "COM3" 等の明示指定
-    baudrate=9600,
+    baudrate=4800,
     parity="E",        # N / E / O
     # 接続プロファイル: X32(USB直結) と X31(変換器経由) で別の設定を保持し、
-    # 画面の接続先プルダウンで切り替える
+    # 画面の接続先プルダウンで切り替える。X31/X32 は同じND287に別配線で繋ぐので、
+    # ND287本体の出力(INSTALLATION SETUP)に合わせた 4800 8E1 を初期値にする
+    # （実機確認済み。ポートはautoで自動検出、7bit偶数パリティは受信側で吸収する）。
     active_profile="X32",
     profiles=dict(
-        X32=dict(port="auto", baudrate=9600, parity="E"),
-        X31=dict(port="auto", baudrate=9600, parity="E"),
+        X32=dict(port="auto", baudrate=4800, parity="E"),
+        X31=dict(port="auto", baudrate=4800, parity="E"),
     ),
     save_root="測定データ",  # セーブ先ルート（相対ならアプリフォルダ基準）
     # 旧形式(.BS)の保存先。空にすると.BSを書かない。

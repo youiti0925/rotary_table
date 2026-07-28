@@ -70,7 +70,15 @@ class TestConnectionProfiles(unittest.TestCase):
         s["active_profile"] = "X32"
         apply_active_profile(s)
         self.assertEqual(s["port"], "auto")
-        self.assertEqual(s["baudrate"], 9600)
+        self.assertEqual(s["baudrate"], 4800)   # X32既定はND287に合わせ4800 8E1
+
+    def test_default_profiles_are_4800_even(self):
+        # X31/X32 とも初期値は ND287 に合わせ 4800 8E1（実機確認済み）
+        with tempfile.TemporaryDirectory() as d:
+            s = load_settings(os.path.join(d, "nosuch.json"))
+        for prof in ("X32", "X31"):
+            self.assertEqual(s["profiles"][prof]["baudrate"], 4800, prof)
+            self.assertEqual(s["profiles"][prof]["parity"], "E", prof)
 
     def test_old_format_migrates_to_active_profile(self):
         # 旧settings.json（プロファイル無し・トップレベルにport等）からの移行

@@ -48,6 +48,27 @@ class TestParseAngle(unittest.TestCase):
         raw = bytes(b | 0x80 if bin(b).count("1") % 2 else b for b in clean)
         self.assertAlmostEqual(parse_angle(raw), 10.0, places=6)
 
+    def test_dotted_dms_seconds_not_dropped(self):
+        # ドット区切り DD.MM.SS を十進度と誤読して秒を落とさない
+        self.assertAlmostEqual(parse_angle(b"40.00.05\r\n"), 40 + 5 / 3600, places=9)
+
+    def test_dotted_dms_with_tenths(self):
+        # DD.MM.SS.t（秒の小数）も読む: 50°00'10.0" = 50.002778°
+        self.assertAlmostEqual(parse_angle(b"50.00.10.0\r\n"),
+                               50 + 10 / 3600, places=9)
+
+    def test_real_50deg_sample_with_parity(self):
+        # 実機の生バイト（7bit偶数パリティ混入）。'5' はパリティ0で0x35のまま、'1'は
+        # 0x31→0xB1 に化ける。両修正で 50°00'10.0" = 50.0028° に復元される。
+        raw = bytes([0x2B, 0xA0, 0xA0, 0x35, 0x30, 0x2E, 0x30, 0x30, 0x2E, 0xB1,
+                     0x30, 0x2E, 0x30, 0xA0, 0x4D, 0xA0, 0xA0, 0x8D])
+        self.assertAlmostEqual(parse_angle(raw), 50 + 10 / 3600, places=6)
+
+    def test_dotted_dms_negative_detached_sign(self):
+        # 符号が数字から離れて出る負値（"-  40.00.05"）も負として読む
+        self.assertAlmostEqual(parse_angle(b"-  40.00.05\r\n"),
+                               -(40 + 5 / 3600), places=9)
+
     def test_degree_symbol_preserved_not_masked(self):
         # 正常な8ビットの度記号 '°'(0xB0) はマスクで '0' に化けさせない
         v = parse_angle("12°30'00.0\"\r\n".encode("latin-1"))

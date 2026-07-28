@@ -46,15 +46,34 @@ def parse_angle(raw: bytes):
     nums = re.findall(r"[-+]?\d+(?:\.\d+)?", text)
     if not nums:
         return None
-    # 度分秒: ° ' " の記号があるか、数値ブロックが3つ以上並ぶ場合
+    # 符号は数字の前にある '-' で判断する。ND287 は "+  50.00.10.0" のように符号が
+    # 数字から離れて出るため、数値トークンに付いた符号だけ見ると負を取りこぼす。
+    first_digit = next((i for i, c in enumerate(text) if c.isdigit()), len(text))
+    sign = -1.0 if "-" in text[:first_digit] else 1.0
+
+    # (1) ドット区切りの度分秒（DD.MM.SS または DD.MM.SS.t）。ND287のDMS出力は ° ' " では
+    #     なくドットで区切ることがあり、"50.00.10.0" を 50.00（十進度）と誤読して分・秒が
+    #     落ちていた（50°00'10.0"=50.00278° が 50.0 になる）。ドットが2つ以上ある数値塊は
+    #     必ず度・分・秒(・秒の小数) として読む。
+    dotted = re.search(r"\d+\.\d+(?:\.\d+)+", text)
+    if dotted and not re.search(r"[°'\"]", text):
+        parts = dotted.group(0).split(".")
+        d = float(parts[0])
+        m = float(parts[1]) if len(parts) > 1 else 0.0
+        # 3つ目以降は秒。4つ目があれば秒の小数（例 10,0 → 10.0秒）
+        s = float(".".join(parts[2:])) if len(parts) > 2 else 0.0
+        return sign * (d + m / 60.0 + s / 3600.0)
+
+    # (2) 記号(° ' ")つき、または空白区切りで数値ブロックが3つ以上並ぶ度分秒
     if re.search(r"[°'\"]", text) or len(nums) >= 3:
-        sign = -1.0 if nums[0].lstrip().startswith("-") else 1.0
-        v = [float(x) for x in nums[:3]]
-        d = abs(v[0])
+        v = [abs(float(x)) for x in nums[:3]]
+        d = v[0]
         m = v[1] if len(v) > 1 else 0.0
         s = v[2] if len(v) > 2 else 0.0
         return sign * (d + m / 60.0 + s / 3600.0)
-    return float(nums[0])
+
+    # (3) 十進度
+    return sign * abs(float(nums[0]))
 
 
 def deg_to_dms(deg: float) -> str:

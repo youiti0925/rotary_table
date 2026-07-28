@@ -157,7 +157,7 @@ def apply_font(app, point_size):
         pt = int(point_size)
     except (TypeError, ValueError):
         pt = DEFAULT_FONT_PT
-    pt = max(7, min(pt, 22))
+    pt = max(5, min(pt, 22))
     font = app.font()
     font.setPointSize(pt)
     app.setFont(font)

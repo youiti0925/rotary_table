@@ -247,7 +247,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.e_theme.setCurrentText(str(settings.get("ui_theme", DEFAULT_THEME)))
         self.e_theme.setToolTip("画面の見た目。OKですぐ反映される")
         self.e_font = QtWidgets.QSpinBox()
-        self.e_font.setRange(7, 22)
+        self.e_font.setRange(5, 22)
         self.e_font.setSuffix(" pt")
         self.e_font.setValue(int(settings.get("ui_font_pt", DEFAULT_FONT_PT)))
         self.e_font.setToolTip("画面全体の文字サイズ。OKですぐ反映される")
@@ -6100,12 +6100,38 @@ class MainWindow(QtWidgets.QMainWindow):
         rg.addWidget(self.c_iso_offset, 3, 0, 1, 4)
         rg.setColumnStretch(4, 1)
 
+        # 測定順（分割系）: ホイール/ウォームのCW/CCWを画面で並べ替え・測る/測らないを選ぶ
+        self.order_group = QtWidgets.QWidget()
+        og = QtWidgets.QGridLayout(self.order_group)
+        og.setContentsMargins(0, 0, 0, 0)
+        og.setHorizontalSpacing(4)
+        og.setVerticalSpacing(3)
+        og.addWidget(cond_header("測定順"), 0, 0, 1, 2)
+        self.order_list = QtWidgets.QListWidget()
+        self.order_list.setToolTip(
+            "上から順に測定します。チェックを外すとその系列は測りません。\n"
+            "↑↓で並べ替え。型式マスタに測定順があれば初期値に入ります。")
+        self.order_list.setFixedWidth(140)
+        self.order_list.setMaximumHeight(92)
+        og.addWidget(self.order_list, 1, 0, 3, 1)
+        b_up = QtWidgets.QToolButton(); b_up.setText("↑")
+        b_up.setToolTip("選んだ系列を上へ（先に測る）")
+        b_up.clicked.connect(lambda: self._move_order(-1))
+        b_dn = QtWidgets.QToolButton(); b_dn.setText("↓")
+        b_dn.setToolTip("選んだ系列を下へ（後で測る）")
+        b_dn.clicked.connect(lambda: self._move_order(1))
+        og.addWidget(b_up, 1, 1)
+        og.addWidget(b_dn, 2, 1)
+        og.setRowStretch(3, 1)
+        self._populate_order_list()
+
         # ホイール/ウォーム/再現を横並びにして縦の高さを詰める（全モードで全部見える）
         groups_row = QtWidgets.QHBoxLayout()
         groups_row.setContentsMargins(0, 0, 0, 0)
         groups_row.setSpacing(14)
         groups_row.addWidget(self.wheel_group, 0, QtCore.Qt.AlignTop)
         groups_row.addWidget(self.worm_group, 0, QtCore.Qt.AlignTop)
+        groups_row.addWidget(self.order_group, 0, QtCore.Qt.AlignTop)
         groups_row.addWidget(self.repeat_group, 0, QtCore.Qt.AlignTop)
         groups_row.addStretch(1)
         cond_v.addLayout(groups_row)
@@ -6804,6 +6830,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # ★傾斜：回転の測定条件・規格は絶対に使わない
             self.master_cond = None
             self.master_judge = None
+            self._populate_order_list()   # 測定順は既定（画面で変更可）
             rec = self.masters.get("user_tilt", {}).get(key)
             if rec:
                 p = user_condition_params(rec, tilt=True)
@@ -6831,6 +6858,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_start.setValue(p["worm_start"])
             self.master_cond = None  # ユーザー登録は測定順なし＝既定順
             self.master_judge = find_entry(self.masters["judgement"], text)
+            self._populate_order_list()   # 測定順は既定（画面で変更可）
             self.statusBar().showMessage(f"{text} ユーザー回転条件を適用")
             return
 
@@ -6838,6 +6866,10 @@ class MainWindow(QtWidgets.QMainWindow):
         judge = find_entry(self.masters["judgement"], text)
         self.master_cond = cond
         self.master_judge = judge
+        # 測定順の初期値をマスタ（HR/WR/WL/HL）から入れる。無ければ既定順。
+        sections = (cond.get("order") if cond else None) or []
+        self._populate_order_list(
+            [SECTION_TO_SERIES[s] for s in sections if s in SECTION_TO_SERIES] or None)
         if cond is None and judge is None:
             self.statusBar().showMessage(f"型式 {text} はマスタに見つかりません（手入力で測定可）")
             return
@@ -6897,6 +6929,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wheel_group.setVisible(show_division)
         self.worm_group.setVisible(show_division)
         self.eval_group.setVisible(show_division)
+        self.order_group.setVisible(show_division)   # 測定順（分割系のみ）
         self.repeat_group.setVisible(show_repeat)
         # ホイールの開始/終了角度は傾斜分割のときだけ（回転は0〜360固定）
         for w in (self.l_wstart2, self.e_wstart, self.l_wend2, self.e_wend):
@@ -6924,6 +6957,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
         self.seq = None
+        self._live_shown = ()   # 逐次表示した完了系列の記録をリセット
         # 表示は補正前に戻す（再描画は下流で行うのでフラグのみ）
         self.show_corrected = False
         self.b_before.setChecked(True)
@@ -7502,14 +7536,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 base, self.e_rstart.value(), self.e_rend.value())
         return base
 
+    def _populate_order_list(self, order=None):
+        """測定順リストを（順番の系列キー列で）作り直す。順に無い系列は末尾・未チェック。"""
+        order = [k for k in (order or SERIES_KEYS) if k in SERIES_KEYS]
+        rest = [k for k in SERIES_KEYS if k not in order]
+        self.order_list.clear()
+        for key in order + rest:
+            it = QtWidgets.QListWidgetItem(SERIES_LABELS[key])
+            it.setData(QtCore.Qt.UserRole, key)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked if key in order else QtCore.Qt.Unchecked)
+            self.order_list.addItem(it)
+
+    def _move_order(self, delta):
+        row = self.order_list.currentRow()
+        if row < 0:
+            return
+        new = row + delta
+        if not (0 <= new < self.order_list.count()):
+            return
+        self.order_list.insertItem(new, self.order_list.takeItem(row))
+        self.order_list.setCurrentRow(new)
+
+    def current_measure_order(self):
+        """画面の測定順のうちチェックされた系列キー列（分割系）。空なら既定順。"""
+        order = []
+        for i in range(self.order_list.count()):
+            it = self.order_list.item(i)
+            if it.checkState() == QtCore.Qt.Checked:
+                order.append(it.data(QtCore.Qt.UserRole))
+        return order or list(SERIES_KEYS)
+
     def build_division_sequence(self):
         wheel_start = self.e_wstart.value() if self.is_tilt() else 0.0
         wheel_end = self.e_wend.value() if self.is_tilt() else 360.0
-        # マスタの測定順（HR/WR/WL/HL）があれば従う
-        order = None
-        if self.master_cond and not self.is_tilt():
-            sections = self.master_cond.get("order") or []
-            order = [SECTION_TO_SERIES[s] for s in sections if s in SECTION_TO_SERIES]
+        # 測定順は画面の並び（測る/測らない含む）に従う。初期値はマスタから入れている。
         return IndexingSequence(
             self.e_wheel.value(),
             self.e_worm.value(),
@@ -7517,7 +7578,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_start.value(),
             wheel_start,
             wheel_end,
-            order=order or None,
+            order=self.current_measure_order(),
         )
 
     def build_sequence(self):
@@ -7659,6 +7720,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.notify_measurement_done()
             self.auto_after_complete()
         else:
+            self.render_live_series()   # 測り終わった系列だけ即結果表示
             self.show_guide()
             self.update_web_snapshot(with_png=(self.seq.idx % 5 == 0))
 
@@ -7931,16 +7993,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setItem(i, j, item)
         self._fit_table_height(table)
 
-    def finish_indexing(self):
-        self.b_corr.setEnabled(True)
-        summary, _ = summarize(self.data, self.applied_blcorr)
-        devs = self.display_series_devs()
-        judge = self.master_judge or {}
+    def _render_accuracy_tables(self, devs, allowed=None, extra=None):
+        """精度PP＋傾き表・単一＋隣接表を描く共通処理。
 
-        # 各系列の4指標(精度PP・単一・隣接・傾き)とその規格をまとめて集める
-        groups = []  # (glabel, slope_limit, specs[4], series[(label, pp, single, adj, slope)])
+        allowed を渡すとその系列キーだけを描く（測定中の逐次表示用）。extra は上の表の
+        末尾に足す (見出し, [(項目,値)]) の並び（主点精度・任意誤差など）。
+        """
+        judge = self.master_judge or {}
+        groups = []  # (glabel, slope_limit, specs[4], series[(label,pp,single,adj,slope)])
         for grp, glabel in (("wheel", "ホイール"), ("worm", "ウォーム")):
-            keys = [k for k in (f"{grp}_cw", f"{grp}_ccw") if k in devs]
+            keys = [k for k in (f"{grp}_cw", f"{grp}_ccw")
+                    if k in devs and (allowed is None or k in allowed)]
             if not keys:
                 continue
             slope_limit = judge.get(f"slope_{'h' if grp == 'wheel' else 'w'}")
@@ -7974,15 +8037,43 @@ class MainWindow(QtWidgets.QMainWindow):
                     rows.append(([label, value, ""], False, "one", [None, None, None]))
             return rows
 
+        self._render_metric_table(self.table_series, PP_SLOPE_HEADERS, build(0, 3, extra))
+        self._render_metric_table(self.table_series2, SINGLE_ADJ_HEADERS, build(1, 2))
+
+    def render_live_series(self):
+        """測定中、測り終わった系列だけ精度PP/単一/隣接/傾きを即表示する（分割系）。
+
+        全系列そろう前に「ホイールCWの結果」などをその場で出す。完了系列が変わった
+        ときだけ描き直す（毎点は描かない）。最後の1系列は finish 側で全体表として出る。
+        """
+        if self.view_kind != "indexing" or self.seq is None:
+            return
+        required = {}
+        for step in getattr(self.seq, "steps", []):
+            required[step[0]] = required.get(step[0], 0) + 1
+        completed = tuple(
+            k for k in SERIES_KEYS
+            if required.get(k) and len(self.data.get(k, ([], []))[0]) >= required[k])
+        if completed == getattr(self, "_live_shown", ()):
+            return
+        self._live_shown = completed
+        if not completed:
+            return
+        devs = {k: (list(self.data[k][0]), list(deviation_sec(*self.data[k])))
+                for k in completed}
+        self._render_accuracy_tables(devs, allowed=set(completed))
+
+    def finish_indexing(self):
+        self.b_corr.setEnabled(True)
+        summary, _ = summarize(self.data, self.applied_blcorr)
+        devs = self.display_series_devs()
         # 上の表＝精度PP＋傾き。単一値の主点精度・任意誤差もこちら（精度なので）
         extra = [("― 主点精度（1/N）―", self.main_grid_rows())]
         if self.is_tilt():
             # 画面の任意誤差は補正前/後トグルに連動（ホイール/ウォームPPと同じ基準）
             extra.append(("― 任意誤差（精度=H+W）―",
                           self.tilt_accuracy_rows(corrected=self.show_corrected)))
-        self._render_metric_table(self.table_series, PP_SLOPE_HEADERS, build(0, 3, extra))
-        # 下の表＝単一誤差＋隣接誤差
-        self._render_metric_table(self.table_series2, SINGLE_ADJ_HEADERS, build(1, 2))
+        self._render_accuracy_tables(devs, extra=extra)
 
         # バックラッシ表（主点精度・任意誤差は上の精度表へ）
         rows = self.compact_misc_rows(summary)

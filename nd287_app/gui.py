@@ -7321,6 +7321,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 for key in CURVE_STYLES
             }
+        self._frame_plots()
+
+    def _frame_plots(self):
+        """グラフの表示範囲を自動できれいに合わせる。
+
+        分割系: ホイールのX軸（指令角度）を測定範囲（回転=0〜360°／傾斜=開始〜終了）に
+        固定し、目盛りを 10°刻み（補助5°）で出す。Y（偏差["]）はデータに自動追従。
+        ウォームは範囲が細かいので両軸とも自動。マウスでの部分拡大はそのまま使える
+        （右クリック→View All、またはダブルクリックで自動範囲へ戻せる）。
+        """
+        if self.view_kind == "repeat":
+            for p in (self.plot_wheel, self.plot_worm):
+                vb = p.getViewBox()
+                vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
+                vb.enableAutoRange(x=True, y=True)
+                p.getAxis("bottom").setTickSpacing()   # 自動目盛りへ戻す
+            return
+        # ホイール: X=角度域に固定・10°刻み、Yは自動
+        if self.is_tilt():
+            lo, hi = self.e_wstart.value(), self.e_wend.value()
+        else:
+            lo, hi = 0.0, 360.0
+        if hi <= lo:
+            hi = lo + 1.0
+        span = hi - lo
+        vb = self.plot_wheel.getViewBox()
+        vb.setLimits(xMin=None, xMax=None)     # 先に制限を外してから範囲を決める
+        vb.enableAutoRange(x=False, y=True)
+        self.plot_wheel.setXRange(lo, hi, padding=0.02)
+        # 測定範囲から大きく離れてパンできないよう制限（拡大縮小は自由・余裕は1範囲ぶん）
+        vb.setLimits(xMin=lo - span, xMax=hi + span)
+        self.plot_wheel.getAxis("bottom").setTickSpacing(10, 5)  # 主10°・補助5°
+        # ウォーム: 自動（細かいので目盛りも自動）
+        vw = self.plot_worm.getViewBox()
+        vw.enableAutoRange(x=True, y=True)
+        vw.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
+        self.plot_worm.getAxis("bottom").setTickSpacing()
 
     # ----- 接続 -----
 
@@ -7922,6 +7959,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.finish_repeat()
         else:
             self.finish_indexing()
+        self._frame_plots()   # ロード/測定完了時に表示範囲をきれいに合わせ直す
 
     def _spec_limit(self, grp, kind):
         """規格の上限[秒]。単一/隣接は統一規格、傾きは合否判定.csv。無ければ None。

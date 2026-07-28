@@ -6111,8 +6111,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.order_list.setToolTip(
             "上から順に測定します。チェックを外すとその系列は測りません。\n"
             "↑↓で並べ替え。型式マスタに測定順があれば初期値に入ります。")
-        self.order_list.setFixedWidth(140)
-        self.order_list.setMaximumHeight(92)
+        # 幅・高さは _populate_order_list が内容（フォント）に合わせて決める
         og.addWidget(self.order_list, 1, 0, 3, 1)
         b_up = QtWidgets.QToolButton(); b_up.setText("↑")
         b_up.setToolTip("選んだ系列を上へ（先に測る）")
@@ -6125,16 +6124,22 @@ class MainWindow(QtWidgets.QMainWindow):
         og.setRowStretch(3, 1)
         self._populate_order_list()
 
-        # ホイール/ウォーム/再現を横並びにして縦の高さを詰める（全モードで全部見える）
-        groups_row = QtWidgets.QHBoxLayout()
-        groups_row.setContentsMargins(0, 0, 0, 0)
-        groups_row.setSpacing(14)
-        groups_row.addWidget(self.wheel_group, 0, QtCore.Qt.AlignTop)
-        groups_row.addWidget(self.worm_group, 0, QtCore.Qt.AlignTop)
-        groups_row.addWidget(self.order_group, 0, QtCore.Qt.AlignTop)
-        groups_row.addWidget(self.repeat_group, 0, QtCore.Qt.AlignTop)
-        groups_row.addStretch(1)
-        cond_v.addLayout(groups_row)
+        # 群は2段のグリッドに折り返す。横1列に全部並べると「傾斜分割+再現」で幅が
+        # 画面を超え、入力欄が潰れて読めなくなり右の結果欄も見えなくなるため。
+        #   1段目: ホイール / ウォーム / 測定順（縦に2段ぶん）
+        #   2段目: 再現     / 主点評価・バックラッシ
+        # モードで隠れた群の行・列は自動で詰まる（再現系は2段目だけになる）。
+        groups_grid = QtWidgets.QGridLayout()
+        groups_grid.setContentsMargins(0, 0, 0, 0)
+        groups_grid.setHorizontalSpacing(14)
+        groups_grid.setVerticalSpacing(6)
+        _tl = QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft
+        groups_grid.addWidget(self.wheel_group, 0, 0, _tl)
+        groups_grid.addWidget(self.worm_group, 0, 1, _tl)
+        groups_grid.addWidget(self.order_group, 0, 2, _tl)
+        groups_grid.addWidget(self.repeat_group, 1, 0, 1, 2, _tl)
+        groups_grid.setColumnStretch(3, 1)
+        cond_v.addLayout(groups_grid)
 
         # 主点評価・バックラッシ補正（分割系のみ）
         self.eval_group = QtWidgets.QWidget()
@@ -6148,10 +6153,9 @@ class MainWindow(QtWidgets.QMainWindow):
         eg.addWidget(self.e_blcorr, 1, 1)
         eg.addWidget(self.b_corr, 1, 2)
         eg.setColumnStretch(3, 1)
-        # 主点評価・バックラッシ補正は、ホイール/ウォーム/再現の群と同じ横帯に
-        # 並べて横スペースを使う（短い行が単独で残って右に大きな空白ができるのを防ぐ）。
-        groups_row.insertWidget(groups_row.count() - 1, self.eval_group,
-                                0, QtCore.Qt.AlignTop)
+        # 主点評価・バックラッシ補正は2段目のウォーム列の下（分割系のみ表示）。
+        # 分割単独では2段目がこれだけになり、合体では再現の隣に収まる。
+        groups_grid.addWidget(self.eval_group, 1, 2, _tl)
 
         cond_v.addWidget(self.box_ranges)  # 評価範囲（傾斜のみ）は全幅
         comment_row = QtWidgets.QHBoxLayout()
@@ -7584,6 +7588,13 @@ class MainWindow(QtWidgets.QMainWindow):
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Checked if key in order else QtCore.Qt.Unchecked)
             self.order_list.addItem(it)
+        # 4行が常に全部見える高さ・文字が切れない幅に合わせる（スクロールさせない）
+        fm = self.order_list.fontMetrics()
+        row_h = max(self.order_list.sizeHintForRow(0), fm.height() + 4)
+        frame = 2 * self.order_list.frameWidth()
+        self.order_list.setFixedHeight(row_h * self.order_list.count() + frame + 4)
+        text_w = max(fm.horizontalAdvance(SERIES_LABELS[k]) for k in SERIES_KEYS)
+        self.order_list.setFixedWidth(text_w + 46 + frame)  # チェック+余白ぶん
 
     def _move_order(self, delta):
         row = self.order_list.currentRow()

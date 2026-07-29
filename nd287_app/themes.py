@@ -27,7 +27,14 @@ DEFAULT_FONT_PT = 7
 
 
 def _light(accent, accent_hover, accent_press, bg, panel, border,
-           header_bg, header_fg, text, muted, primary_fg="#ffffff", pad="6px 12px"):
+           header_bg, header_fg, text, muted, primary_fg="#ffffff",
+           pad="2px 8px", btn_pad="4px 11px"):
+    """pad は入力欄、btn_pad はボタンの内側余白。
+
+    上下の余白は文字の高さに対して控えめにする。ここが大きいと、測定情報の
+    テキストボックスや測定条件のスピンボックスが1つ1つ背高になり、画面の縦を
+    無駄に食ってグラフが小さくなる（実機で指摘あり）。
+    """
     sel_fg = "#ffffff"
     return f"""
 QMainWindow, QDialog, QWidget {{ background: {bg}; color: {text}; }}
@@ -49,7 +56,7 @@ QComboBox QAbstractItemView {{
 
 QPushButton {{
     background: {panel}; border: 1px solid {border}; border-radius: 6px;
-    padding: {pad}; color: {text};
+    padding: {btn_pad}; color: {text};
 }}
 QPushButton:hover {{ background: {accent_hover}; border-color: {accent}; }}
 QPushButton:pressed {{ background: {accent_press}; }}
@@ -58,24 +65,27 @@ QPushButton:disabled {{ color: {muted}; background: {bg}; border-color: {border}
 /* 主要アクション（取込開始・自動測定）は塗りつぶしで目立たせる */
 QPushButton#primary {{
     background: {accent}; color: {primary_fg}; border: none; border-radius: 7px;
-    padding: 9px 14px; font-weight: bold;
+    padding: 5px 13px; font-weight: bold;
 }}
 QPushButton#primary:hover {{ background: {accent_press}; }}
 QPushButton#primary:disabled {{ background: {border}; color: {muted}; }}
 
 QGroupBox {{
     background: {panel}; border: 1px solid {border}; border-radius: 8px;
-    margin-top: 12px; padding: 8px 8px 6px 8px;
+    margin-top: 9px; padding: 5px 7px 4px 7px;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin; subcontrol-position: top left;
     left: 10px; padding: 1px 7px; color: {accent}; font-weight: bold;
 }}
 
-QToolBar {{ background: {header_bg}; border: none; spacing: 4px; padding: 5px 8px; }}
-QToolBar::separator {{ background: {border}; width: 1px; margin: 4px 6px; }}
-QToolBar QPushButton {{ background: transparent; border: 1px solid transparent;
-    border-radius: 6px; padding: 6px 12px; color: {header_fg}; }}
+QToolBar {{ background: {header_bg}; border: none; spacing: 3px; padding: 2px 6px; }}
+QToolBar::separator {{ background: {border}; width: 1px; margin: 3px 5px; }}
+QToolBar QPushButton, QToolBar QToolButton {{ background: transparent;
+    border: 1px solid transparent; border-radius: 6px; padding: 3px 10px;
+    color: {header_fg}; }}
+QToolBar QToolButton:hover {{ background: {accent_hover}; border-color: {accent};
+    color: {text}; }}
 QToolBar QPushButton:hover {{ background: {accent_hover}; border-color: {accent};
     color: {text}; }}
 QToolBar QPushButton:pressed {{ background: {accent_press}; }}
@@ -96,7 +106,7 @@ QTableWidget, QTableView {{
 QTableWidget::item:selected, QTableView::item:selected {{
     background: {accent}; color: {sel_fg}; }}
 QHeaderView::section {{
-    background: {header_bg}; color: {header_fg}; padding: 6px; border: none;
+    background: {header_bg}; color: {header_fg}; padding: 3px 5px; border: none;
     border-right: 1px solid {border}; border-bottom: 1px solid {border};
     font-weight: bold;
 }}
@@ -132,7 +142,7 @@ THEMES = {
         accent="#0d9488", accent_hover="#e3f4f1", accent_press="#0b7d72",
         bg="#eef6f4", panel="#ffffff", border="#c5d8d4",
         header_bg="#ffffff", header_fg="#14302b", text="#14302b", muted="#7d9b95",
-        pad="8px 14px"),
+        pad="3px 10px", btn_pad="5px 12px"),
     "ダーク・スレート": _light(
         accent="#38bdf8", accent_hover="#1e3a52", accent_press="#0ea5e9",
         bg="#0f172a", panel="#1e293b", border="#334155",

@@ -237,3 +237,71 @@ class TestBasicFileOriginPriority(unittest.TestCase):
         d = self._dir({"F10BASIC.DAT": self.MACHINE, "F100BASIC.DAT": self.MACHINE})
         self.assertTrue(
             C.basic_file_for_unit(d, "10").endswith("F10BASIC.DAT"))
+
+
+class TestBasicCoverage(unittest.TestCase):
+    """号機マスタ × BASICフォルダ ＝「実機から何を取ってくればよいか」"""
+
+    MACHINE = b"%\n\r\rN00000Q1L1P0\n\r\rN01825Q1A1P3000\n\r\r%\n\r\r"
+    CONVERTED = MACHINE.replace(b"\n\r\r", b"\r\n\r\n\r\n")
+    PC = b"%\nN00000Q1L1P0\nN01825Q1A1P3000\n%\n"
+
+    def _dir(self, files):
+        d = tempfile.mkdtemp()
+        for name, data in files.items():
+            (Path(d) / name).write_bytes(data)
+        return d
+
+    def test_three_way_split(self):
+        d = self._dir({
+            "F22BASIC.txt": self.MACHINE,     # 実機あり
+            "F23BASIC.DAT": self.MACHINE,     # 実機あり（PC製も並ぶ）
+            "F23BASIC.prm": self.PC,
+            "F24BASIC.prm": self.PC,          # PC製しか無い
+            "F17BASIC.DAT": self.CONVERTED,   # 実機（改行変換済）も実機扱い
+            "F99BASIC.DAT": self.MACHINE,     # 号機マスタに無い
+        })
+        cov = C.basic_coverage(d, ["17", "22", "23", "24", "81"])
+        self.assertEqual(sorted(u for u, _f in cov["ok"]), ["17", "22", "23"])
+        self.assertEqual([u for u, _n in cov["pc_only"]], ["24"])
+        self.assertEqual(cov["missing"], ["81"])
+        self.assertEqual([u for u, _n in cov["extra"]], ["99"])
+
+    def test_ok_points_at_the_machine_file(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE, "F23BASIC.prm": self.PC})
+        cov = C.basic_coverage(d, ["23"])
+        self.assertEqual(cov["ok"], [("23", "F23BASIC.DAT")])
+
+    def test_pc_only_lists_what_is_there(self):
+        d = self._dir({"F24BASIC.prm": self.PC, "F24BASIC.txt": self.PC})
+        cov = C.basic_coverage(d, ["24"])
+        self.assertEqual(cov["pc_only"][0][0], "24")
+        self.assertEqual(sorted(cov["pc_only"][0][1]), ["F24BASIC.prm", "F24BASIC.txt"])
+
+    def test_summary_text(self):
+        d = self._dir({"F22BASIC.txt": self.MACHINE, "F24BASIC.prm": self.PC})
+        cov = C.basic_coverage(d, ["22", "24", "81"])
+        text = C.coverage_summary(cov)
+        self.assertIn("F24", text)
+        self.assertIn("F81", text)
+        self.assertIn("実機のBASICがある 1台", text)
+
+    def test_everything_covered_has_no_warnings(self):
+        d = self._dir({"F22BASIC.txt": self.MACHINE})
+        cov = C.basic_coverage(d, ["22"])
+        self.assertEqual(cov["pc_only"], [])
+        self.assertEqual(cov["missing"], [])
+
+    def test_leading_zero_units_match(self):
+        d = self._dir({"F10BASIC.DAT": self.MACHINE})
+        cov = C.basic_coverage(d, ["010"])
+        self.assertEqual([u for u, _f in cov["ok"]], ["010"])
+
+    def test_missing_folder(self):
+        cov = C.basic_coverage("/no/such/dir", ["22"])
+        self.assertEqual(cov["missing"], ["22"])
+        self.assertEqual(cov["ok"], [])
+
+    def test_files_by_unit_ignores_non_basic(self):
+        d = self._dir({"F22BASIC.txt": self.MACHINE, "readme.txt": b"hello"})
+        self.assertEqual(list(C.basic_files_by_unit(d)), ["22"])

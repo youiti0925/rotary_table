@@ -289,6 +289,81 @@ def basic_file_for_unit(folder, unit):
     return str(cands[0])
 
 
+def basic_files_by_unit(folder) -> dict:
+    """BASICフォルダを号機ごとにまとめる。{号機: [(ファイル名, 出どころ), ...]}
+
+    出どころは param_origin.classify の verdict（machine / converted / pc / unknown）。
+    判定は先頭64KBだけ読む（区切りの形はファイル全体で同じ）。
+    """
+    from pathlib import Path
+
+    from . import param_origin
+    base = Path(folder) if folder else None
+    if not base or not base.is_dir():
+        return {}
+    out = {}
+    for p in sorted(base.iterdir()):
+        if not p.is_file():
+            continue
+        m = re.match(r"^F(\d+)BASIC", p.name, re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            with p.open("rb") as f:
+                verdict = param_origin.classify(f.read(65536))["verdict"]
+        except Exception:
+            verdict = "unknown"
+        out.setdefault(str(int(m.group(1))), []).append((p.name, verdict))
+    return out
+
+
+def basic_coverage(folder, units) -> dict:
+    """号機一覧と BASICフォルダを突き合わせて「何が足りないか」を出す。
+
+    製品ファイルは実機が出したBASICを元に作るのが確実なので、
+    「実機のBASICがあるか」を基準に3つに分ける。
+
+    戻り値: {
+        "ok":      [(号機, ファイル名)],        実機のBASICがある
+        "pc_only": [(号機, [ファイル名, ...])], BASICはあるが全部PC製
+                                                → 実機からバックアップを取る必要がある
+        "missing": [号機, ...],                 BASICが1本も無い
+        "extra":   [(号機, [ファイル名, ...])], 号機一覧に無いがBASICはある
+    }
+    """
+    by_unit = basic_files_by_unit(folder)
+    want = [str(u).strip() for u in (units or []) if str(u).strip()]
+    norm = {str(int(u)) if str(u).isdigit() else str(u) for u in want}
+    ok, pc_only, missing = [], [], []
+    for u in want:
+        key = str(int(u)) if str(u).isdigit() else str(u)
+        entries = by_unit.get(key)
+        if not entries:
+            missing.append(u)
+            continue
+        machine = [n for n, v in entries if v in ("machine", "converted")]
+        if machine:
+            ok.append((u, machine[0]))
+        else:
+            pc_only.append((u, [n for n, _v in entries]))
+    extra = [(u, [n for n, _v in v]) for u, v in sorted(
+        by_unit.items(), key=lambda kv: int(kv[0])) if u not in norm]
+    return {"ok": ok, "pc_only": pc_only, "missing": missing, "extra": extra}
+
+
+def coverage_summary(cov: dict) -> str:
+    """basic_coverage の結果を1〜数行の文にする（画面表示用）。"""
+    lines = [f"実機のBASICがある {len(cov['ok'])}台"]
+    if cov["pc_only"]:
+        lines.append("★実機のバックアップが要る（PC製しか無い） "
+                     + "／".join(f"F{u}" for u, _n in cov["pc_only"]))
+    if cov["missing"]:
+        lines.append("★BASICが1本も無い " + "／".join(f"F{u}" for u in cov["missing"]))
+    if cov["extra"]:
+        lines.append(f"（号機一覧に無いがBASICはある {len(cov['extra'])}台）")
+    return "　".join(lines)
+
+
 def basic_choice_for_unit(folder, unit) -> tuple:
     """号機に対応するBASICと、その出どころを (パス, info) で返す。
 

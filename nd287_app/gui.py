@@ -2740,9 +2740,10 @@ class BasicOriginDialog(QtWidgets.QDialog):
 
     HEADERS = ("ファイル", "種類", "出どころ", "区切り(EOB)", "行数", "判定の根拠")
 
-    def __init__(self, parent, rows, folder):
+    def __init__(self, parent, rows, folder, cov=None):
         super().__init__(parent)
         self.rows = rows
+        self.cov = cov
         self.setWindowTitle("BASICの出どころ判定")
         v = QtWidgets.QVBoxLayout(self)
         head = QtWidgets.QLabel(
@@ -2752,6 +2753,26 @@ class BasicOriginDialog(QtWidgets.QDialog):
             "<code>CRLF</code> です。<b>製品ファイルは「実機」の行を元に作ってください。</b>")
         head.setWordWrap(True)
         v.addWidget(head)
+
+        # 号機マスタと突き合わせた「足りないBASIC」。次に実機から何を取ってくれば
+        # よいかが、この一覧を見なくても分かるように先頭へ出す。
+        if cov and (cov["pc_only"] or cov["missing"]):
+            need = QtWidgets.QLabel(self._coverage_html(cov))
+            need.setWordWrap(True)
+            need.setTextFormat(QtCore.Qt.RichText)
+            need.setStyleSheet(
+                "color:#b91c1c; background:#fef2f2; border:1px solid #fecaca;"
+                "border-radius:6px; padding:6px 9px;")
+            v.addWidget(need)
+        elif cov:
+            okmsg = QtWidgets.QLabel(
+                f"号機マスタの {len(cov['ok'])}台すべてに実機のBASICがあります。"
+                "実機から取ってくる必要のあるものはありません。")
+            okmsg.setWordWrap(True)
+            okmsg.setStyleSheet(
+                "color:#15803d; background:#f0fdf4; border:1px solid #bbf7d0;"
+                "border-radius:6px; padding:6px 9px;")
+            v.addWidget(okmsg)
 
         self.table = QtWidgets.QTableWidget(len(rows), len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
@@ -2787,6 +2808,21 @@ class BasicOriginDialog(QtWidgets.QDialog):
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
         self.resize(min(1100, avail.width() - 80), min(640, avail.height() - 80))
 
+    @staticmethod
+    def _coverage_html(cov):
+        """号機マスタと突き合わせた「足りないBASIC」の文面。"""
+        parts = ["<b>実機から取ってくる必要があるBASIC</b>"]
+        if cov["pc_only"]:
+            items = "、".join(f"<b>F{u}</b>（今あるのは {'・'.join(names)}）"
+                              for u, names in cov["pc_only"])
+            parts.append(f"・PC製しか無い {len(cov['pc_only'])}台: {items}")
+        if cov["missing"]:
+            parts.append("・BASICが1本も無い "
+                         f"{len(cov['missing'])}台: "
+                         + "、".join(f"<b>F{u}</b>" for u in cov["missing"]))
+        parts.append(f"（実機のBASICが揃っているのは {len(cov['ok'])}台）")
+        return "<br>".join(parts)
+
     def save_csv(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "判定結果を保存", "BASIC出どころ判定.csv", "CSV (*.csv)")
@@ -2799,6 +2835,14 @@ class BasicOriginDialog(QtWidgets.QDialog):
             for name, info, p in self.rows:
                 w.writerow([name, info["kind"], info["label"], info["eob"],
                             info["lines"], " / ".join(info["reasons"])])
+            if self.cov:
+                w.writerow([])
+                w.writerow(["実機から取ってくる必要があるBASIC"])
+                for u, names in self.cov["pc_only"]:
+                    w.writerow([f"F{u}", "PC製しか無い", " / ".join(names)])
+                for u in self.cov["missing"]:
+                    w.writerow([f"F{u}", "BASICが1本も無い", ""])
+                w.writerow(["実機のBASICが揃っている台数", len(self.cov["ok"])])
         QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
 
 
@@ -3152,7 +3196,9 @@ class ParamDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(
                 self, "出どころ判定", "フォルダにファイルがありません")
             return
-        BasicOriginDialog(self, rows, folder).exec()
+        cov = (controllers.basic_coverage(folder, [c.unit for c in self._controllers])
+               if self._controllers else None)
+        BasicOriginDialog(self, rows, folder, cov).exec()
 
     def _browse_basic_dir(self):
         p = QtWidgets.QFileDialog.getExistingDirectory(

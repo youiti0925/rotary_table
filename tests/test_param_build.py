@@ -602,3 +602,26 @@ class TestZeroIndividual(unittest.TestCase):
             self.RAW, {1: {"01850": "1234"}}, None, "", B.ZERO_INDIVIDUAL_PARAMS)
         self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "1234")
         self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")
+
+
+class TestDropNumbersRobustness(unittest.TestCase):
+    """番号リストに変な要素が混ざっても落ちない（呼び側のリストをそのまま渡せる）"""
+
+    TEXT = "%\nN01825Q1A1P3000\nN09999Q1L1P0\n%\n"
+
+    def test_ignores_unreadable_entries(self):
+        kept, removed = F_PRM.drop_numbers(self.TEXT, [None, "", "あ", 9999, "N01825"])
+        self.assertEqual(sorted(removed), [1825, 9999])
+
+    def test_accepts_string_and_prefixed_numbers(self):
+        _kept, removed = F_PRM.drop_numbers(self.TEXT, ["09999"])
+        self.assertEqual(removed, [9999])
+
+    def test_empty_list(self):
+        kept, removed = F_PRM.drop_numbers(self.TEXT, [])
+        self.assertEqual(removed, [])
+        self.assertEqual(kept, self.TEXT)   # 何も指定しなければ中身は変わらない
+
+    def test_none_list(self):
+        _kept, removed = F_PRM.drop_numbers(self.TEXT, None)
+        self.assertEqual(removed, [])

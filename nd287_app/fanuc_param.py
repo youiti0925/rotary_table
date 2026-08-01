@@ -47,8 +47,17 @@ def unknown_numbers(text: str, reference: str) -> list:
 
 
 def drop_numbers(text: str, numbers) -> tuple:
-    """指定した番号の行を取り除いたテキストと、取り除いた番号を返す。"""
-    drop = {int(n) for n in (numbers or [])}
+    """指定した番号の行を取り除いたテキストと、取り除いた番号を返す。
+
+    番号として読めない要素（None・空・文字）は黙って無視する。呼び側が
+    別のところで作ったリストをそのまま渡せるようにするため。
+    """
+    drop = set()
+    for n in (numbers or []):
+        try:
+            drop.add(int(str(n).strip().lstrip("Nn")))
+        except (TypeError, ValueError):
+            continue
     kept, removed = [], []
     for line in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         num = param_number(line)

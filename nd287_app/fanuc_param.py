@@ -138,6 +138,12 @@ def validate_prm(text: str, reference: str = "") -> list:
         problems.append(f"ASCIIでない文字が入っています {''.join(bad)[:8]!r}")
     if not any(param_number(l) is not None for l in lines):
         problems.append("N<番号>Q1… のパラメータ行が1つもありません")
+    dup = duplicate_numbers(text)
+    if dup:
+        problems.append(
+            f"同じ番号が2回以上出てくる行が {len(dup)}個 あります"
+            f"（N{dup[0]}〜N{dup[-1]}）。アプリは最初の1つだけを読み書きするので、"
+            "2つ目以降には製品値が入りません")
     if reference:
         extra = unknown_numbers(text, reference)
         if extra:
@@ -368,15 +374,39 @@ def looks_like_fanuc_prm(text: str) -> bool:
     return len(re.findall(r"(?m)^\s*N\d{3,5}\s+(?:[LAST]\d+\s+)?[PM]\s*[-+]?\d", text)) >= 3
 
 
+def duplicate_numbers(text: str) -> list:
+    """同じ番号が2回以上出てくる場合、その番号を返す（多系統の制御装置など）。
+
+    アプリは get_value/set_value とも「最初に出てきた行」を読み書きするので、
+    重複があると2つ目以降は読まれず、書き換えもされない。実データでは
+    F35BASIC（6軸）だけが該当し、2000番台が2回ずつ出ていた。
+    """
+    seen, dup = set(), set()
+    for line in str(text).replace("\r", "\n").split("\n"):
+        n = param_number(line)
+        if n is None:
+            continue
+        n = _norm_num(n)
+        if n in seen:
+            dup.add(n)
+        seen.add(n)
+    return sorted(dup)
+
+
 def values_map(text: str) -> dict:
-    """{(番号, ラベル): 値} の辞書にする。ラベルは 'L1'/'A4'/'S1'/'' など。"""
+    """{(番号, ラベル): 値} の辞書にする。ラベルは 'L1'/'A4'/'S1'/'' など。
+
+    同じ番号が2回以上あるときは「最初の行」を採る。get_value/set_value と
+    同じ行を指すようにするため（以前は最後が残り、読む場所によって値が
+    食い違っていた）。重複そのものは duplicate_numbers で知らせる。
+    """
     out = {}
     for line in text.splitlines():
         num = param_number(line)
         if num is None:
             continue
         for (g, t, v) in segments(line):
-            out[(num, g)] = v
+            out.setdefault((num, g), v)     # 先勝ち（get_value と同じ行を指す）
     return out
 
 

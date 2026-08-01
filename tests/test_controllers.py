@@ -314,10 +314,14 @@ class TestCapacityMatch(unittest.TestCase):
     N2165 だった（30軸一致／F25・F31 の4軸だけ食い違い）。
     """
 
+    # 軸は 1020（軸名のASCIIコード X=88 Y=89 Z=90 A=65）で決まる。
+    # 位置で決め打ちしないので、見本にも実ファイルと同じく 1020 を入れる。
     def _text(self, a1, a2=None, a3=None, a4=None):
-        seg = "".join(f"A{i}P{v}" for i, v in
-                      enumerate((a1, a2, a3, a4), 1) if v is not None)
-        return f"%\nN02165Q1{seg}\n%\n"
+        vals = [v for v in (a1, a2, a3, a4) if v is not None]
+        codes = "".join(f"A{i}P{c}" for i, c in
+                        enumerate((88, 89, 90, 65)[:len(vals)], 1))
+        seg = "".join(f"A{i}P{v}" for i, v in enumerate(vals, 1))
+        return f"%\nN01020Q1{codes}\nN02165Q1{seg}\n%\n"
 
     def _ctl(self, **caps):
         return C.Controller("23", caps=caps)
@@ -326,6 +330,11 @@ class TestCapacityMatch(unittest.TestCase):
         t = self._text("25", "45", "85", "165")
         ctl = self._ctl(X="20A", Y="40A", Z="80A", A="160A")
         self.assertEqual(C.check_capacity_match(t, ctl), [])
+
+    def test_reads_capacity_for_every_axis(self):
+        t = self._text("25", "45", "85", "165")
+        self.assertEqual(C.capacity_from_basic(t),
+                         {"X": "20A", "Y": "40A", "Z": "80A", "A": "160A"})
 
     def test_mismatch_reported_per_axis(self):
         # 実データの F25 と同じ形: マスタ80Aなのにファイルは25/45
@@ -345,19 +354,35 @@ class TestCapacityMatch(unittest.TestCase):
         ctl = self._ctl(X="20A")
         self.assertEqual(C.check_capacity_match("%\nN01825Q1A1P3000\n%\n", ctl), [])
 
-    def test_unknown_capacity_is_skipped(self):
+    def test_master_with_odd_capacity_is_reported(self):
+        # マスタ側が見慣れない値でも、ファイルから読めたなら食い違いとして出す
+        # （BASICが正・マスタが古い、という向きで見る）
         t = self._text("25")
-        ctl = self._ctl(X="999A")
-        self.assertEqual(C.check_capacity_match(t, ctl), [])
+        ng = C.check_capacity_match(t, self._ctl(X="999A"))
+        self.assertEqual(len(ng), 1)
+        self.assertIn("999A", ng[0])
+        self.assertIn("20A", ng[0])
 
     def test_no_controller(self):
         self.assertEqual(C.check_capacity_match(self._text("25"), None), [])
 
     def test_map_is_overridable(self):
+        # AMR=30 は既定の規則(AMR=容量+5)だと 25A で標準容量に無く判定不能。
+        # 設定で対応表を渡せば、その機種の流儀で読める。
         t = self._text("30")
         ctl = self._ctl(X="20A")
-        self.assertTrue(C.check_capacity_match(t, ctl))
         self.assertEqual(C.check_capacity_match(t, ctl, {"20A": "30"}), [])
+
+    def test_unresolvable_amr_is_not_reported(self):
+        # 判定できない値で「食い違い」と言わない（実データ F35 の AMR=10 など）
+        t = self._text("10")
+        self.assertEqual(C.check_capacity_match(t, self._ctl(X="20A")), [])
+
+    def test_axis_order_from_1020_not_position(self):
+        # スロットの位置ではなく 1020 の軸名で判定する（B/C軸も見る）
+        t = ("%\nN01020Q1A1P90A2P66\nN02165Q1A1P25A2P85\n%\n")   # A1=Z, A2=B
+        caps = C.capacity_from_basic(t)
+        self.assertEqual(caps, {"Z": "20A", "B": "80A"})
 
 
 class TestMasterFixFromBasic(unittest.TestCase):
@@ -366,8 +391,9 @@ class TestMasterFixFromBasic(unittest.TestCase):
     容量→N2165 の対応（20A=25 / 40A=45 / 80A=85 / 160A=165）を逆に使う。
     """
 
-    MACHINE = b"%\n\r\rN02165Q1A1P25A2P45A3P85A4P165\n\r\r%\n\r\r"
-    PC = b"%\nN02165Q1A1P25A2P45\n%\n"
+    MACHINE = (b"%\n\r\rN01020Q1A1P88A2P89A3P90A4P65\n\r\r"
+               b"N02165Q1A1P25A2P45A3P85A4P165\n\r\r%\n\r\r")
+    PC = b"%\nN01020Q1A1P88A2P89\nN02165Q1A1P25A2P45\n%\n"
 
     def _dir(self, files):
         d = tempfile.mkdtemp()

@@ -289,62 +289,69 @@ def basic_file_for_unit(folder, unit):
     return str(cands[0])
 
 
-# サーボアンプの容量と、パラメータ N2165（アンプ最大電流）の対応。
-# 実機BASIC 10台・34軸を突き合わせて確認した（30軸が一致、2台4軸だけ食い違い）。
-# 機種で変わり得るので、settings の "amp_current_map" で上書きできる。
+# BASICと号機マスタの容量照合。軸の判定・AMR→容量の換算は、この上にある
+# controller_from_basic_text / amr_to_capacity を使う（A1=X のような決め打ちを
+# しない。実データに X-Y-Z-A-B-C の6軸機があり、位置で決めると B/C を見落とす）。
 AMP_CURRENT_PARAM = "2165"
-CAPACITY_TO_AMP_CURRENT = {"20A": "25", "40A": "45", "80A": "85", "160A": "165"}
-# パラメータの軸ラベル(A1..) と 号機マスタの軸名(X,Y,Z,A) の対応
-AXIS_LABEL_TO_NAME = {"A1": "X", "A2": "Y", "A3": "Z", "A4": "A"}
 
 
 def check_capacity_match(text, ctl, amp_map=None, param=AMP_CURRENT_PARAM) -> list:
-    """BASICのアンプ最大電流と、号機マスタの容量が合っているかを調べる。
+    """BASICから読んだ軸ごとの容量と、号機マスタの容量が合っているかを調べる。
 
     パラメータのうち「仕様で決まるもの」と「個体で決まるもの」を実データで
-    分けた結果、容量と1対1に対応していたのが N2165（アンプ最大電流）だった。
+    分けた結果、容量と対応していたのが N2165（アンプ最大電流）だった。
     ここが食い違うファイルは、その号機のものではないか、マスタが古い。
 
     戻り値: 食い違いの説明リスト（空なら一致、照合できない場合も空）。
     """
-    amp_map = amp_map or CAPACITY_TO_AMP_CURRENT
     if ctl is None:
         return []
     from . import fanuc_param
+    found = capacity_from_basic(text, amp_map, param)
     out = []
-    for label, axis in AXIS_LABEL_TO_NAME.items():
-        cap = (ctl.caps or {}).get(axis)
-        if not cap:
+    for axis, cap in sorted(found.items()):
+        cur = (ctl.caps or {}).get(axis)
+        if not cur or cap == cur:
             continue
-        want = amp_map.get(str(cap).strip().upper())
-        if want is None:
-            continue
-        got = fanuc_param.get_value(text, param, label)
-        if got is None:
-            continue
-        if str(got).strip() != str(want):
-            out.append(f"{axis}軸: マスタは{cap}（N{fanuc_param._norm_num(param)}="
-                       f"{want} のはず）だがファイルは {got}")
+        amr = fanuc_param.get_value(text, param, _label_of_axis(text, axis))
+        out.append(f"{axis}軸: マスタは{cur} だがファイルは {cap}"
+                   + (f"（N{fanuc_param._norm_num(param)}={amr}）" if amr else ""))
     return out
 
 
-def capacity_from_basic(text, amp_map=None, param=AMP_CURRENT_PARAM) -> dict:
-    """BASICのアンプ最大電流(N2165)から、軸ごとの容量を読み取る。
-
-    実機のファイルが正で、号機マスタの方が古いことがある。そのときに
-    マスタを実機へ合わせるために使う。戻り値: {"X": "20A", ...}
-    """
-    amp_map = amp_map or CAPACITY_TO_AMP_CURRENT
-    rev = {str(v): k for k, v in amp_map.items()}
+def _label_of_axis(text, axis):
+    """軸名(X/Y/…)が入っているスロットのラベル(A1..)を返す。無ければ ""。"""
     from . import fanuc_param
-    out = {}
-    for label, axis in AXIS_LABEL_TO_NAME.items():
-        v = fanuc_param.get_value(text, param, label)
-        if v is None:
-            continue
-        cap = rev.get(str(v).strip())
-        if cap:
-            out[axis] = cap
+    want = {v: k for k, v in _AXIS_CODE.items()}.get(axis)
+    if want is None:
+        return ""
+    for i in range(1, 13):
+        lab = f"A{i}"
+        code = fanuc_param.get_value(text, "1020", lab)
+        if code is not None and str(code).strip().lstrip("-").isdigit() \
+                and int(code) == want:
+            return lab
+    return ""
+
+
+def capacity_from_basic(text, amp_map=None, param=AMP_CURRENT_PARAM) -> dict:
+    """BASICから軸ごとの容量を読む。戻り値: {"X": "20A", ...}（読めた軸だけ）。
+
+    軸の判定は 1020（軸名コード）、容量は 2165（AMR）→ amr_to_capacity。
+    amp_map を渡すとその対応を優先する（機種で違うときの逃げ道）。
+    """
+    caps = controller_from_basic_text(text, "").caps
+    out = {a: c for a, c in (caps or {}).items() if c}
+    if amp_map:
+        from . import fanuc_param
+        for axis in list(out):
+            lab = _label_of_axis(text, axis)
+            v = fanuc_param.get_value(text, param, lab) if lab else None
+            if v is None:
+                continue
+            hit = [k for k, x in amp_map.items() if str(x) == str(v).strip()]
+            if hit:
+                out[axis] = _norm_cap(hit[0])
     return out
 
 

@@ -3358,6 +3358,9 @@ class ParamDialog(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"BASIC を読めません:\n{e}")
             return
+        # 使うBASICそのものを先に点検する（作った後ではなく、選んだ時点で気づけるように）
+        if not self._check_basic(master_path):
+            return
         # 2軸テーブル自動判定: 完成製品.prm が複数軸を変更していれば、傾斜軸・回転軸の
         # 両方を1つのBASICへ入れて1ファイルにする（片軸ずつ別ファイルだと、もう片方が
         # 読込時にBASIC値へ戻ってしまうため、1ファイルに両軸を入れるのが正しい）。
@@ -3636,8 +3639,34 @@ class ParamDialog(QtWidgets.QDialog):
         """パラメータファイルのブロック区切り（既定は実機と同じ LF CR CR）。"""
         return self.settings.get("nc_eob") or fanuc.DEFAULT_EOB
 
-    def _reference_backup(self):
-        """照合に使う実機バックアップのテキスト（設定してあれば）。無ければ空。"""
+    def _reference_backup(self, master_path=None):
+        """番号照合に使う「実機のバックアップ」のテキストを返す。無ければ空。
+
+        探す順:
+          1. 選んだBASIC自体が実機のものなら、それが実機のバックアップそのもの
+             （番号は定義上一致するので照合は不要＝空を返す）
+          2. 同じ号機の実機ファイルが同じフォルダにあれば それ
+             （例: F23BASIC.prm を選んだとき隣の F23BASIC.DAT）
+          3. 設定の「マスタ/バックアップ」
+        """
+        if master_path:
+            try:
+                p = Path(master_path)
+                if param_origin.classify(p.read_bytes())["verdict"] in (
+                        "machine", "converted"):
+                    return ""            # 実機そのもの＝照合する相手が要らない
+                unit = re.match(r"[A-Za-z]*\d+", p.stem)
+                if unit:
+                    for sib in sorted(p.parent.iterdir()):
+                        if sib == p or not sib.is_file():
+                            continue
+                        if not sib.stem.upper().startswith(unit.group(0).upper()):
+                            continue
+                        if param_origin.classify(sib.read_bytes())["verdict"] in (
+                                "machine", "converted"):
+                            return sib.read_bytes().decode("cp932", errors="replace")
+            except Exception:
+                pass
         path = str(self.settings.get("param_master_backup") or "").strip()
         if not path:
             return ""
@@ -3645,6 +3674,45 @@ class ParamDialog(QtWidgets.QDialog):
             return Path(path).read_bytes().decode("cp932", errors="replace")
         except Exception:
             return ""
+
+    def _check_basic(self, master_path):
+        """選んだBASICが制御装置向きかを見て、問題があれば確認を取る。
+
+        BASICは元データなので、これ自体を機械へ入れるわけではない。見るのは
+        「そこから作る製品ファイルが読めるか」に効く点だけ:
+          ・実機が出したものか（PC製は、その制御装置に無い番号が混じることがある）
+          ・実機のバックアップと番号がずれていないか
+        区切り(EOB)はアプリが出力時に実機の形へそろえるので、ここでは問わない。
+        """
+        try:
+            data = Path(master_path).read_bytes()
+        except Exception:
+            return True
+        info = param_origin.classify(data)
+        text = data.decode("cp932", errors="replace")
+        problems = []
+        if info["verdict"] == "pc":
+            problems.append(
+                f"このBASICはPCで作られたものです（{info['reasons'][0]}）。"
+                "実機が出したバックアップを使う方が確実です")
+        ref = self._reference_backup(master_path)
+        if ref:
+            extra = fanuc_param.unknown_numbers(text, ref)
+            if extra:
+                problems.append(
+                    f"同じ号機の実機バックアップに無い番号が {len(extra)}個 あります"
+                    f"（N{extra[0]:05d}〜N{extra[-1]:05d}）")
+        problems += [p for p in fanuc_param.validate_prm(text)
+                     if "実機のバックアップに無い" not in p]
+        if not problems:
+            return True
+        return QtWidgets.QMessageBox.question(
+            self, "BASICの点検",
+            f"{Path(master_path).name} に気になる点があります:\n\n・"
+            + "\n・".join(problems[:6])
+            + "\n\nこのBASICで作成を続けますか？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
     def _confirm_prm(self, text, fmt, fname):
         """書き込む前に点検し、引っかかったら中身を見せて確認を取る。
@@ -3654,7 +3722,8 @@ class ParamDialog(QtWidgets.QDialog):
         """
         if fmt != "fanuc":
             return True
-        problems = fanuc_param.validate_prm(text, self._reference_backup())
+        problems = fanuc_param.validate_prm(
+            text, self._reference_backup(self.e_master_prm.text().strip()))
         if not problems:
             return True
         msg = (f"{fname} に、制御装置が取り込めない可能性のある点があります:\n\n・"

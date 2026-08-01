@@ -289,6 +289,45 @@ def basic_file_for_unit(folder, unit):
     return str(cands[0])
 
 
+# サーボアンプの容量と、パラメータ N2165（アンプ最大電流）の対応。
+# 実機BASIC 10台・34軸を突き合わせて確認した（30軸が一致、2台4軸だけ食い違い）。
+# 機種で変わり得るので、settings の "amp_current_map" で上書きできる。
+AMP_CURRENT_PARAM = "2165"
+CAPACITY_TO_AMP_CURRENT = {"20A": "25", "40A": "45", "80A": "85", "160A": "165"}
+# パラメータの軸ラベル(A1..) と 号機マスタの軸名(X,Y,Z,A) の対応
+AXIS_LABEL_TO_NAME = {"A1": "X", "A2": "Y", "A3": "Z", "A4": "A"}
+
+
+def check_capacity_match(text, ctl, amp_map=None, param=AMP_CURRENT_PARAM) -> list:
+    """BASICのアンプ最大電流と、号機マスタの容量が合っているかを調べる。
+
+    パラメータのうち「仕様で決まるもの」と「個体で決まるもの」を実データで
+    分けた結果、容量と1対1に対応していたのが N2165（アンプ最大電流）だった。
+    ここが食い違うファイルは、その号機のものではないか、マスタが古い。
+
+    戻り値: 食い違いの説明リスト（空なら一致、照合できない場合も空）。
+    """
+    amp_map = amp_map or CAPACITY_TO_AMP_CURRENT
+    if ctl is None:
+        return []
+    from . import fanuc_param
+    out = []
+    for label, axis in AXIS_LABEL_TO_NAME.items():
+        cap = (ctl.caps or {}).get(axis)
+        if not cap:
+            continue
+        want = amp_map.get(str(cap).strip().upper())
+        if want is None:
+            continue
+        got = fanuc_param.get_value(text, param, label)
+        if got is None:
+            continue
+        if str(got).strip() != str(want):
+            out.append(f"{axis}軸: マスタは{cap}（N{fanuc_param._norm_num(param)}="
+                       f"{want} のはず）だがファイルは {got}")
+    return out
+
+
 def basic_files_by_unit(folder) -> dict:
     """BASICフォルダを号機ごとにまとめる。{号機: [(ファイル名, 出どころ), ...]}
 

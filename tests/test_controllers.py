@@ -305,3 +305,56 @@ class TestBasicCoverage(unittest.TestCase):
     def test_files_by_unit_ignores_non_basic(self):
         d = self._dir({"F22BASIC.txt": self.MACHINE, "readme.txt": b"hello"})
         self.assertEqual(list(C.basic_files_by_unit(d)), ["22"])
+
+
+class TestCapacityMatch(unittest.TestCase):
+    """BASICのアンプ最大電流(N2165)と号機マスタの容量が合っているか。
+
+    実機BASIC 10台・34軸を突き合わせた結果、容量と1対1に対応していたのが
+    N2165 だった（30軸一致／F25・F31 の4軸だけ食い違い）。
+    """
+
+    def _text(self, a1, a2=None, a3=None, a4=None):
+        seg = "".join(f"A{i}P{v}" for i, v in
+                      enumerate((a1, a2, a3, a4), 1) if v is not None)
+        return f"%\nN02165Q1{seg}\n%\n"
+
+    def _ctl(self, **caps):
+        return C.Controller("23", caps=caps)
+
+    def test_all_match(self):
+        t = self._text("25", "45", "85", "165")
+        ctl = self._ctl(X="20A", Y="40A", Z="80A", A="160A")
+        self.assertEqual(C.check_capacity_match(t, ctl), [])
+
+    def test_mismatch_reported_per_axis(self):
+        # 実データの F25 と同じ形: マスタ80Aなのにファイルは25/45
+        t = self._text("25", "45")
+        ctl = self._ctl(X="80A", Y="80A")
+        ng = C.check_capacity_match(t, ctl)
+        self.assertEqual(len(ng), 2)
+        self.assertIn("X軸", ng[0])
+        self.assertIn("80A", ng[0])
+
+    def test_axes_without_capacity_are_skipped(self):
+        t = self._text("25", "45")
+        ctl = self._ctl(X="20A")          # Y の容量がマスタに無い
+        self.assertEqual(C.check_capacity_match(t, ctl), [])
+
+    def test_missing_parameter_is_skipped(self):
+        ctl = self._ctl(X="20A")
+        self.assertEqual(C.check_capacity_match("%\nN01825Q1A1P3000\n%\n", ctl), [])
+
+    def test_unknown_capacity_is_skipped(self):
+        t = self._text("25")
+        ctl = self._ctl(X="999A")
+        self.assertEqual(C.check_capacity_match(t, ctl), [])
+
+    def test_no_controller(self):
+        self.assertEqual(C.check_capacity_match(self._text("25"), None), [])
+
+    def test_map_is_overridable(self):
+        t = self._text("30")
+        ctl = self._ctl(X="20A")
+        self.assertTrue(C.check_capacity_match(t, ctl))
+        self.assertEqual(C.check_capacity_match(t, ctl, {"20A": "30"}), [])

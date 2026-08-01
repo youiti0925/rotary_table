@@ -3830,6 +3830,16 @@ class ParamDialog(QtWidgets.QDialog):
         problems = []
         # その機械の個体データ（原点・グリッドシフト）が入っていないか。
         # 仕様が同じ号機でも原点は据付けごとに違うので、流用してはいけない。
+        # 号機マスタの容量と、ファイルのアンプ最大電流が合っているか。
+        # 合わなければ「その号機のファイルではない」か「マスタが古い」。
+        unit = param_origin.unit_of(Path(master_path).name)
+        ctl = next((c for c in self._controllers
+                    if str(c.unit).strip() == unit), None) if unit else None
+        cap_ng = controllers.check_capacity_match(
+            text, ctl, self.settings.get("amp_current_map"))
+        if cap_ng:
+            problems.append("号機マスタの容量と合いません（" + " ／ ".join(cap_ng)
+                            + "）。別の号機のファイルか、マスタが古い可能性")
         indiv = fanuc_param.individual_data(text)
         if indiv:
             problems.append(

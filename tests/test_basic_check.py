@@ -45,30 +45,47 @@ class TestReferenceLookup(BasicCheckBase):
     def test_machine_basic_needs_no_reference(self):
         # 実機のものは、それ自体が実機のバックアップ＝照合する相手が要らない
         p = self.write("F23BASIC.DAT", MACHINE)
-        self.assertEqual(self.dlg._reference_backup(str(p)), "")
+        self.assertEqual(self.dlg._reference_backup(str(p)), ("", ""))
 
     def test_finds_same_unit_machine_file_next_to_it(self):
         # F23BASIC.prm を選ぶと、隣の F23BASIC.DAT を自動で照合相手にする
         self.write("F23BASIC.DAT", MACHINE)
         pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)
-        ref = self.dlg._reference_backup(str(pc))
+        ref, how = self.dlg._reference_backup(str(pc))
         self.assertIn("N00000", ref)
         self.assertNotIn("N09999", ref)
+        self.assertIn("F23BASIC.DAT", how)
 
-    def test_does_not_use_other_units(self):
-        # 別の号機のファイルを照合相手にしてはいけない
+    def test_other_units_are_used_as_a_union_when_no_same_unit(self):
+        # 同じ号機の実機が無いとき（PC側しか無い）は、フォルダの実機BASIC全部の
+        # 番号の和集合を照合に使う。どの実機も持っていない番号だけが引っかかる。
         self.write("F35BASIC.DAT", MACHINE)
         pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)
-        self.assertEqual(self.dlg._reference_backup(str(pc)), "")
+        ref, how = self.dlg._reference_backup(str(pc))
+        self.assertIn("N00000", ref)
+        self.assertIn("番号を合わせたもの", how)
+        self.assertEqual(fanuc_param.unknown_numbers(PC_WITH_EXTRA, ref), [9999])
+
+    def test_union_does_not_flag_numbers_some_machine_has(self):
+        # 別の号機が持っている番号は「実機に無い」扱いにしない（誤検出を出さない）
+        self.write("F35BASIC.DAT", MACHINE.replace(
+            "N01825Q1A1P3000A4P3000", "N01825Q1A1P3000A4P3000\n\r\rN09999Q1L1P0"))
+        pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)
+        ref, _how = self.dlg._reference_backup(str(pc))
+        self.assertEqual(fanuc_param.unknown_numbers(PC_WITH_EXTRA, ref), [])
 
     def test_falls_back_to_settings_backup(self):
-        backup = self.write("bk.DAT", MACHINE)
-        pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)
-        self.dlg.settings["param_master_backup"] = str(backup)
-        self.assertIn("N00000", self.dlg._reference_backup(str(pc)))
+        with tempfile.TemporaryDirectory() as other:
+            backup = Path(other) / "bk.DAT"
+            backup.write_bytes(MACHINE.encode("cp932"))
+            pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)   # 同フォルダに実機は無い
+            self.dlg.settings["param_master_backup"] = str(backup)
+            ref, how = self.dlg._reference_backup(str(pc))
+        self.assertIn("N00000", ref)
+        self.assertIn("bk.DAT", how)
 
     def test_missing_file_is_not_fatal(self):
-        self.assertEqual(self.dlg._reference_backup("/no/such/file"), "")
+        self.assertEqual(self.dlg._reference_backup("/no/such/file"), ("", ""))
 
 
 class TestCheckBasic(BasicCheckBase):
@@ -89,9 +106,14 @@ class TestCheckBasic(BasicCheckBase):
         # 確認ダイアログは出さずに、検出そのものを確かめる
         self.write("F23BASIC.DAT", MACHINE)
         pc = self.write("F23BASIC.prm", PC_WITH_EXTRA)
-        ref = self.dlg._reference_backup(str(pc))
+        ref, _how = self.dlg._reference_backup(str(pc))
         extra = fanuc_param.unknown_numbers(PC_WITH_EXTRA, ref)
         self.assertEqual(extra, [9999])
+        # 除いて作ると、その番号だけが消えて他は残る
+        kept, removed = fanuc_param.drop_numbers(PC_WITH_EXTRA, extra)
+        self.assertEqual(removed, [9999])
+        self.assertNotIn("N09999", kept)
+        self.assertIn("N01825", kept)
 
 
 if __name__ == "__main__":

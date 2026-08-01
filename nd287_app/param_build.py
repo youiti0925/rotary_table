@@ -7,7 +7,56 @@ N形式（実機ネイティブ）はバイト保存編集、ヘッダ＋CSV形�
 
 from pathlib import Path
 
-from . import fanuc_param, prm_format
+from . import fanuc_param, param_origin, prm_format
+
+
+def _is_new_format(text: str) -> bool:
+    """パラメータの書式世代（新 "N01825Q1…" / 旧 "N01825 A1 P …"）。"""
+    import re
+    return bool(re.search(r"N\d+Q\d", (text or "")[:3000]))
+
+
+def machine_reference(folder, like: str = "", exclude=None) -> tuple:
+    """フォルダにある「実機が出したBASIC」を集めて、番号照合用の参照を作る。
+
+    同じ号機の実機バックアップが無いとき（PC側のBASICしか無いとき）に使う。
+    1本と突き合わせるのではなく、フォルダ内の実機BASIC全部の「番号の和集合」と
+    比べる。どの実機も持っていない番号だけが引っかかるので、
+    号機ごとの差でむやみに警告しない。
+
+    実データでの裏づけ: 実機BASIC 16本の和集合に N09802・N09820〜N09999 は
+    1つも無く、PC製7本には全部入っていた（PC側ツールが足したもの）。
+
+    like  … 書式世代をそろえるための見本テキスト（空なら世代を問わない）
+    戻り値: (参照テキスト, 使った実機ファイル名のリスト)
+    """
+    base = Path(folder) if folder else None
+    if not base or not base.is_dir():
+        return "", []
+    want_new = _is_new_format(like) if like else None
+    numbers, used = set(), []
+    for p in sorted(base.iterdir()):
+        if not p.is_file() or (exclude and Path(exclude).resolve() == p.resolve()):
+            continue
+        try:
+            data = p.read_bytes()
+        except Exception:
+            continue
+        if param_origin.classify(data)["verdict"] not in ("machine", "converted"):
+            continue
+        text = data.decode("cp932", errors="replace")
+        if want_new is not None and _is_new_format(text) != want_new:
+            continue
+        nums = fanuc_param.numbers_in(text)
+        if not nums:
+            continue
+        numbers |= nums
+        used.append(p.name)
+    if not used:
+        return "", []
+    # numbers_in が読める最小の形で参照テキストを組む（値は照合に使わない）
+    ref = "%\n" + "\n".join(f"N{n:05d}Q1P0" for n in sorted(numbers)) + "\n%\n"
+    return ref, used
 
 
 def read_master(master_path) -> str:

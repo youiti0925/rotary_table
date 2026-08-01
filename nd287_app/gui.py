@@ -3390,7 +3390,9 @@ class ParamDialog(QtWidgets.QDialog):
             return
         try:
             newtext, missing, fmt = param_build.build_text(raw, values, axis, seiban)
-            if not self._confirm_prm(newtext, fmt, fname):
+            self._dropped_numbers = []
+            newtext = self._confirm_prm(newtext, fmt, fname)
+            if newtext is None:
                 return
             out_path = d / fname
             param_build.write_text(out_path, newtext, fmt, self._param_eob())
@@ -3479,13 +3481,14 @@ class ParamDialog(QtWidgets.QDialog):
                          f"{self.e_model.text().strip() or '—'} → {fname}").exec():
             return
         try:
-            text_multi, _m, fmt_multi = param_build.build_text_multi(
+            text_multi, missing, fmt = param_build.build_text_multi(
                 raw, per_axis, common, seiban)
-            if not self._confirm_prm(text_multi, fmt_multi, fname):
+            self._dropped_numbers = []
+            text_multi = self._confirm_prm(text_multi, fmt, fname)
+            if text_multi is None:
                 return
-            out_path, missing, fmt = param_build.create_file_multi(
-                master_path, out_dir, per_axis, common, prefix=prefix, seiban=seiban,
-                ext=self._param_ext(), eob=self._param_eob())
+            out_path = Path(out_dir) / fname
+            param_build.write_text(out_path, text_multi, fmt, self._param_eob())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
             return
@@ -3640,21 +3643,24 @@ class ParamDialog(QtWidgets.QDialog):
         return self.settings.get("nc_eob") or fanuc.DEFAULT_EOB
 
     def _reference_backup(self, master_path=None):
-        """番号照合に使う「実機のバックアップ」のテキストを返す。無ければ空。
+        """番号照合に使う参照を (テキスト, 出どころの説明) で返す。無ければ ("", "")。
 
         探す順:
           1. 選んだBASIC自体が実機のものなら、それが実機のバックアップそのもの
-             （番号は定義上一致するので照合は不要＝空を返す）
+             （番号は定義上一致するので照合は不要）
           2. 同じ号機の実機ファイルが同じフォルダにあれば それ
              （例: F23BASIC.prm を選んだとき隣の F23BASIC.DAT）
-          3. 設定の「マスタ/バックアップ」
+          3. 同じ号機の実機が無い（PC側のBASICしか無い）とき: フォルダにある
+             実機BASIC全部の「番号の和集合」。どの実機も持っていない番号だけが
+             引っかかるので、号機ごとの差でむやみに警告しない
+          4. 設定の「マスタ/バックアップ」
         """
         if master_path:
             try:
                 p = Path(master_path)
-                if param_origin.classify(p.read_bytes())["verdict"] in (
-                        "machine", "converted"):
-                    return ""            # 実機そのもの＝照合する相手が要らない
+                raw = p.read_bytes()
+                if param_origin.classify(raw)["verdict"] in ("machine", "converted"):
+                    return "", ""        # 実機そのもの＝照合する相手が要らない
                 unit = re.match(r"[A-Za-z]*\d+", p.stem)
                 if unit:
                     for sib in sorted(p.parent.iterdir()):
@@ -3664,16 +3670,25 @@ class ParamDialog(QtWidgets.QDialog):
                             continue
                         if param_origin.classify(sib.read_bytes())["verdict"] in (
                                 "machine", "converted"):
-                            return sib.read_bytes().decode("cp932", errors="replace")
+                            return (sib.read_bytes().decode("cp932", errors="replace"),
+                                    f"同じ号機の実機 {sib.name}")
+                # 同じ号機の実機が無い＝PC側しか無い場合
+                text = raw.decode("cp932", errors="replace")
+                ref, used = param_build.machine_reference(p.parent, like=text,
+                                                          exclude=p)
+                if ref:
+                    return ref, (f"フォルダの実機BASIC {len(used)}本の番号を合わせたもの"
+                                 f"（{', '.join(used[:3])}{' ほか' if len(used) > 3 else ''}）")
             except Exception:
                 pass
         path = str(self.settings.get("param_master_backup") or "").strip()
         if not path:
-            return ""
+            return "", ""
         try:
-            return Path(path).read_bytes().decode("cp932", errors="replace")
+            return (Path(path).read_bytes().decode("cp932", errors="replace"),
+                    f"設定のマスタ/バックアップ {Path(path).name}")
         except Exception:
-            return ""
+            return "", ""
 
     def _check_basic(self, master_path):
         """選んだBASICが制御装置向きかを見て、問題があれば確認を取る。
@@ -3695,13 +3710,14 @@ class ParamDialog(QtWidgets.QDialog):
             problems.append(
                 f"このBASICはPCで作られたものです（{info['reasons'][0]}）。"
                 "実機が出したバックアップを使う方が確実です")
-        ref = self._reference_backup(master_path)
+        ref, how = self._reference_backup(master_path)
         if ref:
             extra = fanuc_param.unknown_numbers(text, ref)
             if extra:
                 problems.append(
-                    f"同じ号機の実機バックアップに無い番号が {len(extra)}個 あります"
-                    f"（N{extra[0]:05d}〜N{extra[-1]:05d}）")
+                    f"実機に無い番号が {len(extra)}個 あります"
+                    f"（N{extra[0]:05d}〜N{extra[-1]:05d}／照合元: {how}）。"
+                    "作成のときに除くこともできます")
         problems += [p for p in fanuc_param.validate_prm(text)
                      if "実機のバックアップに無い" not in p]
         if not problems:
@@ -3715,24 +3731,45 @@ class ParamDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
     def _confirm_prm(self, text, fmt, fname):
-        """書き込む前に点検し、引っかかったら中身を見せて確認を取る。
+        """書き込む前に点検する。戻り値は「書き出すテキスト」、中止なら None。
 
-        実機バックアップ（設定の「マスタ/バックアップ」）があれば、実機に無い番号も
-        指摘する。以前 .prm が制御装置で読めなかったのがこの種の問題だったため。
+        実機に無い番号が見つかったら、その場で除いて作れるようにする。
+        実機のバックアップが手元に無く、PC側のBASICしか無くても、
+        制御装置が取り込めるファイルを作れるようにするため。
+        除くのは「フォルダのどの実機BASICにも無い番号」だけなので、
+        その制御装置が持っている番号を落とすことはない。
         """
         if fmt != "fanuc":
-            return True
-        problems = fanuc_param.validate_prm(
-            text, self._reference_backup(self.e_master_prm.text().strip()))
+            return text
+        ref, how = self._reference_backup(self.e_master_prm.text().strip())
+        problems = fanuc_param.validate_prm(text, ref)
         if not problems:
-            return True
+            return text
+        extra = fanuc_param.unknown_numbers(text, ref) if ref else []
         msg = (f"{fname} に、制御装置が取り込めない可能性のある点があります:\n\n・"
-               + "\n・".join(problems[:6])
-               + "\n\nこのまま作成しますか？")
-        return QtWidgets.QMessageBox.question(
-            self, "パラメータの点検", msg,
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+               + "\n・".join(problems[:6]))
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("パラメータの点検")
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        if extra:
+            box.setText(msg + f"\n\n照合元: {how}")
+            b_drop = box.addButton(f"実機に無い{len(extra)}個を除いて作成",
+                                   QtWidgets.QMessageBox.AcceptRole)
+            b_keep = box.addButton("そのまま作成", QtWidgets.QMessageBox.DestructiveRole)
+            box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
+            box.setDefaultButton(b_drop)
+            box.exec()
+            if box.clickedButton() is b_drop:
+                kept, removed = fanuc_param.drop_numbers(text, extra)
+                self._dropped_numbers = removed
+                return kept
+            return text if box.clickedButton() is b_keep else None
+        box.setText(msg + "\n\nこのまま作成しますか？")
+        box.addButton("作成", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
+        box.exec()
+        return text if box.buttonRole(box.clickedButton()) == \
+            QtWidgets.QMessageBox.AcceptRole else None
 
     def _persist(self):
         try:

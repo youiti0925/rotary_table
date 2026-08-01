@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from nd287_app import fanuc_param as F_PRM
 from nd287_app import param_build as B
@@ -395,3 +396,59 @@ class TestOldFormatBasic(unittest.TestCase):
     def test_headercsv_still_not_treated_as_native(self):
         csv_like = 'Seiban,50013078\r\n"1815","値",""\r\n"1825","3000",""\r\n'
         self.assertFalse(F_PRM.looks_like_fanuc_prm(csv_like))
+
+
+class TestMachineReference(unittest.TestCase):
+    """実機のバックアップが手元に無いとき（PC側のBASICしか無いとき）の照合。
+
+    1本と突き合わせるのではなく、フォルダの実機BASIC全部の番号の和集合と比べる。
+    実データ: 実機BASIC 16本の和集合に N09802・N09820〜N09999 は1つも無く、
+    PC製7本には全部入っていた（PC側ツールが足したもの）。
+    """
+
+    MACHINE_A = "%\n\r\rN00000Q1L1P0\n\r\rN01825Q1A1P3000\n\r\r%\n\r\r"
+    MACHINE_B = "%\n\r\rN00000Q1L1P0\n\r\rN02020Q1A1P303\n\r\r%\n\r\r"
+    PC = "%\nN00000Q1L1P0\nN01825Q1A1P3000\nN02020Q1A1P303\nN09802Q1P0\n%\n"
+    OLD_MACHINE = "%\n\r\rN00000 P 0\n\r\rN01825 A1 P 3000\n\r\r%\n\r\r"
+
+    def _dir(self, files):
+        d = tempfile.mkdtemp()
+        for name, text in files.items():
+            (Path(d) / name).write_bytes(text.encode("cp932"))
+        return d
+
+    def test_union_of_machine_files(self):
+        d = self._dir({"F22BASIC.DAT": self.MACHINE_A,
+                       "F25BASIC.PRM": self.MACHINE_B,
+                       "F23BASIC.prm": self.PC})
+        ref, used = B.machine_reference(d, like=self.PC)
+        self.assertEqual(sorted(used), ["F22BASIC.DAT", "F25BASIC.PRM"])
+        self.assertEqual(F_PRM.numbers_in(ref), {0, 1825, 2020})
+        # どの実機も持っていない N09802 だけが引っかかる
+        self.assertEqual(F_PRM.unknown_numbers(self.PC, ref), [9802])
+
+    def test_ignores_pc_made_files(self):
+        d = self._dir({"F22BASIC.DAT": self.MACHINE_A, "F23BASIC.prm": self.PC})
+        ref, used = B.machine_reference(d, like=self.PC)
+        self.assertEqual(used, ["F22BASIC.DAT"])
+        self.assertNotIn(9802, F_PRM.numbers_in(ref))
+
+    def test_format_generations_are_not_mixed(self):
+        # 旧書式の実機を、新書式のBASICの照合に混ぜない（番号体系が違う）
+        d = self._dir({"F12BASIC.DAT": self.OLD_MACHINE, "F23BASIC.prm": self.PC})
+        ref, used = B.machine_reference(d, like=self.PC)
+        self.assertEqual(used, [])
+        self.assertEqual(ref, "")
+
+    def test_excludes_itself(self):
+        d = self._dir({"F22BASIC.DAT": self.MACHINE_A})
+        ref, used = B.machine_reference(d, like=self.MACHINE_A,
+                                        exclude=Path(d) / "F22BASIC.DAT")
+        self.assertEqual(used, [])
+
+    def test_no_machine_files_returns_empty(self):
+        d = self._dir({"F23BASIC.prm": self.PC})
+        self.assertEqual(B.machine_reference(d, like=self.PC), ("", []))
+
+    def test_missing_folder(self):
+        self.assertEqual(B.machine_reference("/no/such/dir"), ("", []))

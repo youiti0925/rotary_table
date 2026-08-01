@@ -16,6 +16,10 @@ from pathlib import Path
 from . import prm_format, fanuc_param
 
 # 頭文字 → 種別（出力ファイル名と同じ規則: T=傾斜, R=回転）
+# パラメータファイルの拡張子。機械へ渡すのは .DAT（実機が出力する形式）だが、
+# 従来の .prm / .txt も引き続き探せるようにする。
+PARAM_EXTS = (".prm", ".txt", ".dat")
+
 PREFIX_KIND = {"T": "傾斜", "R": "回転"}
 KIND_PREFIX = {"傾斜": "T", "回転": "R"}
 _CAP_NUMS = ("20", "40", "80", "160")
@@ -32,7 +36,7 @@ def find_seiban_files(folder, seiban) -> list:
         return []
     found = {}
     for p in sorted(Path(folder).iterdir()):
-        if not (p.is_file() and p.suffix.lower() in (".prm", ".txt")):
+        if not (p.is_file() and p.suffix.lower() in PARAM_EXTS):
             continue
         stem = p.stem.upper()
         m = re.match(r"^([TR])", stem)

@@ -3,7 +3,15 @@ import os
 import tempfile
 import unittest
 
+from nd287_app import fanuc_param as F_PRM
 from nd287_app import param_build as B
+
+
+def _logical(data):
+    """区切り(EOB)の違いを無視して中身だけ比べる。"""
+    if isinstance(data, bytes):
+        data = data.decode("cp932")
+    return [l for l in data.replace("\r", "\n").split("\n") if l != ""]
 from nd287_app import fanuc_param as F
 
 # N形式（実機ネイティブ）BASIC。1815 を各軸に持たせ、A4 をフル(#1=1)・他をセミにする。
@@ -39,12 +47,17 @@ class TestBuild(unittest.TestCase):
         values = {"01825": "2500"}
         out, missing, fmt = B.create_file(master, d, values, axis=4,
                                           prefix="T", seiban="50013078")
-        self.assertEqual(out.name, "T50013078.prm")
-        self.assertEqual(out.read_bytes(),
-                         product.encode("cp932"))  # CRLF含めバイト一致
+        self.assertEqual(out.name, "T50013078.DAT")
+        # 中身は製品と一致し、区切りだけ実機の形式(LF CR CR)に統一される
+        self.assertEqual(out.read_bytes(), F_PRM.prm_bytes(product))
+        self.assertEqual(_logical(out.read_bytes()), _logical(product))
+        self.assertIn(b"\n\r\r", out.read_bytes())
 
     def test_filename(self):
-        self.assertEqual(B.filename("R", "12345"), "R12345.prm")
+        # 既定は .DAT（実機が出力する形式。.prm は読めなかった）
+        self.assertEqual(B.filename("R", "12345"), "R12345.DAT")
+        self.assertEqual(B.filename("R", "12345", ".prm"), "R12345.prm")
+        self.assertEqual(B.filename("R", "12345", "TXT"), "R12345.TXT")
 
 
 class TestPreviewAndHeader(unittest.TestCase):
@@ -105,9 +118,9 @@ class TestMultiAxis(unittest.TestCase):
         per_axis, common = B.product_axis_values(BASIC_N, product)
         out, missing, fmt = B.create_file_multi(
             master, d, per_axis, common, prefix="TR", seiban="50013078")
-        self.assertEqual(out.name, "TR50013078.prm")
+        self.assertEqual(out.name, "TR50013078.DAT")
         self.assertEqual(missing, [])
-        self.assertEqual(out.read_bytes(), product.encode("cp932"))  # CRLF含めバイト一致
+        self.assertEqual(_logical(out.read_bytes()), _logical(product))
 
     def test_preview_rows_multi(self):
         per_axis = {2: {"01825": "2500"}, 4: {"01825": "1500"}}
@@ -239,3 +252,92 @@ class TestHeaderCsvMissing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMachineReadableParamFile(unittest.TestCase):
+    """制御装置が取り込める形になっているか（.prm が読めなかった件の再発防止）
+
+    実機が自分で出力したバックアップ（F23BASIC.DAT）と同じ形にそろえる:
+    ・ブロックの区切りは LF CR CR（PCの改行のままだと読み込めなかった）
+    ・行の中身は1バイトも変えない（値の桁・末尾の空白も形式の一部）
+    """
+
+    RAW = "%\r\nN01825Q1A1P3000A4P3000\r\nN02020Q1A1P303 \r\n%\r\n"
+
+    def test_eob_is_machine_format(self):
+        self.assertEqual(F_PRM.prm_bytes("%\nN01825Q1A1P3000\n%"),
+                         b"%\n\r\rN01825Q1A1P3000\n\r\r%\n\r\r")
+
+    def test_eob_selectable(self):
+        from nd287_app import fanuc
+        self.assertEqual(F_PRM.prm_bytes("%\nM\n%", fanuc.EOB_CRLF),
+                         b"%\r\nM\r\n%\r\n")
+
+    def test_line_content_untouched(self):
+        # 末尾の空白も実機の形式の一部なので落とさない
+        self.assertIn(b"N02020Q1A1P303 \n\r\r", F_PRM.prm_bytes(self.RAW))
+
+    def test_any_input_newline_normalizes(self):
+        for raw in ("%\nA\n%", "%\r\nA\r\n%", "%\n\r\rA\n\r\r%"):
+            self.assertEqual(F_PRM.prm_bytes(raw), b"%\n\r\rA\n\r\r%\n\r\r")
+
+    def test_idempotent(self):
+        # 一度書いたファイルを読み直して書いても同じ（区切りが増殖しない）
+        once = F_PRM.prm_bytes(self.RAW)
+        self.assertEqual(F_PRM.prm_bytes(once.decode("ascii")), once)
+
+    def test_write_text_uses_machine_eob_for_native(self):
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "x.DAT")
+        B.write_text(out, self.RAW)
+        self.assertIn(b"\n\r\r", open(out, "rb").read())
+
+    def test_write_text_keeps_headercsv_as_is(self):
+        # 社内で読むヘッダ＋CSV形式(.prm)は従来どおり cp932・改行そのまま
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "y.prm")
+        text = "Seiban,50013078\r\n名称,値\r\n"
+        B.write_text(out, text, "headercsv")
+        self.assertEqual(open(out, "rb").read(), text.encode("cp932"))
+
+
+class TestParamValidate(unittest.TestCase):
+    OK = "%\nN01825Q1A1P3000\nN02020Q1A1P303 \n%"
+
+    def _has(self, problems, word):
+        return any(word in p for p in problems)
+
+    def test_clean_file_has_no_problems(self):
+        self.assertEqual(F_PRM.validate_prm(self.OK), [])
+
+    def test_flags_missing_percent(self):
+        self.assertTrue(self._has(F_PRM.validate_prm("N01825Q1A1P3000"), "%"))
+
+    def test_flags_semicolon(self):
+        self.assertTrue(self._has(
+            F_PRM.validate_prm("%\nN01825Q1A1P3000 ;\n%"), '";"'))
+
+    def test_flags_non_ascii(self):
+        self.assertTrue(self._has(
+            F_PRM.validate_prm("%\nN01825Q1A1P3000\n(コメント)\n%"), "ASCII"))
+
+    def test_flags_numbers_the_machine_does_not_have(self):
+        # 実機のバックアップに無い番号は取込が止まる原因になる
+        ref = "%\nN01825Q1A1P3000\n%"
+        text = "%\nN01825Q1A1P3000\nN09999Q1L1P00000000\n%"
+        self.assertTrue(self._has(F_PRM.validate_prm(text, ref), "実機のバックアップに無い"))
+        self.assertEqual(F_PRM.unknown_numbers(text, ref), [9999])
+
+    def test_no_reference_means_no_number_check(self):
+        text = "%\nN09999Q1L1P00000000\n%"
+        self.assertEqual(F_PRM.validate_prm(text, ""), [])
+
+    def test_drop_numbers(self):
+        text = "%\nN01825Q1A1P3000\nN09999Q1L1P0\n%"
+        kept, removed = F_PRM.drop_numbers(text, [9999])
+        self.assertEqual(removed, [9999])
+        self.assertNotIn("N09999", kept)
+        self.assertIn("N01825", kept)
+
+    def test_numbers_in(self):
+        self.assertEqual(F_PRM.numbers_in(self.OK), {1825, 2020})

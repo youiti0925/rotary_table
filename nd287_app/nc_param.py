@@ -23,6 +23,7 @@
 import csv
 import io
 import re
+from pathlib import Path
 
 # 取り込みCSVの列名ゆらぎを吸収する（紙の表→CSV化を人がやる前提）
 _COL_ALIASES = {
@@ -547,7 +548,7 @@ def format_checklist(model: str, changes: list, master: dict = None,
 # ★ここから下（機械が読み込むファイルの書式）は制御(FANUC/MELDAS)・機種で異なる。
 #   実サンプルで要検証。確定するまでは確認表（人が手入力）を使うこと。
 def format_param_file(changes: list, *, controller: str = "",
-                      newline: str = "\r\n") -> str:
+                      newline: str = "\n") -> str:
     """差分パラメータファイル（変更する番号だけ）。汎用テキスト形（要検証）。
 
     現状は「N<番号> P<値>」の一般形＋制御名のコメントで出力する。FANUC と MELDAS
@@ -564,9 +565,11 @@ def format_param_file(changes: list, *, controller: str = "",
     return newline.join(out) + newline
 
 
-def save_param_file(path, changes: list, controller: str = ""):
-    with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
-        f.write(format_param_file(changes, controller=controller))
+def save_param_file(path, changes: list, controller: str = "", eob: str = None):
+    """差分パラメータファイルを、実機が読める区切り（既定 LF CR CR）で書く。"""
+    from . import fanuc_param
+    text = format_param_file(changes, controller=controller)
+    Path(path).write_bytes(fanuc_param.prm_bytes(text, eob))
 
 
 def save_checklist(path, text: str):

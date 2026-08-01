@@ -2215,7 +2215,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
         p, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
+            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.DAT *.dat *.txt);;すべて (*.*)")
         if p:
             self.e_basic.setText(p)
 
@@ -2975,7 +2975,7 @@ class ParamDialog(QtWidgets.QDialog):
             items = []
             if folder and Path(folder).is_dir():
                 for p in sorted(Path(folder).iterdir()):
-                    if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
+                    if p.is_file() and p.suffix.lower() in seiban_flow.PARAM_EXTS:
                         items.append((nc_param.controller_from_basic(p.name) or p.stem,
                                       str(p)))
             self.cmb_basic.addItem("（制御装置を選択）" if items
@@ -3016,7 +3016,7 @@ class ParamDialog(QtWidgets.QDialog):
     def _browse_master_prm(self):
         start = self.e_master_prm.text() or self.e_basic_dir.text()
         p, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "BASIC .prm（FANUC）", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
+            self, "BASIC .prm（FANUC）", start, "パラメータ (*.prm *.PRM *.DAT *.dat *.txt);;すべて (*.*)")
         if p:
             self.e_master_prm.setText(p)
 
@@ -3281,7 +3281,7 @@ class ParamDialog(QtWidgets.QDialog):
         axis = int(self.cmb_axis.currentData() or 4)
         # 作成前プレビュー（旧値→新値）。中止なら書き込まない
         rows = param_build.preview_rows(raw, values, axis)
-        fname = param_build.filename(prefix, seiban)
+        fname = param_build.filename(prefix, seiban, self._param_ext())
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{self.e_model.text().strip() or '—'} → {fname}"
@@ -3289,8 +3289,10 @@ class ParamDialog(QtWidgets.QDialog):
             return
         try:
             newtext, missing, fmt = param_build.build_text(raw, values, axis, seiban)
+            if not self._confirm_prm(newtext, fmt, fname):
+                return
             out_path = d / fname
-            param_build.write_text(out_path, newtext)
+            param_build.write_text(out_path, newtext, fmt, self._param_eob())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
             return
@@ -3365,7 +3367,7 @@ class ParamDialog(QtWidgets.QDialog):
         axes = sorted(per_axis)
         # 出力名は両軸を1ファイルにするので「TR」(傾斜+回転)を既定の頭文字にする
         prefix = "TR"
-        fname = param_build.filename(prefix, seiban)
+        fname = param_build.filename(prefix, seiban, self._param_ext())
         axis_label = "＋".join(nc_param.axis_name(a) for a in axes)
         # 作成前プレビュー（軸つき）。中止なら書き込まない
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
@@ -3376,8 +3378,13 @@ class ParamDialog(QtWidgets.QDialog):
                          f"{self.e_model.text().strip() or '—'} → {fname}").exec():
             return
         try:
+            text_multi, _m, fmt_multi = param_build.build_text_multi(
+                raw, per_axis, common, seiban)
+            if not self._confirm_prm(text_multi, fmt_multi, fname):
+                return
             out_path, missing, fmt = param_build.create_file_multi(
-                master_path, out_dir, per_axis, common, prefix=prefix, seiban=seiban)
+                master_path, out_dir, per_axis, common, prefix=prefix, seiban=seiban,
+                ext=self._param_ext(), eob=self._param_eob())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "FANUC .prm", f"保存に失敗:\n{e}")
             return
@@ -3522,6 +3529,43 @@ class ParamDialog(QtWidgets.QDialog):
         ParamViewerDialog(self, self.settings,
                           file_a=self.e_master_prm.text().strip(),
                           file_b=self.e_product.text().strip()).exec()
+
+    def _param_ext(self):
+        """機械へ渡すパラメータファイルの拡張子（既定 .DAT＝実機が出力する形）。"""
+        return str(self.settings.get("param_out_ext") or ".DAT")
+
+    def _param_eob(self):
+        """パラメータファイルのブロック区切り（既定は実機と同じ LF CR CR）。"""
+        return self.settings.get("nc_eob") or fanuc.DEFAULT_EOB
+
+    def _reference_backup(self):
+        """照合に使う実機バックアップのテキスト（設定してあれば）。無ければ空。"""
+        path = str(self.settings.get("param_master_backup") or "").strip()
+        if not path:
+            return ""
+        try:
+            return Path(path).read_bytes().decode("cp932", errors="replace")
+        except Exception:
+            return ""
+
+    def _confirm_prm(self, text, fmt, fname):
+        """書き込む前に点検し、引っかかったら中身を見せて確認を取る。
+
+        実機バックアップ（設定の「マスタ/バックアップ」）があれば、実機に無い番号も
+        指摘する。以前 .prm が制御装置で読めなかったのがこの種の問題だったため。
+        """
+        if fmt != "fanuc":
+            return True
+        problems = fanuc_param.validate_prm(text, self._reference_backup())
+        if not problems:
+            return True
+        msg = (f"{fname} に、制御装置が取り込めない可能性のある点があります:\n\n・"
+               + "\n・".join(problems[:6])
+               + "\n\nこのまま作成しますか？")
+        return QtWidgets.QMessageBox.question(
+            self, "パラメータの点検", msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
     def _persist(self):
         try:
@@ -4067,7 +4111,7 @@ class ParamDBDialog(QtWidgets.QDialog):
         items = []
         if folder and Path(folder).is_dir():
             for p in sorted(Path(folder).iterdir()):
-                if p.is_file() and p.suffix.lower() in (".prm", ".txt"):
+                if p.is_file() and p.suffix.lower() in seiban_flow.PARAM_EXTS:
                     items.append((nc_param.controller_from_basic(p.name) or p.stem, str(p)))
         self.cmb_basic.blockSignals(True)
         self.cmb_basic.clear()
@@ -4088,7 +4132,7 @@ class ParamDBDialog(QtWidgets.QDialog):
     def _browse_basic(self):
         start = self.e_basic.text() or self.owner.e_basic_dir.text()
         p, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.txt);;すべて (*.*)")
+            self, "使うBASIC .prm", start, "パラメータ (*.prm *.PRM *.DAT *.dat *.txt);;すべて (*.*)")
         if p:
             self.e_basic.setText(p)
 
@@ -4253,7 +4297,7 @@ class ParamDBDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{ex}")
             return
         rows = param_build.preview_rows(raw, values, axis)
-        fname = param_build.filename(prefix, seiban)
+        fname = param_build.filename(prefix, seiban, self._param_ext())
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）").exec():
@@ -5612,16 +5656,20 @@ class FanucPitchParamDialog(QtWidgets.QDialog):
             self.win.statusBar().showMessage("生成できる補正データがありません")
             return
         machine = self.win.e_machine.text().strip() or "pcorr"
-        default = str(resolve_save_root(self.win.settings) / f"{machine}_ピッチ補正.PRM")
+        ext = str(self.win.settings.get("param_out_ext") or ".DAT")
+        default = str(resolve_save_root(self.win.settings)
+                      / f"{machine}_ピッチ補正{ext}")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "FANUCパラメータ(.PRM)で保存", default, "FANUC (*.PRM *.prm)")
+            self, "FANUCパラメータで保存", default,
+            "FANUC (*.DAT *.PRM *.prm)")
         if not path:
             return
         try:
-            # FANUC取込の標準どおり CRLF・cp932 で書く（新規ファイルなので実機準拠）
-            text = fanuc_pcorr.to_prm_text(self._params, newline="\r\n")
-            with open(path, "w", encoding="cp932", newline="") as f:
-                f.write(text)
+            # 実機が自分で出力するファイルと同じ区切り（既定 LF CR CR）で書く。
+            # PCの改行のままだと制御装置が読み込めない（実機で確認）
+            text = fanuc_pcorr.to_prm_text(self._params, newline="\n")
+            eob = self.win.settings.get("nc_eob") or fanuc.DEFAULT_EOB
+            Path(path).write_bytes(fanuc_param.prm_bytes(text, eob))
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "保存", f"失敗しました:\n{e}")
             return

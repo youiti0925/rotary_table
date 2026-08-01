@@ -68,27 +68,45 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "") -> tuple:
     return prm_format.format_prm(doc), missing, "headercsv"
 
 
-def write_text(path, newtext: str):
-    """cp932・改行そのまま（newline=""）で書く。N形式の CRLF をそのまま残す。"""
+def write_text(path, newtext: str, fmt: str = None, eob: str = None):
+    """パラメータファイルを書く。
+
+    N形式（実機ネイティブ）は、実機が自分で出力したファイルと同じ区切り（既定
+    LF CR CR）に統一して書く。元にした BASIC が PC の改行（LFのみ等）だと、
+    そのまま引き継ぐと制御装置が読み込めないため（実機で確認）。
+    ヘッダ＋CSV形式（社内で読む .prm）は従来どおり cp932・改行そのまま。
+    """
+    if fmt is None:
+        fmt = "fanuc" if fanuc_param.looks_like_fanuc_prm(newtext) else "headercsv"
+    if fmt == "fanuc":
+        Path(path).write_bytes(fanuc_param.prm_bytes(newtext, eob))
+        return
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         f.write(newtext)
 
 
-def filename(prefix: str, seiban: str) -> str:
-    """出力ファイル名 <頭文字><Seiban>.prm（例 T50013078.prm / R… ）。"""
-    return f"{prefix}{seiban}.prm"
+def filename(prefix: str, seiban: str, ext: str = ".DAT") -> str:
+    """出力ファイル名 <頭文字><Seiban><拡張子>（例 T50013078.DAT）。
+
+    拡張子の既定が .DAT なのは、実機が自分で出力するのが .DAT で、そちらは
+    読み込めることが確認できているため（.prm は読めなかった）。設定で変えられる。
+    """
+    ext = str(ext or ".DAT")
+    if not ext.startswith("."):
+        ext = "." + ext
+    return f"{prefix}{seiban}{ext}"
 
 
 def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
-                seiban: str) -> tuple:
-    """BASIC を元に <頭文字><Seiban>.prm を out_dir に作成する。
+                seiban: str, ext: str = ".DAT", eob: str = None) -> tuple:
+    """BASIC を元に <頭文字><Seiban><拡張子> を out_dir に作成する。
 
     戻り値: (出力Path, 反映できなかった番号リスト, 形式)。
     """
     raw = read_master(master_path)
     newtext, missing, fmt = build_text(raw, values, axis, seiban)
-    out = Path(out_dir) / filename(prefix, seiban)
-    write_text(out, newtext)
+    out = Path(out_dir) / filename(prefix, seiban, ext)
+    write_text(out, newtext, fmt, eob)
     return out, missing, fmt
 
 
@@ -189,15 +207,16 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
 
 
 def create_file_multi(master_path, out_dir, axis_values: dict, common: dict = None,
-                      *, prefix: str, seiban: str) -> tuple:
-    """BASIC を元に、複数軸ぶんを入れた <頭文字><Seiban>.prm を作成する（2軸テーブル用）。
+                      *, prefix: str, seiban: str, ext: str = ".DAT",
+                      eob: str = None) -> tuple:
+    """BASIC を元に、複数軸ぶんを入れた <頭文字><Seiban><拡張子> を作成する（2軸用）。
 
     戻り値: (出力Path, 反映できなかった [(番号, 軸), ...], 形式)。
     """
     raw = read_master(master_path)
     newtext, missing, fmt = build_text_multi(raw, axis_values, common, seiban)
-    out = Path(out_dir) / filename(prefix, seiban)
-    write_text(out, newtext)
+    out = Path(out_dir) / filename(prefix, seiban, ext)
+    write_text(out, newtext, fmt, eob)
     return out, missing, fmt
 
 

@@ -20,6 +20,88 @@
 
 import re
 
+from . import fanuc
+
+def numbers_in(text: str) -> set:
+    """テキストに入っているパラメータ番号の集合。"""
+    out = set()
+    for line in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        num = param_number(line)
+        if num is not None:
+            out.add(int(num))
+    return out
+
+
+def unknown_numbers(text: str, reference: str) -> list:
+    """実機のバックアップ(reference)に無いパラメータ番号を返す。
+
+    「何番から先がメーカ用」という固定の線引きはしない。制御装置が自分で出力した
+    バックアップに入っていない番号は、その制御装置が持っていない（または出力しない
+    保護領域の）番号なので、書き戻すと取込が止まる可能性がある。実機どうしを
+    突き合わせて決めるのが確実。
+    """
+    ref = numbers_in(reference)
+    if not ref:
+        return []
+    return sorted(n for n in numbers_in(text) if n not in ref)
+
+
+def drop_numbers(text: str, numbers) -> tuple:
+    """指定した番号の行を取り除いたテキストと、取り除いた番号を返す。"""
+    drop = {int(n) for n in (numbers or [])}
+    kept, removed = [], []
+    for line in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        num = param_number(line)
+        if num is not None and int(num) in drop:
+            removed.append(int(num))
+            continue
+        kept.append(line)
+    return "\n".join(kept), removed
+
+
+def prm_bytes(text: str, eob: str = None) -> bytes:
+    """パラメータファイルを、実機が読める形のバイト列にする。
+
+    行の中身は1バイトも変えない（値の桁・末尾の空白まで実機の形式の一部なので）。
+    変えるのは行の区切り（EOB）だけ。実機が出力したファイルは LF CR CR だった。
+    """
+    eob = eob or fanuc.DEFAULT_EOB
+    norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    # 空行は落とす。実機形式(LF CR CR)を読み直すと CR が空行に化けるので、
+    # 落とさないと通すたびに区切りが増えていく（パラメータ行に空行は無い）。
+    lines = [l for l in norm.split("\n") if l != ""]
+    return "".join(l + eob for l in lines).encode("ascii", "ignore")
+
+
+def validate_prm(text: str, reference: str = "") -> list:
+    """機械が取込に失敗しそうな点を洗い出す（読ませる前の自己点検）。
+
+    reference に実機のバックアップを渡すと、実機に無い番号も指摘する。
+    """
+    problems = []
+    lines = [l for l in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+             if l.strip()]
+    if not lines:
+        return ["ファイルが空です"]
+    if lines[0].strip() != "%" or lines[-1].strip() != "%":
+        problems.append("先頭と末尾が % になっていません（FANUCの読取開始/終了記号）")
+    if ";" in text:
+        problems.append('";" は文字として書けません（EOBは改行）')
+    bad = sorted({c for c in text if ord(c) > 127})
+    if bad:
+        problems.append(f"ASCIIでない文字が入っています {''.join(bad)[:8]!r}")
+    if not any(param_number(l) is not None for l in lines):
+        problems.append("N<番号>Q1… のパラメータ行が1つもありません")
+    if reference:
+        extra = unknown_numbers(text, reference)
+        if extra:
+            problems.append(
+                f"実機のバックアップに無い番号が {len(extra)}個 あります"
+                f"（N{extra[0]:05d}〜N{extra[-1]:05d}）。"
+                "その制御装置が持っていない番号は取込が止まる原因になります")
+    return problems
+
+
 # 1パラメータ行。行頭の余白(\r や空白)を group(1) に保持してから N<digits>Q1。
 # 実機BASICは改行が \n\r\r 等まちまちで、split("\n") すると行頭に \r が残るため、
 # 先頭余白を許容しつつ保存（出力のバイト一致のため余白はそのまま戻す）。

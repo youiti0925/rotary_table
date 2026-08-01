@@ -265,7 +265,7 @@ class TestParamFile(unittest.TestCase):
         ch = P.changes_for_model(P.parse_changes(SAMPLE_CSV), "RTT-315")
         text = P.format_param_file(ch)
         self.assertTrue(text.startswith("%"))
-        self.assertIn("\r\n", text)
+        self.assertNotIn(";", text)   # EOBは改行。";" は書かない
         # 変更する3番号だけが載る（他のパラメータは載らない＝書き換わらない）
         body = [l for l in text.splitlines() if l.startswith("N")]
         self.assertEqual(len(body), 3)

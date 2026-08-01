@@ -2804,19 +2804,21 @@ class BasicOriginDialog(QtWidgets.QDialog):
                 "border-radius:6px; padding:6px 9px;")
             v.addWidget(okmsg)
 
-        # 別の号機なのに中身が同じ＝どちらかが取り違え（コピー）。そのまま使うと
-        # 別の機械のサーボ設定を書き込むことになるので、いちばん強く出す。
-        dup = param_origin.cross_unit_duplicates(rows)
-        same_id = param_origin.shared_cnc_ids(rows)
-        if dup or same_id:
-            lines = ["<b>別の号機どうしで中身が同じファイルがあります（取り違えの疑い）</b>"]
-            for g in dup:
-                lines.append("・" + " ＝ ".join(g) + "　（バイト単位で完全一致）")
-            for i, names in same_id:
-                lines.append(f"・{'、'.join(names)}　（同じCNC ID <code>{i}</code>"
-                             "＝同じ制御装置から出たもの）")
-            lines.append("どちらか一方は別の機械のものです。"
-                         "そのまま使うと違う機械のサーボ設定を書き込みます。")
+        # 中身が同じ組。BASICは「基本パラメータ」なので、仕様が同じ号機なら
+        # 中身も同じになるのが正常。問題になるのは「仕様が違うのに中身が同じ」
+        # 場合だけなので、号機マスタの仕様と突き合わせて分ける。
+        groups = param_origin.cross_unit_duplicates(rows)
+        ctls = list(getattr(parent_ctls, "_controllers", []) or []) \
+            if (parent_ctls := self.parent()) is not None else []
+        judged = controllers.classify_duplicate_groups(groups, ctls)
+        odd = [(g, why) for g, kind, why in judged if kind != "same_spec"]
+        normal = [g for g, kind, _w in judged if kind == "same_spec"]
+        if odd:
+            lines = ["<b>中身が同じなのに仕様が違う組があります（要確認）</b>"]
+            for g, why in odd:
+                lines.append("・" + " ＝ ".join(g) + f"　{why}")
+            lines.append("仕様が同じなら中身が同じで正常です。ここに出るのは"
+                         "仕様が食い違う組なので、どちらが正しいか確認してください。")
             warn = QtWidgets.QLabel("<br>".join(lines))
             warn.setWordWrap(True)
             warn.setTextFormat(QtCore.Qt.RichText)
@@ -2824,6 +2826,13 @@ class BasicOriginDialog(QtWidgets.QDialog):
                 "color:#7c2d12; background:#fff7ed; border:1px solid #fdba74;"
                 "border-radius:6px; padding:6px 9px;")
             v.addWidget(warn)
+        if normal:
+            note = QtWidgets.QLabel(
+                "仕様が同じで中身も同じ組（正常）: "
+                + "、".join(" ＝ ".join(g) for g in normal))
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#475569;")
+            v.addWidget(note)
 
         self.table = QtWidgets.QTableWidget(len(rows), len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
@@ -2938,12 +2947,17 @@ class BasicOriginDialog(QtWidgets.QDialog):
                 w.writerow([name, info["kind"], info["label"], info["eob"],
                             info["lines"], info.get("cnc_id", ""),
                             " / ".join(info["reasons"])])
-            dup = param_origin.cross_unit_duplicates(self.rows)
-            if dup:
+            ctls = list(getattr(self.parent(), "_controllers", []) or []) \
+                if self.parent() is not None else []
+            judged = controllers.classify_duplicate_groups(
+                param_origin.cross_unit_duplicates(self.rows), ctls)
+            if judged:
                 w.writerow([])
-                w.writerow(["別の号機どうしで中身が同じ（取り違えの疑い）"])
-                for g in dup:
-                    w.writerow(g)
+                w.writerow(["中身が同じ組", "判定", "説明"])
+                for g, kind, why in judged:
+                    w.writerow([" = ".join(g),
+                                {"same_spec": "正常", "diff_spec": "要確認",
+                                 "unknown": "判定できない"}[kind], why])
             if self.cov:
                 w.writerow([])
                 w.writerow(["実機から取ってくる必要があるBASIC"])

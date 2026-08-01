@@ -405,6 +405,62 @@ def apply_master_fixes(path, ctls, fixes) -> int:
     return len(touched)
 
 
+# 中身が同じでよいかを見るときの「ハード仕様」。Ver や SERVO の版数は
+# ソフトの版であって、同じ基本パラメータを共有できないほどの違いではない
+# （F27/F28 は SERVO の枝番だけ違う）。ここでは見ない。
+SPEC_ATTRS = ("cnc", "voltage")
+
+
+def same_spec(a, b) -> list:
+    """2台のハード仕様の違いを返す（空なら同じ仕様）。
+
+    BASICは「基本パラメータ」なので、仕様が同じ号機は中身も同じになるのが正常。
+    中身が一致していること自体は問題ではない。問題になるのは
+    「中身は同じなのにハード仕様が違う」場合だけ。
+    """
+    if a is None or b is None:
+        return []
+    diff = [k for k in SPEC_ATTRS
+            if str(getattr(a, k, "")).strip() != str(getattr(b, k, "")).strip()]
+    for axis in AXES:
+        if (a.caps or {}).get(axis, "") != (b.caps or {}).get(axis, ""):
+            diff.append(f"{axis}容量")
+    return diff
+
+
+def classify_duplicate_groups(groups, ctls) -> list:
+    """中身が同じ組を「正常／要確認／判定できない」に分ける。
+
+    戻り値: [(組, 判定, 説明)]
+        "same_spec"  … 仕様も同じ。BASICが同じなのは正常
+        "diff_spec"  … 仕様が違うのに中身が同じ。どちらかが違う（要確認）
+        "unknown"    … 号機マスタに無いので判定できない
+    """
+    from . import param_origin
+    by_unit = {str(c.unit).strip(): c for c in (ctls or [])}
+    out = []
+    for g in groups or []:
+        units = [param_origin.unit_of(n) for n in g]
+        known = [by_unit.get(u) for u in units]
+        if any(c is None for c in known):
+            miss = [f"F{u}" for u, c in zip(units, known) if c is None]
+            out.append((g, "unknown", "号機マスタに無い: " + "、".join(miss)))
+            continue
+        diffs = []
+        for i in range(1, len(known)):
+            diffs += [d for d in same_spec(known[0], known[i]) if d not in diffs]
+        if diffs:
+            detail = "／".join(
+                f"{d}: " + " ".join(
+                    f"F{u}={(c.caps.get(d[:-2]) if d.endswith('容量') else getattr(c, {'CNCユニット':'cnc'}.get(d, d), ''))}"
+                    for u, c in zip(units, known))
+                for d in diffs)
+            out.append((g, "diff_spec", f"仕様が違う（{detail}）"))
+        else:
+            out.append((g, "same_spec", "仕様も同じ（BASICが同じなのは正常）"))
+    return out
+
+
 def basic_files_by_unit(folder) -> dict:
     """BASICフォルダを号機ごとにまとめる。{号機: [(ファイル名, 出どころ), ...]}
 

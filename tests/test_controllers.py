@@ -449,3 +449,49 @@ class TestMasterFixFromBasic(unittest.TestCase):
         d = self._dir({"F23BASIC.DAT": self.MACHINE})
         ctl = C.Controller("23", caps={"X": "20A", "Y": "40A", "Z": "80A", "A": "160A"})
         self.assertEqual(C.master_fix_rows(d, [ctl]), [])
+
+
+class TestDuplicateSpecJudgement(unittest.TestCase):
+    """中身が同じBASICは、仕様が同じなら正常。
+
+    BASICは「基本パラメータ」なので、同じ仕様の号機は同じ中身になる。
+    問題になるのは「中身は同じなのにハード仕様が違う」場合だけ。
+    Ver や SERVO の版数はソフトの版なので見ない（F27/F28 は枝番だけ違う）。
+    """
+
+    def _ctl(self, unit, cnc="Oi-MD", voltage="AC200V", ver="", servo="", **caps):
+        return C.Controller(unit, cnc=cnc, voltage=voltage, ver=ver,
+                            servo=servo, caps=caps)
+
+    def test_same_spec_is_normal(self):
+        ctls = [self._ctl("24", X="80A", Y="80A"), self._ctl("80", X="80A", Y="80A")]
+        got = C.classify_duplicate_groups([["F24BASIC.prm", "F80BASIC.prm"]], ctls)
+        self.assertEqual(got[0][1], "same_spec")
+
+    def test_servo_edition_alone_is_not_flagged(self):
+        ctls = [self._ctl("27", servo="90C5/0006 90C8/0004", X="20A"),
+                self._ctl("28", servo="90C5/0006 90C8/0003", X="20A")]
+        got = C.classify_duplicate_groups([["F27BASIC.PRM", "F28BASIC.PRM"]], ctls)
+        self.assertEqual(got[0][1], "same_spec")
+
+    def test_capacity_difference_is_flagged(self):
+        ctls = [self._ctl("20", Y="160A", Z="80A"), self._ctl("21", Y="80A", Z="160A")]
+        got = C.classify_duplicate_groups([["F20BASIC.DAT", "F21BASIC.DAT"]], ctls)
+        self.assertEqual(got[0][1], "diff_spec")
+        self.assertIn("Y容量", got[0][2])
+
+    def test_cnc_difference_is_flagged(self):
+        ctls = [self._ctl("20", cnc="Oi-MD", X="20A"), self._ctl("21", cnc="31i-MA", X="20A")]
+        got = C.classify_duplicate_groups([["F20BASIC.DAT", "F21BASIC.DAT"]], ctls)
+        self.assertEqual(got[0][1], "diff_spec")
+
+    def test_unknown_unit(self):
+        got = C.classify_duplicate_groups([["F33BASIC", "F34BASIC"]], [])
+        self.assertEqual(got[0][1], "unknown")
+        self.assertIn("F33", got[0][2])
+
+    def test_same_spec_helper(self):
+        a = self._ctl("1", X="20A")
+        self.assertEqual(C.same_spec(a, self._ctl("2", X="20A")), [])
+        self.assertEqual(C.same_spec(a, self._ctl("2", X="40A")), ["X容量"])
+        self.assertEqual(C.same_spec(a, None), [])

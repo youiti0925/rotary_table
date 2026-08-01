@@ -148,6 +148,8 @@ class TestDuplicatesAndCncId(unittest.TestCase):
         self.assertEqual(cnc_id(None), "")
 
     def test_cross_unit_duplicate_detected(self):
+        # 検出自体は事実。それが問題かどうかは仕様と突き合わせて決める
+        # （controllers.classify_duplicate_groups）
         from nd287_app.param_origin import cross_unit_duplicates
         rows = self._rows({"F24BASIC.prm": self.WITH_ID,
                            "F80BASIC.prm": self.WITH_ID,

@@ -64,6 +64,7 @@ from .masters import (
     load_masters,
     missing_masters,
 )
+from . import fanuc
 from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
 from . import controller_import
@@ -123,6 +124,17 @@ from . import xls_param
 ISO230_MODE = "位置決め精度(ISO230)"
 MODES = ("回転分割", "傾斜分割", "回転再現性", "傾斜再現性",
          "回転分割+再現", "傾斜分割+再現", ISO230_MODE)
+
+# FANUCのコメントに書ける文字は英数字だけなので、モード名のローマ字表記を持つ
+MODE_TAGS = {
+    "回転分割": "KAITEN BUNKATSU",
+    "傾斜分割": "KEISHA BUNKATSU",
+    "回転再現性": "KAITEN SAIGEN",
+    "傾斜再現性": "KEISHA SAIGEN",
+    "回転分割+再現": "KAITEN BUNKATSU-SAIGEN",
+    "傾斜分割+再現": "KEISHA BUNKATSU-SAIGEN",
+    ISO230_MODE: "ISO230",
+}
 
 CURVE_STYLES = {
     "wheel_cw": dict(pen=pg.mkPen("#1f77b4", width=2), symbol="o", symbolSize=5),
@@ -645,12 +657,18 @@ class ProgramDialog(QtWidgets.QDialog):
         self.settings = settings
         self.params = params  # 測定条件（rotary, wheel_pitch, blocks 等）
         self.setWindowTitle("FANUC測定プログラム作成")
-        self.resize(720, 720)
-        layout = QtWidgets.QVBoxLayout(self)
+        root = QtWidgets.QVBoxLayout(self)
 
         form = QtWidgets.QFormLayout()
-        self.e_axis = QtWidgets.QLineEdit(str(settings.get("fanuc_axis", "X")))
+        # 幅が狭いときは項目名を入力欄の上へ折り返す（横並びで左が細くなるため）
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
+        form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        self.e_axis = QtWidgets.QLineEdit(str(settings.get("fanuc_axis", "A")))
         self.e_axis.setMaximumWidth(60)
+        self.e_axis.setToolTip(
+            "割出軸のアドレス。回転テーブルは普通 A（実機のプログラムも A）。\n"
+            "X はドゥエル G04 X… と同じ文字なので避ける")
         self.e_pre = QtWidgets.QDoubleSpinBox()
         self.e_pre.setRange(0.0, 360.0)
         self.e_pre.setDecimals(3)
@@ -682,7 +700,7 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_mcode.setMaximumWidth(80)
         # クランプ分割: 測定点でクランプ→読取→アンクランプ
         self.c_clamp = QtWidgets.QCheckBox(
-            "クランプ分割（測定点でクランプ→完了信号→アンクランプ）")
+            "クランプ分割（測定点でロックして読む）")
         self.c_clamp.setChecked(bool(settings.get("fanuc_clamp_enabled", False)))
         self.c_clamp.setToolTip(
             "ONにすると各測定点で軸をクランプしてから完了信号を出し、読取後に"
@@ -709,10 +727,11 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_unclamp_dwell.setValue(float(settings.get("fanuc_unclamp_dwell_sec", 1.0)))
         self.e_unclamp_dwell.setSuffix(" 秒")
         self.e_unclamp_dwell.setToolTip("アンクランプ信号後のドゥエル（次の動き前の緩み待ち）")
-        self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする（外すと1本に展開）")
+        self.c_sub = QtWidgets.QCheckBox("再現をサブプロにする")
+        self.c_sub.setToolTip("外すと M98 を使わず1本に展開する")
         self.c_sub.setChecked(bool(settings.get("fanuc_use_subprogram", True)))
-        self.c_reset = QtWidgets.QCheckBox(
-            "先頭にカウンターリセット（バックラッシュ消し→M00）を入れる")
+        self.c_reset = QtWidgets.QCheckBox("先頭にカウンターリセットを入れる")
+        self.c_reset.setToolTip("バックラッシュ消し→M00で止まるので、そこでカウンターを0にする")
         self.c_reset.setChecked(bool(settings.get("fanuc_counter_reset", True)))
         self.c_return = QtWidgets.QCheckBox("測定後に0°（基準）へ戻す")
         self.c_return.setChecked(bool(settings.get("fanuc_return_to_start", True)))
@@ -725,7 +744,21 @@ class ProgramDialog(QtWidgets.QDialog):
         self.e_main.setValue(int(settings.get("fanuc_main_number", 100)))
         self.e_sub = QtWidgets.QSpinBox()
         self.e_sub.setRange(1, 9999)
-        self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 9001)))
+        self.e_sub.setValue(int(settings.get("fanuc_rep_sub_number", 1000)))
+        self.e_sub.setToolTip(
+            "再現サブプロのO番号。O8000〜O9999は保護領域（パラメータ3202 NE8/NE9）で、\n"
+            "書込禁止だと転送そのものが弾かれるので 1000番台にしてある")
+
+        # ブロックの区切り（EOB）。既定は実機が出力したファイルと同じ形式。
+        self.cmb_eob = QtWidgets.QComboBox()
+        for label, value in fanuc.EOB_STYLES:
+            self.cmb_eob.addItem(label, value)
+        ei = self.cmb_eob.findData(settings.get("nc_eob") or fanuc.DEFAULT_EOB)
+        self.cmb_eob.setCurrentIndex(ei if ei >= 0 else 0)
+        self.cmb_eob.setToolTip(
+            "ファイルに書く改行の形式。画面の \";\" は文字ではなく改行そのものなので、\n"
+            "ファイルには書き込まない（書くと制御装置が読めない）。\n"
+            "既定は実機が出力したファイルと同じ LF CR CR。読めないときだけ変える")
 
         # 機械へ送信の設定ウィジェット（LAN＝共有フォルダ/FTP、またはメモリカード）
         self.cmb_send = QtWidgets.QComboBox()
@@ -749,10 +782,12 @@ class ProgramDialog(QtWidgets.QDialog):
         self.c_ftp_passive.setChecked(bool(settings.get("nc_ftp_passive", True)))
 
         form.addRow("割出軸", self.e_axis)
-        form.addRow("前振り量（測定点のバックラッシュ消し）", self.e_pre)
-        form.addRow("リセット振り量（カウンター0設定用）", self.e_reset_sw)
-        form.addRow("振りドゥエル（バックラッシュ消し後・小さめ）", self.e_swing_dwell)
-        form.addRow("測定ドゥエル（測定点で静止・読取前 1.0〜5.0）", self.e_dwell)
+        self.e_pre.setToolTip("測定点でバックラッシュを消すための行き過ぎ量")
+        form.addRow("前振り量", self.e_pre)
+        self.e_reset_sw.setToolTip("先頭のカウンター0設定で振る量（測定の前振りとは別）")
+        form.addRow("リセット振り量", self.e_reset_sw)
+        form.addRow("振りドゥエル", self.e_swing_dwell)
+        form.addRow("測定ドゥエル", self.e_dwell)
         form.addRow("完了信号Mコード", self.e_mcode)
         form.addRow(self.c_clamp)
         clamp_m_row = QtWidgets.QHBoxLayout()
@@ -762,7 +797,7 @@ class ProgramDialog(QtWidgets.QDialog):
         clamp_m_row.addWidget(QtWidgets.QLabel("アンクランプ"))
         clamp_m_row.addWidget(self.e_unclamp_m)
         clamp_m_row.addStretch(1)
-        form.addRow("クランプ信号Mコード", clamp_m_row)
+        form.addRow("クランプ信号", clamp_m_row)
         clamp_d_row = QtWidgets.QHBoxLayout()
         clamp_d_row.addWidget(QtWidgets.QLabel("クランプ後"))
         clamp_d_row.addWidget(self.e_clamp_dwell)
@@ -770,22 +805,53 @@ class ProgramDialog(QtWidgets.QDialog):
         clamp_d_row.addWidget(QtWidgets.QLabel("アンクランプ後"))
         clamp_d_row.addWidget(self.e_unclamp_dwell)
         clamp_d_row.addStretch(1)
-        form.addRow("クランプ信号後ドゥエル", clamp_d_row)
+        form.addRow("クランプ後ドゥエル", clamp_d_row)
         form.addRow("メインO番号", self.e_main)
         form.addRow("再現サブプロO番号", self.e_sub)
+        form.addRow("改行(EOB)の形式", self.cmb_eob)
         form.addRow(self.c_reset)
         form.addRow(self.c_sub)
         form.addRow(self.c_return)
         form.addRow(self.c_div)
         form.addRow(self.c_rep)
-        layout.addLayout(form)
 
+        # --- 左：設定（縦に長いのでスクロール）／右：プレビュー の横並び ---
+        # 縦一列だと画面の下にはみ出してボタンが押せなかったため（実機で指摘あり）
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addLayout(form)
+        lv.addWidget(self._build_send_group())
+        lv.addStretch(1)
+        self.left_scroll = QtWidgets.QScrollArea()
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setWidget(left)
+        self.left_scroll.setMinimumWidth(330)
+        self.left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        self.lbl_warn = QtWidgets.QLabel()
+        self.lbl_warn.setWordWrap(True)
+        self.lbl_warn.setStyleSheet(
+            "color:#b91c1c; background:#fef2f2; border:1px solid #fecaca;"
+            "border-radius:6px; padding:4px 7px;")
+        self.lbl_warn.hide()
+        rv.addWidget(self.lbl_warn)
         self.preview = QtWidgets.QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setStyleSheet("font-family: monospace; font-size: 12px;")
-        layout.addWidget(self.preview, 1)
+        self.preview.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        rv.addWidget(self.preview, 1)
 
-        layout.addWidget(self._build_send_group())
+        self.split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.split.addWidget(self.left_scroll)
+        self.split.addWidget(right)
+        self.split.setStretchFactor(0, 0)
+        self.split.setStretchFactor(1, 1)
+        self.split.setSizes([380, 660])
+        root.addWidget(self.split, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         b_refresh = QtWidgets.QPushButton("プレビュー更新")
@@ -811,7 +877,9 @@ class ProgramDialog(QtWidgets.QDialog):
         buttons.addWidget(self.b_send)
         buttons.addWidget(b_sendhelp)
         buttons.addWidget(b_close)
-        layout.addLayout(buttons)
+        root.addLayout(buttons)
+
+        self._fit_to_screen()
 
         for w in (self.e_axis, self.e_mcode, self.e_clamp_m, self.e_unclamp_m):
             w.textChanged.connect(self.refresh)
@@ -823,7 +891,32 @@ class ProgramDialog(QtWidgets.QDialog):
         for w in (self.c_sub, self.c_reset, self.c_return, self.c_div, self.c_rep,
                   self.c_clamp):
             w.toggled.connect(self.refresh)
+        self.cmb_eob.currentIndexChanged.connect(self._check)
+        self.preview.textChanged.connect(self._check)
         self.refresh()
+
+    def _fit_to_screen(self):
+        """画面からはみ出さない大きさで開く（下のボタンが押せなくなるのを防ぐ）。"""
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+        w = max(760, min(1150, avail.width() - 80))
+        h = max(420, min(760, avail.height() - 80))
+        self.setMaximumHeight(avail.height())
+        self.resize(w, h)
+        self.split.setSizes([int(w * 0.37), w - int(w * 0.37)])
+
+    def _check(self):
+        """機械が読めない書き方が残っていないか点検して、赤帯で知らせる。"""
+        problems = fanuc.validate(self.preview.toPlainText(), self._config())
+        if problems:
+            self.lbl_warn.setText("読取エラーになりそうな点:\n・" + "\n・".join(problems[:6]))
+            self.lbl_warn.show()
+        else:
+            self.lbl_warn.hide()
+        return problems
+
+    def _eob(self):
+        return self.cmb_eob.currentData() or fanuc.DEFAULT_EOB
 
     def _config(self):
         return FanucConfig(
@@ -921,11 +1014,16 @@ class ProgramDialog(QtWidgets.QDialog):
             self, "測定プログラムを保存", default, "NCプログラム (*.NC *.txt)")
         if not path:
             return
-        # FANUCはASCII。CRLFで保存
-        with open(path, "w", encoding="ascii", errors="replace", newline="") as f:
-            f.write(text)
-        self._persist()  # 次回も同じ設定で作れるよう記憶
-        QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
+        # 機械が読める形（ISOコードの文字だけ・EOBは改行）にしてから書く。
+        # 以前は errors="replace" で日本語が "?" になり、";" もそのまま書いていた
+        # ため、制御装置が読み込めなかった。
+        with open(path, "wb") as f:
+            f.write(fanuc.nc_bytes(text, self._eob()))
+        self._persist({"nc_eob": self._eob()})  # 次回も同じ設定で作れるよう記憶
+        problems = self._check()
+        note = ("\n\n※点検で気になる点があります:\n・" + "\n・".join(problems[:4])
+                if problems else "")
+        QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}{note}")
 
     def _build_send_group(self):
         """「機械へ送信」の送信先設定（方式で共有フォルダ/FTPを切替）。"""
@@ -991,6 +1089,7 @@ class ProgramDialog(QtWidgets.QDialog):
             nc_ftp_password=self.e_ftp_pw.text(),
             nc_ftp_dir=self.e_ftp_dir.text().strip(),
             nc_ftp_passive=self.c_ftp_passive.isChecked(),
+            nc_eob=self._eob(),
         )
 
     def do_send(self):
@@ -9010,7 +9109,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 repeats=self.e_repeats.value(),
             )
         model = self.e_model.text().strip() or "MEASURE"
-        params["title"] = f"{model} {self.current_mode()}"
+        # FANUCのコメントは英数字のみ。モード名はローマ字にしておく
+        # （日本語のまま渡すと消えるか "?" になり、読取エラーの原因になる）
+        params["title"] = f"{model} {MODE_TAGS.get(self.current_mode(), '')}".strip()
         params["machine"] = self.e_machine.text().strip()
         ProgramDialog(self, self.settings, params).exec()
 

@@ -71,7 +71,7 @@ DEFAULTS = dict(
     # 生データ編集（管理者モード）のパスワード
     admin_password="0925",
     # FANUC測定プログラム生成
-    fanuc_axis="X",
+    fanuc_axis="A",         # 割出軸のアドレス（実機の回転軸。X はG04 X…と同じ文字で不可）
     fanuc_preswing=10.0,        # 測定点の前振り量[°]（バックラッシュ消し）
     fanuc_reset_swing=10.0,     # カウンターリセットの振り量[°]（前振りとは別に設定可）
     fanuc_swing_dwell_sec=1.0,  # 振り後のドゥエル[秒]（バックラッシュ消し後・測定無関係＝小さめ）
@@ -79,7 +79,7 @@ DEFAULTS = dict(
     fanuc_mcode="M80",          # 完了信号Mコード（カウンターへ送る）
     fanuc_use_subprogram=True,  # True: 再現をサブプロ / False: 1本に展開
     fanuc_main_number=100,
-    fanuc_rep_sub_number=9001,
+    fanuc_rep_sub_number=1000,  # O8000〜O9999は保護領域で転送が弾かれることがある
     fanuc_return_to_start=True,
     fanuc_counter_reset=True,   # 先頭にカウンターリセット（M00）を入れる
     # クランプ分割: 各測定点でクランプ→読取→アンクランプ（軸ロックして測る）
@@ -90,6 +90,7 @@ DEFAULTS = dict(
     fanuc_unclamp_dwell_sec=1.0,  # アンクランプ信号後のドゥエル[秒]（次の動き前の緩み待ち）
     # 測定プログラムの機械への送信（カード不要・LAN）。"folder"=共有フォルダ / "ftp"
     nc_send_method="folder",
+    nc_eob="\n\r\r",             # ブロック区切り。既定は実機の出力と同じ LF CR CR
     nc_send_folder="",   # 共有フォルダのパス（例 \\<機械IP>\nc や Z:\NC）
     nc_ftp_host="",      # 機械のIPアドレス（FTP方式）
     nc_ftp_port=21,
@@ -224,8 +225,30 @@ def load_settings(path=None) -> dict:
         profiles[settings["active_profile"]].update(
             {k: raw[k] for k in CONN_KEYS if k in raw}
         )
+    _migrate_fanuc(settings, raw)
     apply_active_profile(settings)
     return settings
+
+
+def _migrate_fanuc(settings: dict, raw: dict):
+    """古い設定に残っている、機械が受け付けない値を1度だけ直す。
+
+    ・fanuc_axis="X": 旧既定値。実機のプログラムは回転軸が A で、X はドゥエル
+      G04 X… と同じ文字。以前の出力が読めなかった件に絡むので A へ寄せる。
+    ・fanuc_rep_sub_number が O8000〜O9999: 保護プログラム領域（パラメータ3202の
+      NE8/NE9）で、書込禁止だと転送そのものが弾かれる。
+    どちらも1度だけ（fanuc_migrated を立てて、以後の手動設定は尊重する）。
+    """
+    if not raw or settings.get("fanuc_migrated"):
+        return  # 新規（既定値のまま）は直すものが無い
+    if str(raw.get("fanuc_axis", "")).upper() == "X":
+        settings["fanuc_axis"] = "A"
+    try:
+        if 8000 <= int(raw.get("fanuc_rep_sub_number", 0)) <= 9999:
+            settings["fanuc_rep_sub_number"] = 1000
+    except (TypeError, ValueError):
+        pass
+    settings["fanuc_migrated"] = True
 
 
 def save_settings(settings: dict, path=None):

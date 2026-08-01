@@ -16,15 +16,19 @@ import re
 from ftplib import FTP, error_perm
 from pathlib import Path
 
+from . import fanuc
+
 # ファイル名に使えない文字（パス区切り・予約文字・制御文字）
 _BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
-def nc_bytes(text: str) -> bytes:
-    """FANUC向けに整形（改行をCRLF統一・ASCII化）したバイト列を返す。"""
-    norm = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
-    # 日本語コメント等が混じっても落ちないよう非ASCIIは "?" に置換
-    return norm.encode("ascii", "replace")
+def nc_bytes(text: str, eob: str = None) -> bytes:
+    """FANUC向けに整形したバイト列を返す（整形の中身は fanuc.nc_bytes）。
+
+    ";" や日本語コメントが残っていると制御装置が読み込めないので、ここで必ず
+    実機と同じ形（既定 LF CR CR 区切り・ISOコードの文字のみ）に落とす。
+    """
+    return fanuc.nc_bytes(text, eob or fanuc.DEFAULT_EOB)
 
 
 def _safe_component(name: str) -> str:
@@ -49,7 +53,7 @@ def default_filename(machine: str = "", main_number=None) -> str:
     return "program.NC"
 
 
-def send_to_folder(text: str, dest_dir, filename: str) -> str:
+def send_to_folder(text: str, dest_dir, filename: str, eob: str = None) -> str:
     """共有フォルダへ .NC を書き出す。書き出したフルパスを返す。
 
     フォルダが見えない/存在しない場合は分かりやすい例外を送出する。
@@ -64,19 +68,19 @@ def send_to_folder(text: str, dest_dir, filename: str) -> str:
     if not d.is_dir():
         raise NotADirectoryError(f"送信先がフォルダではありません: {d}")
     path = d / filename
-    path.write_bytes(nc_bytes(text))
+    path.write_bytes(nc_bytes(text, eob))
     return str(path)
 
 
 def send_via_ftp(text: str, host: str, *, port: int = 21, user: str = "",
                  password: str = "", remote_dir: str = "",
                  filename: str = "program.NC", passive: bool = True,
-                 timeout: float = 10.0) -> str:
+                 timeout: float = 10.0, eob: str = None) -> str:
     """FTPで .NC をアップロードする。送信先表記（ftp://…）を返す。"""
     host = (host or "").strip()
     if not host:
         raise ValueError("FTPのホスト（機械のIPアドレス）が設定されていません")
-    data = nc_bytes(text)
+    data = nc_bytes(text, eob)
     ftp = FTP()
     ftp.connect(host, int(port or 21), timeout=timeout)
     try:
@@ -115,6 +119,7 @@ def send(text: str, settings: dict, *, machine: str = "",
     """settings の方式（nc_send_method）に従って送信。送信先の表記を返す。"""
     settings = settings or {}
     method = (settings.get("nc_send_method") or "folder").lower()
+    eob = settings.get("nc_eob") or fanuc.DEFAULT_EOB
     filename = default_filename(machine, main_number)
     if method == "ftp":
         return send_via_ftp(
@@ -125,5 +130,6 @@ def send(text: str, settings: dict, *, machine: str = "",
             remote_dir=settings.get("nc_ftp_dir", ""),
             filename=filename,
             passive=bool(settings.get("nc_ftp_passive", True)),
+            eob=eob,
         )
-    return send_to_folder(text, settings.get("nc_send_folder", ""), filename)
+    return send_to_folder(text, settings.get("nc_send_folder", ""), filename, eob)

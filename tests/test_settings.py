@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from nd287_app.settings import (
     DEFAULTS,
@@ -107,3 +109,36 @@ class TestConnectionProfiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFanucMigration(unittest.TestCase):
+    """機械が受け付けない古い値（X軸・保護O番号）を1度だけ直す"""
+
+    def _load(self, stored):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "settings.json"
+            p.write_text(json.dumps(stored), encoding="utf-8")
+            return load_settings(p)
+
+    def test_axis_x_becomes_a(self):
+        s = self._load({"fanuc_axis": "X"})
+        self.assertEqual(s["fanuc_axis"], "A")
+
+    def test_protected_sub_number_moved(self):
+        s = self._load({"fanuc_rep_sub_number": 9001})
+        self.assertEqual(s["fanuc_rep_sub_number"], 1000)
+
+    def test_runs_only_once(self):
+        # 1度移行した後で自分でXに戻したなら、その選択を尊重する
+        s = self._load({"fanuc_axis": "X", "fanuc_migrated": True})
+        self.assertEqual(s["fanuc_axis"], "X")
+
+    def test_other_axis_kept(self):
+        s = self._load({"fanuc_axis": "B"})
+        self.assertEqual(s["fanuc_axis"], "B")
+
+    def test_defaults_are_machine_ready(self):
+        s = self._load({})
+        self.assertEqual(s["fanuc_axis"], "A")
+        self.assertLess(s["fanuc_rep_sub_number"], 8000)
+        self.assertEqual(s["nc_eob"], "\n\r\r")

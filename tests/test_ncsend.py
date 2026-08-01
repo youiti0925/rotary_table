@@ -3,20 +3,28 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nd287_app import ncsend
+from nd287_app import fanuc, ncsend
 
 
 class TestNcBytes(unittest.TestCase):
-    def test_crlf_normalized(self):
-        # LF も CR も CRLF に統一される（FANUC前提）
+    def test_eob_is_machine_format(self):
+        # 改行はどう書かれていても実機と同じ LF CR CR に統一する
         self.assertEqual(ncsend.nc_bytes("A\nB\r\nC\rD"),
-                         b"A\r\nB\r\nC\r\nD")
+                         b"A\n\r\rB\n\r\rC\n\r\rD\n\r\r")
 
-    def test_non_ascii_replaced(self):
-        # 日本語コメントが混じっても落ちず "?" に置換される
+    def test_eob_selectable(self):
+        self.assertEqual(ncsend.nc_bytes("A\nB", fanuc.EOB_CRLF), b"A\r\nB\r\n")
+
+    def test_non_ascii_removed(self):
+        # 日本語コメントは "?" にせず取り除く（"?" もISOコードに無い文字）
         out = ncsend.nc_bytes("(コメント)\nM30")
-        self.assertTrue(out.endswith(b"M30"))
-        self.assertNotIn("コ".encode("utf-8"), out)
+        self.assertIn(b"M30", out)
+        self.assertNotIn(b"?", out)
+        self.assertTrue(all(b < 128 for b in out))
+
+    def test_semicolon_never_written(self):
+        # ";" は文字として書かない（実機が読み込めなくなる）
+        self.assertNotIn(b";", ncsend.nc_bytes("%\nG00A10. ;\nM30 ;\n%"))
 
 
 class TestFilename(unittest.TestCase):
@@ -46,13 +54,13 @@ class TestFilename(unittest.TestCase):
 
 
 class TestSendToFolder(unittest.TestCase):
-    def test_writes_file_crlf(self):
+    def test_writes_file_in_machine_format(self):
         with tempfile.TemporaryDirectory() as d:
             path = ncsend.send_to_folder("%\nO0100\nM30\n%", d, "261942.NC")
             self.assertTrue(Path(path).exists())
             data = Path(path).read_bytes()
-            self.assertIn(b"\r\n", data)
-            self.assertNotIn(b"\n\n", data.replace(b"\r\n", b""))  # 生のLF残らない
+            self.assertEqual(data, b"%\n\r\rO0100\n\r\rM30\n\r\r%\n\r\r")
+            self.assertNotIn(b";", data)
 
     def test_missing_folder_raises_clear_error(self):
         missing = str(Path(tempfile.gettempdir()) / "no_such_dir_xyz_123")

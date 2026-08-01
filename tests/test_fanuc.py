@@ -3,11 +3,16 @@ import re
 import unittest
 
 from nd287_app.fanuc import (
+    DEFAULT_EOB,
+    EOB_CRLF,
     FanucConfig,
     expected_signal_count,
     fmt_num,
     generate,
+    nc_bytes,
     repeat_body,
+    sanitize_comment,
+    validate,
 )
 from nd287_app.sequence import (
     CombinedSequence,
@@ -48,11 +53,11 @@ def expand_runtime_signals(text, cfg):
     def count_signals(body):
         total = 0
         for l in body:
-            call = re.match(rf"M98 P(\d+) L(\d+)", l)
+            call = re.match(r"M98\s*P(\d+)\s*L(\d+)", l)
             if call:
                 num, reps = int(call.group(1)), int(call.group(2))
                 total += count_signals(subs.get(num, [])) * reps
-            elif l.startswith(cfg.mcode + " ") or l == cfg.mcode + " ;" or l == cfg.mcode:
+            elif l == cfg.mcode:
                 total += 1
         return total
 
@@ -111,8 +116,8 @@ class TestGenerate(unittest.TestCase):
         blocks = rotary_blocks(4)
         text = generate(cfg, rotary=True, blocks=blocks, repeats=7,
                         include_division=False, include_repeat=True)
-        self.assertIn("M98 P9001 L7", text)
-        self.assertIn("O9001", text)
+        self.assertIn("M98P1000L7", text)
+        self.assertIn("O1000", text)
         # 4ブロック×7回×2(CW/CCW) = 56
         self.assertEqual(expand_runtime_signals(text, cfg), 56)
 
@@ -122,7 +127,7 @@ class TestGenerate(unittest.TestCase):
         text = generate(cfg, rotary=True, blocks=blocks, repeats=7,
                         include_division=False, include_repeat=True)
         self.assertNotIn("M98", text)
-        self.assertNotIn("O9001", text)
+        self.assertNotIn("O1000", text)
         self.assertEqual(expand_runtime_signals(text, cfg), 56)
 
     def test_program_structure(self):
@@ -131,15 +136,15 @@ class TestGenerate(unittest.TestCase):
         self.assertTrue(text.startswith("%"))
         self.assertTrue(text.rstrip().endswith("%"))
         self.assertIn("O0100", text)
-        self.assertIn("M30 ;", text)
+        self.assertIn("M30", text)
         self.assertIn("G91", text)
 
     def test_dwell_has_decimal(self):
         # G04 X1（小数点なし）でなく G04 X1.（秒指定）であること
         cfg = FanucConfig(dwell_sec=1.0)
         text = generate(cfg, rotary=True, blocks=[], repeats=0, include_repeat=False)
-        self.assertIn("G04 X1.", text)
-        self.assertNotIn("G04 X1 ", text)
+        self.assertIn("G04X1.", text)
+        self.assertFalse(re.search(r"G04X1(?!\.)", text))
 
 
 class TestClampDivision(unittest.TestCase):
@@ -164,12 +169,12 @@ class TestClampDivision(unittest.TestCase):
                           unclamp_mcode="M11", mcode="M80")
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
-        seq = [l.strip().rstrip(" ;") for l in text.splitlines()]
+        seq = [l.strip() for l in text.splitlines()]
         i_clamp = seq.index("M10")
-        self.assertEqual(seq[i_clamp + 1][:4], "G04 ")        # クランプ後ドゥエル
+        self.assertTrue(seq[i_clamp + 1].startswith("G04"))        # クランプ後ドゥエル
         self.assertEqual(seq[i_clamp + 2], "M80")             # 完了信号
         self.assertEqual(seq[i_clamp + 3], "M11")             # アンクランプ
-        self.assertEqual(seq[i_clamp + 4][:4], "G04 ")        # アンクランプ後ドゥエル
+        self.assertTrue(seq[i_clamp + 4].startswith("G04"))        # アンクランプ後ドゥエル
 
     def test_clamp_does_not_change_signal_count(self):
         # クランプを入れても完了信号(取込点数)は不変
@@ -187,10 +192,10 @@ class TestClampDivision(unittest.TestCase):
                           clamp_dwell_sec=1.5, unclamp_dwell_sec=0.3)
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
-        self.assertIn("M21 ;", text)
-        self.assertIn("M22 ;", text)
-        self.assertIn("G04 X1.5 ;", text)
-        self.assertIn("G04 X0.3 ;", text)
+        self.assertIn("M21", text)
+        self.assertIn("M22", text)
+        self.assertIn("G04X1.5", text)
+        self.assertIn("G04X0.3", text)
 
     def test_clamp_off_is_unchanged(self):
         # クランプOFFは従来どおり（測定ドゥエル→完了信号）
@@ -207,10 +212,10 @@ class TestCounterReset(unittest.TestCase):
         cfg = FanucConfig(counter_reset=True, preswing=10.0, reset_swing=10.0)
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
-        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
-        i = lines.index("G91 G00 X10.")
+        lines = [l.strip() for l in text.splitlines()]
+        i = lines.index("G91G00A10.")
         self.assertEqual(lines[i:i + 5],
-                         ["G91 G00 X10.", "X-10.", "X-10.", "X10.", "M00"])
+                         ["G91G00A10.", "A-10.", "A-10.", "A10.", "M00"])
         # M00 は測定点（M80）に数えない＝信号数は不変
         self.assertEqual(expand_runtime_signals(text, cfg), 2 * 5 + 2 * 3)
 
@@ -219,13 +224,13 @@ class TestCounterReset(unittest.TestCase):
         cfg = FanucConfig(counter_reset=True, preswing=10.0, reset_swing=15.0)
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
-        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
-        i = lines.index("G91 G00 X15.")  # リセットは15°
+        lines = [l.strip() for l in text.splitlines()]
+        i = lines.index("G91G00A15.")  # リセットは15°
         self.assertEqual(lines[i:i + 5],
-                         ["G91 G00 X15.", "X-15.", "X-15.", "X15.", "M00"])
+                         ["G91G00A15.", "A-15.", "A-15.", "A15.", "M00"])
         # 測定の前振りは10°のまま（ホイールCW先頭）
-        self.assertIn("G00 X-10.", lines)
-        self.assertNotIn("G00 X-15.", lines[i + 5:])  # 以降に15°前振りは出ない
+        self.assertIn("G00A-10.", lines)
+        self.assertNotIn("G00A-15.", lines[i + 5:])  # 以降に15°前振りは出ない
 
     def test_reset_disabled(self):
         cfg = FanucConfig(counter_reset=False)
@@ -251,19 +256,131 @@ class TestTiltPositioning(unittest.TestCase):
                         wheel_start=-30, wheel_end=120,
                         worm_pitch=1.0, worm_range=2.0, worm_start=0.0,
                         blocks=blocks, repeats=2)
-        lines = [l.strip().rstrip(" ;") for l in text.splitlines()]
-        # リセット(0) → X-30(測定開始へ) → … → 途中で X30(0へ=ウォーム) → X-30(再現へ)
-        i = lines.index("G91 G00 X10.")
+        lines = [l.strip() for l in text.splitlines()]
+        # リセット(0) → A-30(測定開始へ) → … → 途中で A30(0へ=ウォーム) → A-30(再現へ)
+        i = lines.index("G91G00A10.")
         self.assertEqual(lines[i:i + 5],
-                         ["G91 G00 X10.", "X-10.", "X-10.", "X10.", "M00"])
-        # ウォーム前に 0° へ戻す G00 X30. がある（CCWが-30で終わるため）
-        self.assertIn("G00 X30.", lines)
-        # 再現開始で -30° へ G00 X-30.
-        self.assertIn("G00 X-30.", lines)
+                         ["G91G00A10.", "A-10.", "A-10.", "A10.", "M00"])
+        # ウォーム前に 0° へ戻す G00A30. がある（CCWが-30で終わるため）
+        self.assertIn("G00A30.", lines)
+        # 再現開始で -30° へ G00A-30.
+        self.assertIn("G00A-30.", lines)
         # 最後に 0° へ戻す（120から -120）
-        self.assertIn("G00 X-120.", lines)
+        self.assertIn("G00A-120.", lines)
         # 信号数 = ホイール6×2 + ウォーム3×2 + 再現3ブロック×2回×2 = 30
         self.assertEqual(expand_runtime_signals(text, cfg), 6 * 2 + 3 * 2 + 3 * 2 * 2)
+
+
+class TestMachineReadableFormat(unittest.TestCase):
+    """制御装置が読み込める形になっているか（実機で読めなかった件の再発防止）
+
+    実機が自分で出力したプログラム（O1000）と同じ形にそろえる:
+    ・";" は1つも書かない（画面の ";" は EOB＝改行の表示で、文字としては不正）
+    ・ISOコードに無い文字（小文字・日本語・"?"）を書かない
+    ・コメントのカッコを入れ子にしない（最初の ")" でコメントが終わるため）
+    ・ブロックの区切りは実機と同じ LF CR CR
+    """
+
+    def _text(self):
+        return generate(FanucConfig(), rotary=True, title="261942 傾斜分割+再現",
+                        wheel_pitch=90, wheel_start=0, wheel_end=360,
+                        worm_pitch=1.0, worm_range=2.0,
+                        blocks=rotary_blocks(4), repeats=3)
+
+    def test_no_semicolon_anywhere(self):
+        self.assertNotIn(";", self._text())
+
+    def test_only_iso_characters(self):
+        legal = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,-+*/=%()\n")
+        bad = sorted({c for c in self._text() if c not in legal})
+        self.assertEqual(bad, [], f"ISOコードに無い文字が出た: {bad}")
+
+    def test_japanese_title_does_not_leak(self):
+        # 日本語タイトルは "?" にせず取り除く（"?" もISOコードに無い）
+        text = self._text()
+        self.assertNotIn("?", text)
+        self.assertIn("O0100(261942", text)
+
+    def test_comment_parens_not_nested(self):
+        for line in self._text().splitlines():
+            _, sep, rest = line.partition("(")
+            if sep:
+                self.assertNotIn("(", rest.rstrip(")"), f"入れ子コメント: {line}")
+
+    def test_generated_program_passes_validate(self):
+        self.assertEqual(validate(self._text(), FanucConfig()), [])
+
+    def test_default_axis_is_rotary(self):
+        # 実機の回転軸は A。X は G04 X…（ドゥエル）と同じ文字で紛らわしい
+        self.assertEqual(FanucConfig().axis, "A")
+
+    def test_default_sub_number_avoids_protected_range(self):
+        # O8000〜O9999 は保護領域（3202 NE8/NE9）で転送が弾かれることがある
+        self.assertLess(FanucConfig().rep_sub_number, 8000)
+
+    def test_nc_bytes_uses_machine_eob(self):
+        data = nc_bytes("%\nO0100\nM30\n%")
+        self.assertEqual(data, b"%\n\r\rO0100\n\r\rM30\n\r\r%\n\r\r")
+        self.assertEqual(DEFAULT_EOB, "\n\r\r")
+
+    def test_nc_bytes_eob_selectable(self):
+        self.assertEqual(nc_bytes("%\nM30\n%", EOB_CRLF), b"%\r\nM30\r\n%\r\n")
+
+    def test_nc_bytes_drops_hand_typed_semicolon(self):
+        # 手編集で ";" を書いてしまっても、EOBとして扱って落とす
+        self.assertEqual(nc_bytes("G00A10. ;\nM30 ;", EOB_CRLF), b"G00A10.\r\nM30\r\n")
+
+    def test_nc_bytes_is_pure_ascii(self):
+        data = nc_bytes("(日本語コメント)\nM30")
+        self.assertTrue(all(b < 128 for b in data))
+        self.assertIn(b"M30", data)
+
+
+class TestValidate(unittest.TestCase):
+    def _has(self, problems, word):
+        return any(word in p for p in problems)
+
+    def test_flags_semicolon(self):
+        self.assertTrue(self._has(validate("%\nO1\nM30 ;\n%"), '";"'))
+
+    def test_flags_lowercase_and_question_mark(self):
+        self.assertTrue(self._has(validate("%\nO1\n(set 0)\nM30\n%"), "使えない文字"))
+        self.assertTrue(self._has(validate("%\nO1\n(????)\nM30\n%"), "使えない文字"))
+
+    def test_flags_nested_comment(self):
+        self.assertTrue(self._has(validate("%\nO1\n(A (B) C)\nM30\n%"), "入れ子"))
+
+    def test_flags_protected_o_number(self):
+        self.assertTrue(self._has(validate("%\nO9001\nM30\n%"), "保護プログラム"))
+
+    def test_flags_axis_x(self):
+        self.assertTrue(self._has(validate("%\nO1\nM30\n%", FanucConfig(axis="X")),
+                                  "割出軸が X"))
+
+    def test_flags_missing_percent(self):
+        self.assertTrue(self._has(validate("O1\nM30"), "%"))
+
+    def test_clean_program_has_no_problems(self):
+        self.assertEqual(validate("%\nO0100(TEST)\nG91G00A10.\nM30\n%",
+                                  FanucConfig()), [])
+
+
+class TestSanitizeComment(unittest.TestCase):
+    def test_uppercases(self):
+        self.assertEqual(sanitize_comment("set 0 here"), "SET 0 HERE")
+
+    def test_drops_japanese(self):
+        self.assertEqual(sanitize_comment("261942 傾斜分割"), "261942")
+
+    def test_flattens_nested_parens(self):
+        self.assertEqual(sanitize_comment("A (B) C"), "A B C")
+
+    def test_truncates(self):
+        self.assertLessEqual(len(sanitize_comment("A" * 200)), 40)
+
+    def test_empty(self):
+        self.assertEqual(sanitize_comment(None), "")
+        self.assertEqual(sanitize_comment("あ"), "")
 
 
 class TestRepeatBlockStartEnd(unittest.TestCase):

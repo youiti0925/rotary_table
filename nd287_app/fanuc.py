@@ -5,8 +5,24 @@
 カウンター（ND287等）へは、各測定点で位置決め・ドゥエル（静止待ち）後に
 完了信号（既定 M80）を送り、その瞬間の値を取り込ませる。
 
+＝＝＝ 出力形式について（実機で読めなかった件の対策）＝＝＝
+実機（FANUC）が自分で出力したプログラムと同じ形にそろえてある。以前の出力は
+PCのテキストとしては読めても、制御装置には読み込めなかった。原因は3つ:
+
+  1. 行末の ";" を文字として書いていた
+     画面に見える ";" は EOB（ブロック終わり）の表示であって、ファイルの中では
+     改行そのもの。";" はFANUCのISOコード表に無い文字なので、書き込むと読取で
+     エラーになる。実機が出力したファイルにも ";" は1つも入っていない。
+  2. コメントに使えない文字が入っていた
+     日本語をASCIIに落として "????" になっていた。"?" もISOコードに無い。
+     さらに "(--- RESET (set 0) ---)" のようにカッコが入れ子だった。FANUCは
+     最初の ")" でコメントを終わるので、残りが不正な指令として読まれる。
+  3. 改行が実機の形式と違っていた
+     実機は 1ブロックごとに LF CR CR で区切る。既定でこれに合わせる
+     （EOB_STYLES で CRLF / LF にも変えられる）。
+
 設定（FanucConfig）で変更できる項目:
-    axis        … 割出軸のアドレス（既定 X）
+    axis        … 割出軸のアドレス（既定 A＝実機の回転軸。傾斜軸なら B/C など）
     preswing    … 前振り量[°]（バックラッシュ消しの行き過ぎ量。既定 10）
     swing_dwell_sec … 振り後のドゥエル[秒]（バックラッシュ消しの振り後。測定とは
                       無関係なので小さめ＝速い。既定 1秒）
@@ -28,19 +44,51 @@
 測定シーケンスのステップ数と一致するよう設計している（test_fanuc で保証）。
 """
 
+import re
 from dataclasses import dataclass
+
+# ブロックの区切り（EOB）。実機が出力したファイルは LF CR CR だった。
+EOB_PUNCH = "\n\r\r"   # 実機と同じ（既定）
+EOB_CRLF = "\r\n"      # 一般的なDNCソフト
+EOB_LF = "\n"          # LFのみ
+EOB_STYLES = (
+    ("実機と同じ（LF CR CR）", EOB_PUNCH),
+    ("CRLF（一般的なDNC）", EOB_CRLF),
+    ("LF のみ", EOB_LF),
+)
+DEFAULT_EOB = EOB_PUNCH
+
+# FANUCのISOコードでプログラムに書ける文字。ここに無い文字を入れると読取エラー。
+LEGAL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,-+*/=%()")
+# コメントの中で使える文字（カッコは入れ子にできないので除外）
+_COMMENT_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,-+*/=")
+COMMENT_MAXLEN = 40
+
+
+def sanitize_comment(text, maxlen: int = COMMENT_MAXLEN) -> str:
+    """コメントをFANUCが読める形にする（カッコは付けずに中身だけ返す）。
+
+    ・小文字は大文字へ（ISOコードは大文字のみ）
+    ・日本語・"?" などコード表に無い文字は空白に置換して詰める
+    ・入れ子のカッコは空白に置換（最初の ")" でコメントが終わってしまうため）
+    """
+    s = str(text or "").upper()
+    out = [c if c in _COMMENT_CHARS else " " for c in s]
+    return re.sub(r"\s+", " ", "".join(out)).strip()[:maxlen].strip()
 
 
 @dataclass
 class FanucConfig:
-    axis: str = "X"
+    axis: str = "A"
     preswing: float = 10.0
     swing_dwell_sec: float = 1.0  # バックラッシュ消しの振り後（測定無関係＝小さめ）
     dwell_sec: float = 1.0        # 測定点での静止待ち（読取前。1.0〜5.0で調整）
     mcode: str = "M80"
     use_subprogram: bool = True
     main_number: int = 100
-    rep_sub_number: int = 9001
+    # O8000〜O9999 は保護プログラム領域（パラメータ3202 NE8/NE9）で、既定では
+    # 書き込めない機械が多い。ここに入れると転送そのものが弾かれるので 1000番台。
+    rep_sub_number: int = 1000
     return_to_start: bool = True
     counter_reset: bool = True   # 先頭でバックラッシュ消し→M00（作業者がカウンターを0に）
     reset_swing: float = 10.0    # カウンターリセットの振り量[°]（測定の前振りとは別）
@@ -55,14 +103,14 @@ class FanucConfig:
     def from_settings(cls, settings: dict) -> "FanucConfig":
         s = settings or {}
         return cls(
-            axis=str(s.get("fanuc_axis", "X")),
+            axis=str(s.get("fanuc_axis", "A")),
             preswing=float(s.get("fanuc_preswing", 10.0)),
             swing_dwell_sec=float(s.get("fanuc_swing_dwell_sec", 1.0)),
             dwell_sec=float(s.get("fanuc_dwell_sec", 1.0)),
             mcode=str(s.get("fanuc_mcode", "M80")),
             use_subprogram=bool(s.get("fanuc_use_subprogram", True)),
             main_number=int(s.get("fanuc_main_number", 100)),
-            rep_sub_number=int(s.get("fanuc_rep_sub_number", 9001)),
+            rep_sub_number=int(s.get("fanuc_rep_sub_number", 1000)),
             return_to_start=bool(s.get("fanuc_return_to_start", True)),
             counter_reset=bool(s.get("fanuc_counter_reset", True)),
             reset_swing=float(s.get("fanuc_reset_swing", s.get("fanuc_preswing", 10.0))),
@@ -202,7 +250,8 @@ def generate(cfg: FanucConfig, *, rotary=True, title="MEASURE",
     main = []
     cur = 0.0
     if include_division and cfg.counter_reset:
-        main.append("(--- COUNTER RESET (set 0 at backlash-removed) ---)")
+        # コメントにカッコを入れ子にしない（最初の ) でコメントが終わるため）
+        main.append("(--- COUNTER RESET / SET 0 HERE ---)")
         main += _reset_block(cfg)   # G91 を含む。0°のまま、M00で停止
     else:
         main.append("G91 (INCREMENTAL)")
@@ -260,18 +309,99 @@ def generate(cfg: FanucConfig, *, rotary=True, title="MEASURE",
 
 def _format_program(cfg: FanucConfig, title: str, main: list,
                     rep_sub_lines) -> str:
-    out = ["%", f"O{cfg.main_number:04d} ({title})"]
+    out = ["%", _prog_head(cfg.main_number, title)]
     out += [_block(line) for line in main]
     if rep_sub_lines:
-        out.append(f"O{cfg.rep_sub_number:04d} (SAIGEN SUB)")
+        out.append(_prog_head(cfg.rep_sub_number, "SAIGEN SUB"))
         out += [_block(line) for line in rep_sub_lines]
-        out.append("M99 ;")
+        out.append("M99")
     out.append("%")
-    return "\r\n".join(out) + "\r\n"
+    # 改行は「行の区切り」を表すだけ。実際にファイルへ書くときの EOB は
+    # nc_bytes() で機械の形式（既定 LF CR CR）に変換する。
+    return "\n".join(out) + "\n"
+
+
+def _prog_head(number: int, title) -> str:
+    """プログラム番号行。実機の出力と同じで、O番号とコメントの間に空白は入れない。"""
+    comment = sanitize_comment(title)
+    return f"O{int(number):04d}" + (f"({comment})" if comment else "")
 
 
 def _block(line: str) -> str:
-    """コメント行はそのまま、指令行は末尾に ; (EOB) を付ける。"""
-    if line.startswith("("):
-        return line
-    return line + " ;"
+    """1ブロックを実機の出力と同じ形に整える。
+
+    ・EOB（画面の ";"）は文字として書かない。ファイル上の EOB は改行そのもので、
+      ";" はISOコードに無い文字。書き込むと制御装置が読み込めない。
+    ・指令部の空白は詰める（実機の出力は "G91G00A-10." の形）。
+    ・コメントは sanitize_comment を通す（大文字化・使えない文字と入れ子カッコを除去）。
+    """
+    line = str(line).strip()
+    code, sep, rest = line.partition("(")
+    code = code.replace(" ", "").replace("\t", "")
+    if not sep:
+        return code
+    comment = sanitize_comment(rest.rstrip().rstrip(")"))
+    return code + (f"({comment})" if comment else "")
+
+
+def nc_bytes(text: str, eob: str = DEFAULT_EOB) -> bytes:
+    """画面のプログラム文字列を、機械へ渡すバイト列にする。
+
+    行の区切りを機械のEOB形式に置き換え、ISOコードに無い文字は取り除く。
+    ";" が手編集で混ざっていても、ここで EOB として扱って落とす。
+    """
+    norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [_block(l) for l in norm.replace(";", "\n").split("\n")]
+    lines = [l for l in lines if l != ""]
+    body = "".join(l + (eob or EOB_LF) for l in lines)
+    return body.encode("ascii", "ignore")
+
+
+def validate(text: str, cfg: FanucConfig = None) -> list:
+    """機械が読めない書き方を洗い出す（読み込ませる前の自己点検）。"""
+    problems = []
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    stripped = [l for l in lines if l.strip()]
+    if not stripped:
+        return ["プログラムが空です"]
+    if stripped[0].strip() != "%" or stripped[-1].strip() != "%":
+        problems.append("先頭と末尾が % になっていません（FANUCの読取開始/終了記号）")
+    if not any(re.match(r"\s*O\d+", l) for l in stripped):
+        problems.append("O番号（プログラム番号）の行がありません")
+    if not any(re.search(r"\bM(30|99|02)\b", l) for l in stripped):
+        problems.append("M30/M99（プログラム終わり）がありません")
+    for i, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        if ";" in line:
+            problems.append(f"{i}行目: \";\" は文字として書けません（EOBは改行）")
+        bad = sorted({c for c in line
+                      if c not in LEGAL_CHARS and not c.isspace()})
+        if bad:
+            shown = "".join(bad)[:8]
+            problems.append(f"{i}行目: 使えない文字 {shown!r}（ISOコードに無い）")
+        code, sep, rest = line.partition("(")
+        if sep and "(" in rest.rstrip().rstrip(")"):
+            problems.append(f"{i}行目: コメントのカッコが入れ子です"
+                            "（最初の ) でコメントが終わってしまう）")
+        if sep and ")" not in rest:
+            problems.append(f"{i}行目: コメントの ) がありません")
+    for l in stripped:
+        m = re.match(r"\s*O(\d+)", l)
+        if m and 8000 <= int(m.group(1)) <= 9999:
+            problems.append(
+                f"O{int(m.group(1)):04d}: 保護プログラム領域（O8000〜O9999）です。"
+                "パラメータ3202のNE8/NE9で書込禁止だと転送できません")
+    if cfg is not None and str(cfg.axis).upper() == "X":
+        problems.append(
+            "割出軸が X です。G04 X…（ドゥエル）と同じアドレスで紛らわしく、"
+            "回転テーブルの軸は普通 A/B/C です。実機の軸名を確認してください")
+    # 同じ指摘の繰り返しは1回にまとめる
+    seen, out = set(), []
+    for p in problems:
+        key = re.sub(r"^\d+行目", "N行目", p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out

@@ -589,3 +589,16 @@ class TestZeroIndividual(unittest.TestCase):
                                 ("1851", "A1", "4")])
         self.assertIn("N01850 A1 P 0 A2 P 0", new)   # 空白の形はそのまま
         self.assertIn("N01825 A1 P 3000", new)
+
+    def test_product_value_wins_over_zeroing(self):
+        # 製品データがグリッドシフトを指定していたら、0化で潰さない
+        new, _m, _f = B.build_text(self.RAW, {"01850": "1234"}, 1,
+                                   "", B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "1234")
+        self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")   # 指定外の軸は0
+
+    def test_multi_axis_zeroing_also_lets_product_win(self):
+        new, _m, _f = B.build_text_multi(
+            self.RAW, {1: {"01850": "1234"}}, None, "", B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "1234")
+        self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")

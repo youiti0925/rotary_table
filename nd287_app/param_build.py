@@ -109,10 +109,13 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
     全軸0にする。出荷するファイルに前の機械の実測値を残さないため。
     """
     if fanuc_param.looks_like_fanuc_prm(raw):
-        values = resolve_product_values(raw, values, axis)   # '除去・*マージ
-        newtext, missing = fanuc_param.apply_product_values(raw, values, axis)
+        values = resolve_product_values(raw, values, axis)   # '除去・*マージ（元のBASICを見る）
+        text = raw
         if zero_params:
-            newtext, _z = zero_individual(newtext, zero_params)
+            # 先に0にしてから製品値を入れる。順序が逆だと、製品データが
+            # グリッドシフト等を指定していたときに0で潰してしまう。
+            text, _z = zero_individual(text, zero_params)
+        newtext, missing = fanuc_param.apply_product_values(text, values, axis)
         return newtext, missing, "fanuc"
     doc = prm_format.parse_prm(raw)
     if seiban:
@@ -296,6 +299,9 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
         newtext, missing, fmt = build_text(raw, merged, 0, seiban)
         return newtext, [(m, "") for m in missing], fmt
     text = raw
+    if zero_params:
+        # 単軸と同じく、先に0にしてから製品値を入れる（製品値を優先）
+        text, _z = zero_individual(text, zero_params)
     missing = []
     for ax in sorted(axis_values):
         vals = resolve_product_values(raw, axis_values[ax], ax)   # '除去・*マージ
@@ -304,8 +310,6 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
     cvals = resolve_product_values(raw, common, None)
     text, miss = fanuc_param.apply_common_values(text, cvals)
     missing += [(m, "") for m in miss]
-    if zero_params:
-        text, _z = zero_individual(text, zero_params)
     return text, missing, "fanuc"
 
 

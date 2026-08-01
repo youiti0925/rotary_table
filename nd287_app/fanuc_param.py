@@ -102,12 +102,19 @@ def validate_prm(text: str, reference: str = "") -> list:
     return problems
 
 
-# 1パラメータ行。行頭の余白(\r や空白)を group(1) に保持してから N<digits>Q1。
+# 1パラメータ行。行頭の余白(\r や空白)を group(1) に保持してから N<digits>[Q1]。
 # 実機BASICは改行が \n\r\r 等まちまちで、split("\n") すると行頭に \r が残るため、
 # 先頭余白を許容しつつ保存（出力のバイト一致のため余白はそのまま戻す）。
-_LINE = re.compile(r"^(\s*)(N(\d+)Q1)(.*)$")
-# セグメント: 任意のグループ(L1/A1..A4/S1/T1 等) + 型(P/M) + 値
-_SEG = re.compile(r"([LASTlast]\d+)?([PM])([-+]?\d+(?:\.\d+)?)")
+#
+# 書式は2世代ある（実機のBASICを31本調べて確認）:
+#   新 "N01825Q1A1P3000A2P3000"      … Q1 あり・空白なし
+#   旧 "N01825 A1 P 3000 A2 P 3000"  … Q1 なし・空白区切り（F10〜F17 の8台）
+# 旧書式を弾いていたため、その制御装置ではBASICを読めず、値が入らないまま
+# マスタと違うファイルが出力されていた。両方を同じ仕組みで扱う。
+_LINE = re.compile(r"^(\s*)(N(\d+)(?:Q\d+)?)(.*)$")
+# セグメント: 任意のグループ(L1/A1..A4/S1/T1 等) + 型(P/M) + 値。
+# 旧書式の空白（"A1 P 3000" の2か所）も捕まえて、書き戻すときにそのまま復元する。
+_SEG = re.compile(r"([LASTlast]\d+)?(\s*)([PM])(\s*)([-+]?\d+(?:\.\d+)?)")
 _VALUE = r"[-+]?\d+(?:\.\d+)?"
 
 
@@ -116,7 +123,7 @@ def segments(line: str):
     m = _LINE.match(line)
     if not m:
         return None
-    return [(g or "", t, v) for (g, t, v) in _SEG.findall(m.group(4))]
+    return [(g or "", t, v) for (g, _s1, t, _s2, v) in _SEG.findall(m.group(4))]
 
 
 def param_number(line: str):
@@ -165,7 +172,8 @@ def set_value(text: str, number, value, label: str = None) -> tuple:
             g = (sm.group(1) or "")
             out.append(body[pos:sm.start()])
             if (not replaced) and (label is None or g.upper() == label.upper()):
-                out.append(f"{g}{sm.group(2)}{value}")  # ラベル・型は保持、値だけ差替
+                # ラベル・空白・型はそのまま、値だけ差替（旧書式の空白もバイト一致で戻す）
+                out.append(f"{g}{sm.group(2)}{sm.group(3)}{sm.group(4)}{value}")
                 replaced = True
             else:
                 out.append(sm.group(0))
@@ -300,13 +308,18 @@ def diff_by_axis(master_text: str, product_text: str) -> tuple:
 
 
 def looks_like_fanuc_prm(text: str) -> bool:
-    """N#####Q1… 形式の行があれば FANUCネイティブ.PRM とみなす。
+    """FANUCネイティブ形式（実機が読み書きする形）かどうか。
 
-    実機BASICは改行が \\n\\r\\r 等まちまちで行頭に \\r が残ることがあるため、
-    行頭アンカーに頼らず、その特徴的なパターン自体の有無で判定する
-    （ヘッダ＋CSV形式には N#####Q1 は現れない）。
+    新書式 "N01825Q1A1P3000" と、旧書式 "N01825 A1 P 3000"（Q1なし・空白区切り）の
+    両方を見る。実機BASICは改行が \\n\\r\\r 等まちまちで行頭に \\r が残ることがあるため、
+    行頭アンカーに頼らずパターンの有無で判定する。
+    ヘッダ＋CSV形式（社内で読む .prm）はカンマ区切りなのでどちらにも当たらない。
     """
-    return bool(re.search(r"N\d+Q1", text or ""))
+    text = text or ""
+    if re.search(r"N\d+Q\d", text):
+        return True
+    # 旧書式。カンマ区切りのCSVを誤って拾わないよう、複数行あることを条件にする
+    return len(re.findall(r"(?m)^\s*N\d{3,5}\s+(?:[LAST]\d+\s+)?[PM]\s*[-+]?\d", text)) >= 3
 
 
 def values_map(text: str) -> dict:

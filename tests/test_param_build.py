@@ -341,3 +341,57 @@ class TestParamValidate(unittest.TestCase):
 
     def test_numbers_in(self):
         self.assertEqual(F_PRM.numbers_in(self.OK), {1825, 2020})
+
+
+class TestOldFormatBasic(unittest.TestCase):
+    """旧書式のBASIC（Q1なし・空白区切り）。F10〜F17 の8台がこの形。
+
+    以前はN形式として認識できず、値が入らないままマスタと違うファイルが
+    出力されていた（実機のBASIC 31本を調べて発覚）。
+    """
+
+    OLD = ("%\n"
+           "N00000 P 00000010\n"
+           "N01320 A1 P-1 A2 P-1 A3 P-1 A4 P-1\n"
+           "N01825 A1 P 3000 A2 P 3000 A3 P 3000 A4 P 3000\n"
+           "N04000 A1 P 00000000\n"
+           "%\n")
+
+    def test_recognized_as_native(self):
+        self.assertTrue(F_PRM.looks_like_fanuc_prm(self.OLD))
+
+    def test_reads_values(self):
+        self.assertEqual(F_PRM.get_value(self.OLD, "1825", "A4"), "3000")
+        self.assertEqual(F_PRM.get_value(self.OLD, "1320", "A2"), "-1")
+        self.assertEqual(F_PRM.get_value(self.OLD, "0"), "00000010")
+
+    def test_replacement_keeps_spacing_byte_for_byte(self):
+        new, ok = F_PRM.set_value(self.OLD, "1825", "2500", "A4")
+        self.assertTrue(ok)
+        self.assertIn("N01825 A1 P 3000 A2 P 3000 A3 P 3000 A4 P 2500", new)
+
+    def test_same_value_write_changes_nothing(self):
+        new, ok = F_PRM.set_value(self.OLD, "1825", "3000", "A4")
+        self.assertTrue(ok)
+        self.assertEqual(new, self.OLD)
+
+    def test_only_one_line_changes(self):
+        new, _ = F_PRM.set_value(self.OLD, "1825", "2500", "A4")
+        a, b = self.OLD.split("\n"), new.split("\n")
+        self.assertEqual(len(a), len(b))
+        self.assertEqual(sum(1 for x, y in zip(a, b) if x != y), 1)
+
+    def test_negative_value_preserved(self):
+        new, ok = F_PRM.set_value(self.OLD, "1320", "-5", "A3")
+        self.assertTrue(ok)
+        self.assertIn("N01320 A1 P-1 A2 P-1 A3 P-5 A4 P-1", new)
+
+    def test_build_text_takes_the_native_path(self):
+        newtext, missing, fmt = B.build_text(self.OLD, {"01825": "2500"}, 4, "50013078")
+        self.assertEqual(fmt, "fanuc")
+        self.assertEqual(missing, [])
+        self.assertEqual(F_PRM.get_value(newtext, "1825", "A4"), "2500")
+
+    def test_headercsv_still_not_treated_as_native(self):
+        csv_like = 'Seiban,50013078\r\n"1815","値",""\r\n"1825","3000",""\r\n'
+        self.assertFalse(F_PRM.looks_like_fanuc_prm(csv_like))

@@ -118,6 +118,7 @@ from . import fanuc_pcorr
 from . import param_build
 from . import controllers
 from . import seiban_flow
+from . import param_origin
 from . import param_view
 from . import xls_param
 
@@ -2730,6 +2731,77 @@ def seiban_flow_axis(letter):
     return nc_param.axis_number(letter)
 
 
+class BasicOriginDialog(QtWidgets.QDialog):
+    """BASICフォルダの各ファイルが「実機が出したもの」か「PC製」かの一覧。
+
+    製品ファイルは実機のものを元に作るのが確実。PC側のマスタには、その制御装置が
+    持っていない番号が入っていることがあり、書き戻すと取込が止まる。
+    """
+
+    HEADERS = ("ファイル", "種類", "出どころ", "区切り(EOB)", "行数", "判定の根拠")
+
+    def __init__(self, parent, rows, folder):
+        super().__init__(parent)
+        self.rows = rows
+        self.setWindowTitle("BASICの出どころ判定")
+        v = QtWidgets.QVBoxLayout(self)
+        head = QtWidgets.QLabel(
+            f"<b>{folder}</b><br>{param_origin.summarize(rows)}<br>"
+            "拡張子ではなく中身のバイトで判定しています。"
+            "実機のパンチ形式は区切りが <code>LF CR CR</code>、PC製は <code>LF</code>／"
+            "<code>CRLF</code> です。<b>製品ファイルは「実機」の行を元に作ってください。</b>")
+        head.setWordWrap(True)
+        v.addWidget(head)
+
+        self.table = QtWidgets.QTableWidget(len(rows), len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        for r, (name, info, _p) in enumerate(rows):
+            cells = (name, info["kind"], info["label"], info["eob"],
+                     str(info["lines"]), " / ".join(info["reasons"]))
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if info["verdict"] == "machine":
+                    item.setBackground(QtGui.QColor("#dcfce7"))   # 実機＝緑
+                elif info["verdict"] == "converted":
+                    item.setBackground(QtGui.QColor("#fef9c3"))   # 実機だがPC経由＝黄
+                elif info["verdict"] == "pc":
+                    item.setBackground(QtGui.QColor("#fee2e2"))   # PC製＝赤
+                self.table.setItem(r, c, item)
+        self.table.resizeColumnsToContents()
+        v.addWidget(self.table, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        b_csv = QtWidgets.QPushButton("CSV出力")
+        b_csv.clicked.connect(self.save_csv)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        buttons.addWidget(b_csv)
+        buttons.addStretch(1)
+        buttons.addWidget(b_close)
+        v.addLayout(buttons)
+
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+        self.resize(min(1100, avail.width() - 80), min(640, avail.height() - 80))
+
+    def save_csv(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "判定結果を保存", "BASIC出どころ判定.csv", "CSV (*.csv)")
+        if not path:
+            return
+        import csv
+        with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(self.HEADERS)
+            for name, info, p in self.rows:
+                w.writerow([name, info["kind"], info["label"], info["eob"],
+                            info["lines"], " / ".join(info["reasons"])])
+        QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}")
+
+
 class ParamDialog(QtWidgets.QDialog):
     """製品ごとのパラメータ変更（差分）の確認表・差分ファイルを作る。
 
@@ -2779,8 +2851,16 @@ class ParamDialog(QtWidgets.QDialog):
         self.e_basic_dir.setPlaceholderText(r"BASIC(.prm)を置く共有フォルダ 例 \\server\param\BASIC")
         self.e_basic_dir.setToolTip("制御装置の基本パラメータ(BASIC)を置くフォルダ。"
                                     "一度入れれば下の「使うBASIC」選択の起点になる")
-        form_place.addRow("BASICの場所(フォルダ)",
-                          self._with_browse(self.e_basic_dir, self._browse_basic_dir))
+        basic_row = self._with_browse(self.e_basic_dir, self._browse_basic_dir)
+        b_origin = QtWidgets.QPushButton("出どころ判定...")
+        b_origin.setToolTip(
+            "フォルダ内のBASICを1つずつ中身で調べ、実機（制御装置）が出したものか\n"
+            "PCで作られたものかを判定する。拡張子は当てにならないので中身で見る。\n"
+            "製品ファイルは実機のものを元に作るのが確実（PC側は実機に無い番号が\n"
+            "入っていることがあり、制御装置が読み込めない）")
+        b_origin.clicked.connect(self._show_basic_origin)
+        basic_row.layout().addWidget(b_origin)
+        form_place.addRow("BASICの場所(フォルダ)", basic_row)
 
         self.e_product_dir = QtWidgets.QLineEdit(str(settings.get("param_product_dir", "")))
         self.e_product_dir.setPlaceholderText(r"Seibanごとの製品データを置く共有フォルダ 例 \\server\param\製品")
@@ -3019,6 +3099,24 @@ class ParamDialog(QtWidgets.QDialog):
             self, "BASIC .prm（FANUC）", start, "パラメータ (*.prm *.PRM *.DAT *.dat *.txt);;すべて (*.*)")
         if p:
             self.e_master_prm.setText(p)
+
+    def _show_basic_origin(self):
+        """BASICフォルダの各ファイルが実機のものかPC製かを一覧で出す。"""
+        folder = self.e_basic_dir.text().strip()
+        if not folder or not Path(folder).is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "出どころ判定", "BASICの場所（フォルダ）を指定してください")
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            rows = param_origin.scan_folder(folder)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self, "出どころ判定", "フォルダにファイルがありません")
+            return
+        BasicOriginDialog(self, rows, folder).exec()
 
     def _browse_basic_dir(self):
         p = QtWidgets.QFileDialog.getExistingDirectory(

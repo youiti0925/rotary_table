@@ -664,10 +664,14 @@ class ProgramDialog(QtWidgets.QDialog):
         form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
-        self.e_axis = QtWidgets.QLineEdit(str(settings.get("fanuc_axis", "A")))
-        self.e_axis.setMaximumWidth(60)
+        # 機械ごとに変わるので選べるようにする（打ち込みも可）
+        self.e_axis = QtWidgets.QComboBox()
+        self.e_axis.setEditable(True)
+        self.e_axis.addItems(["Z", "A", "B", "C", "Y", "U", "V", "W"])
+        self.e_axis.setCurrentText(str(settings.get("fanuc_axis", "Z")))
+        self.e_axis.setMaximumWidth(80)
         self.e_axis.setToolTip(
-            "割出軸のアドレス。回転テーブルは普通 A（実機のプログラムも A）。\n"
+            "割出軸のアドレス。機械ごとに違うので、実機のプログラムに合わせる。\n"
             "X はドゥエル G04 X… と同じ文字なので避ける")
         self.e_pre = QtWidgets.QDoubleSpinBox()
         self.e_pre.setRange(0.0, 360.0)
@@ -881,7 +885,8 @@ class ProgramDialog(QtWidgets.QDialog):
 
         self._fit_to_screen()
 
-        for w in (self.e_axis, self.e_mcode, self.e_clamp_m, self.e_unclamp_m):
+        self.e_axis.currentTextChanged.connect(self.refresh)
+        for w in (self.e_mcode, self.e_clamp_m, self.e_unclamp_m):
             w.textChanged.connect(self.refresh)
         for w in (self.e_pre, self.e_reset_sw, self.e_swing_dwell, self.e_dwell,
                   self.e_clamp_dwell, self.e_unclamp_dwell):
@@ -920,7 +925,7 @@ class ProgramDialog(QtWidgets.QDialog):
 
     def _config(self):
         return FanucConfig(
-            axis=self.e_axis.text().strip() or "X",
+            axis=self.e_axis.currentText().strip() or "Z",
             preswing=self.e_pre.value(),
             swing_dwell_sec=self.e_swing_dwell.value(),
             dwell_sec=self.e_dwell.value(),
@@ -941,7 +946,7 @@ class ProgramDialog(QtWidgets.QDialog):
     def _fanuc_settings(self):
         """画面のFANUC設定を settings のキーに対応づけて返す（記憶用）。"""
         return dict(
-            fanuc_axis=self.e_axis.text().strip() or "X",
+            fanuc_axis=self.e_axis.currentText().strip() or "Z",
             fanuc_preswing=self.e_pre.value(),
             fanuc_reset_swing=self.e_reset_sw.value(),
             fanuc_swing_dwell_sec=self.e_swing_dwell.value(),

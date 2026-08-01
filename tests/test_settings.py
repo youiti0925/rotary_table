@@ -107,9 +107,6 @@ class TestConnectionProfiles(unittest.TestCase):
         self.assertEqual(loaded["profiles"]["X32"]["port"], "auto")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestFanucMigration(unittest.TestCase):
     """機械が受け付けない古い値（X軸・保護O番号）を1度だけ直す"""
@@ -120,9 +117,9 @@ class TestFanucMigration(unittest.TestCase):
             p.write_text(json.dumps(stored), encoding="utf-8")
             return load_settings(p)
 
-    def test_axis_x_becomes_a(self):
+    def test_axis_x_becomes_machine_axis(self):
         s = self._load({"fanuc_axis": "X"})
-        self.assertEqual(s["fanuc_axis"], "A")
+        self.assertEqual(s["fanuc_axis"], "Z")
 
     def test_protected_sub_number_moved(self):
         s = self._load({"fanuc_rep_sub_number": 9001})
@@ -139,6 +136,10 @@ class TestFanucMigration(unittest.TestCase):
 
     def test_defaults_are_machine_ready(self):
         s = self._load({})
-        self.assertEqual(s["fanuc_axis"], "A")
+        self.assertEqual(s["fanuc_axis"], "Z")
         self.assertLess(s["fanuc_rep_sub_number"], 8000)
         self.assertEqual(s["nc_eob"], "\n\r\r")
+
+
+if __name__ == "__main__":
+    unittest.main()

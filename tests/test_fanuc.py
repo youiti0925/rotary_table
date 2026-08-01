@@ -213,9 +213,9 @@ class TestCounterReset(unittest.TestCase):
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
         lines = [l.strip() for l in text.splitlines()]
-        i = lines.index("G91G00A10.")
+        i = lines.index("G91G00Z10.")
         self.assertEqual(lines[i:i + 5],
-                         ["G91G00A10.", "A-10.", "A-10.", "A10.", "M00"])
+                         ["G91G00Z10.", "Z-10.", "Z-10.", "Z10.", "M00"])
         # M00 は測定点（M80）に数えない＝信号数は不変
         self.assertEqual(expand_runtime_signals(text, cfg), 2 * 5 + 2 * 3)
 
@@ -225,12 +225,12 @@ class TestCounterReset(unittest.TestCase):
         text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0, wheel_end=360,
                         worm_pitch=1.0, worm_range=2.0, include_repeat=False)
         lines = [l.strip() for l in text.splitlines()]
-        i = lines.index("G91G00A15.")  # リセットは15°
+        i = lines.index("G91G00Z15.")  # リセットは15°
         self.assertEqual(lines[i:i + 5],
-                         ["G91G00A15.", "A-15.", "A-15.", "A15.", "M00"])
+                         ["G91G00Z15.", "Z-15.", "Z-15.", "Z15.", "M00"])
         # 測定の前振りは10°のまま（ホイールCW先頭）
-        self.assertIn("G00A-10.", lines)
-        self.assertNotIn("G00A-15.", lines[i + 5:])  # 以降に15°前振りは出ない
+        self.assertIn("G00Z-10.", lines)
+        self.assertNotIn("G00Z-15.", lines[i + 5:])  # 以降に15°前振りは出ない
 
     def test_reset_disabled(self):
         cfg = FanucConfig(counter_reset=False)
@@ -257,16 +257,16 @@ class TestTiltPositioning(unittest.TestCase):
                         worm_pitch=1.0, worm_range=2.0, worm_start=0.0,
                         blocks=blocks, repeats=2)
         lines = [l.strip() for l in text.splitlines()]
-        # リセット(0) → A-30(測定開始へ) → … → 途中で A30(0へ=ウォーム) → A-30(再現へ)
-        i = lines.index("G91G00A10.")
+        # リセット(0) → Z-30(測定開始へ) → … → 途中で Z30(0へ=ウォーム) → Z-30(再現へ)
+        i = lines.index("G91G00Z10.")
         self.assertEqual(lines[i:i + 5],
-                         ["G91G00A10.", "A-10.", "A-10.", "A10.", "M00"])
-        # ウォーム前に 0° へ戻す G00A30. がある（CCWが-30で終わるため）
-        self.assertIn("G00A30.", lines)
-        # 再現開始で -30° へ G00A-30.
-        self.assertIn("G00A-30.", lines)
+                         ["G91G00Z10.", "Z-10.", "Z-10.", "Z10.", "M00"])
+        # ウォーム前に 0° へ戻す G00Z30. がある（CCWが-30で終わるため）
+        self.assertIn("G00Z30.", lines)
+        # 再現開始で -30° へ G00Z-30.
+        self.assertIn("G00Z-30.", lines)
         # 最後に 0° へ戻す（120から -120）
-        self.assertIn("G00A-120.", lines)
+        self.assertIn("G00Z-120.", lines)
         # 信号数 = ホイール6×2 + ウォーム3×2 + 再現3ブロック×2回×2 = 30
         self.assertEqual(expand_runtime_signals(text, cfg), 6 * 2 + 3 * 2 + 3 * 2 * 2)
 
@@ -310,9 +310,9 @@ class TestMachineReadableFormat(unittest.TestCase):
     def test_generated_program_passes_validate(self):
         self.assertEqual(validate(self._text(), FanucConfig()), [])
 
-    def test_default_axis_is_rotary(self):
-        # 実機の回転軸は A。X は G04 X…（ドゥエル）と同じ文字で紛らわしい
-        self.assertEqual(FanucConfig().axis, "A")
+    def test_default_axis_matches_machine(self):
+        # 現在の実機の割出軸は Z。X は G04 X…（ドゥエル）と同じ文字で紛らわしい
+        self.assertEqual(FanucConfig().axis, "Z")
 
     def test_default_sub_number_avoids_protected_range(self):
         # O8000〜O9999 は保護領域（3202 NE8/NE9）で転送が弾かれることがある
@@ -361,7 +361,7 @@ class TestValidate(unittest.TestCase):
         self.assertTrue(self._has(validate("O1\nM30"), "%"))
 
     def test_clean_program_has_no_problems(self):
-        self.assertEqual(validate("%\nO0100(TEST)\nG91G00A10.\nM30\n%",
+        self.assertEqual(validate("%\nO0100(TEST)\nG91G00Z10.\nM30\n%",
                                   FanucConfig()), [])
 
 

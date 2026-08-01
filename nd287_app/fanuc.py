@@ -22,7 +22,7 @@ PCのテキストとしては読めても、制御装置には読み込めなか
      （EOB_STYLES で CRLF / LF にも変えられる）。
 
 設定（FanucConfig）で変更できる項目:
-    axis        … 割出軸のアドレス（既定 A＝実機の回転軸。傾斜軸なら B/C など）
+    axis        … 割出軸のアドレス（既定 Z＝現在の実機。機械ごとに A/B/C 等へ変える）
     preswing    … 前振り量[°]（バックラッシュ消しの行き過ぎ量。既定 10）
     swing_dwell_sec … 振り後のドゥエル[秒]（バックラッシュ消しの振り後。測定とは
                       無関係なので小さめ＝速い。既定 1秒）
@@ -79,7 +79,7 @@ def sanitize_comment(text, maxlen: int = COMMENT_MAXLEN) -> str:
 
 @dataclass
 class FanucConfig:
-    axis: str = "A"
+    axis: str = "Z"
     preswing: float = 10.0
     swing_dwell_sec: float = 1.0  # バックラッシュ消しの振り後（測定無関係＝小さめ）
     dwell_sec: float = 1.0        # 測定点での静止待ち（読取前。1.0〜5.0で調整）
@@ -103,7 +103,7 @@ class FanucConfig:
     def from_settings(cls, settings: dict) -> "FanucConfig":
         s = settings or {}
         return cls(
-            axis=str(s.get("fanuc_axis", "A")),
+            axis=str(s.get("fanuc_axis", "Z")),
             preswing=float(s.get("fanuc_preswing", 10.0)),
             swing_dwell_sec=float(s.get("fanuc_swing_dwell_sec", 1.0)),
             dwell_sec=float(s.get("fanuc_dwell_sec", 1.0)),
@@ -395,7 +395,7 @@ def validate(text: str, cfg: FanucConfig = None) -> list:
     if cfg is not None and str(cfg.axis).upper() == "X":
         problems.append(
             "割出軸が X です。G04 X…（ドゥエル）と同じアドレスで紛らわしく、"
-            "回転テーブルの軸は普通 A/B/C です。実機の軸名を確認してください")
+            "テーブルの軸は普通 Z/A/B/C です。実機の軸名を確認してください")
     # 同じ指摘の繰り返しは1回にまとめる
     seen, out = set(), []
     for p in problems:

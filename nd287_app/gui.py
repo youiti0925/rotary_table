@@ -59,6 +59,7 @@ from .ks_format import (
 )
 from .masters import (
     condition_params,
+    load_conditions,
     find_entry,
     formula_minmax,
     load_masters,
@@ -118,6 +119,7 @@ from . import fanuc_pcorr
 from . import param_build
 from . import controllers
 from . import seiban_flow
+from . import batch_build
 from . import param_origin
 from . import param_view
 from . import xls_param
@@ -6139,6 +6141,134 @@ class FanucPitchParamDialog(QtWidgets.QDialog):
         self.win.statusBar().showMessage(f"FANUCピッチエラー補正パラメータを保存しました: {path}")
 
 
+class BatchProgramDialog(QtWidgets.QDialog):
+    """型式ごとの測定プログラムをまとめて作る。
+
+    測定条件が型式で決まっているので、型式を選べばプログラムは一意に決まる。
+    メモリカードのサブフォルダを開けない制御装置があるため、
+    「型式ごとのフォルダ」と「1つのフォルダに平置き」を選べるようにしてある。
+    """
+
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("型式ごとに測定プログラムを一括作成")
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel(
+            "測定条件マスタの型式ぶんの測定プログラムをまとめて作ります。"
+            "刻みが登録されていない型式は作らず、理由を一覧に出します。"))
+
+        form = QtWidgets.QFormLayout()
+        self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")))
+        self.e_out.setPlaceholderText(r"出力先（カード E:\ や 共有 \\server\NC）")
+        form.addRow("出力先", self._browse_row(self.e_out))
+        self.cmb_layout = QtWidgets.QComboBox()
+        for label, value in batch_build.LAYOUTS:
+            self.cmb_layout.addItem(label, value)
+        self.cmb_layout.setToolTip(
+            "メモリカードのサブフォルダを開けない制御装置があります。\n"
+            "見えないときは「1つのフォルダに並べる」を選んでください")
+        form.addRow("並べ方", self.cmb_layout)
+        self.e_filter = QtWidgets.QLineEdit()
+        self.e_filter.setPlaceholderText("空＝全型式。例 RTH と入れると RTH… だけ")
+        form.addRow("型式で絞る", self.e_filter)
+        self.c_over = QtWidgets.QCheckBox("既にあるファイルも上書きする")
+        form.addRow("", self.c_over)
+        v.addLayout(form)
+
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(("型式", "クローズ", "結果", "出力先/理由"))
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        v.addWidget(self.table, 1)
+        self.lbl = QtWidgets.QLabel()
+        v.addWidget(self.lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        b_run = QtWidgets.QPushButton("作成")
+        b_run.setObjectName("primary")
+        b_run.clicked.connect(self.run)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(b_run)
+        row.addStretch(1)
+        row.addWidget(b_close)
+        v.addLayout(row)
+
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+        self.resize(min(960, avail.width() - 80), min(620, avail.height() - 80))
+
+    def _browse_row(self, line):
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(line, 1)
+        b = QtWidgets.QPushButton("参照...")
+
+        def pick():
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "出力先", line.text())
+            if d:
+                line.setText(d)
+        b.clicked.connect(pick)
+        h.addWidget(b)
+        return w
+
+    def _entries(self):
+        path = str(self.settings.get("conditions_csv") or r"マスタ/測定条件.csv")
+        if not Path(path).is_absolute():
+            path = str(app_dir() / path)
+        conds = load_conditions(path)
+        want = self.e_filter.text().strip().upper()
+        out = [c for c in conds.values()
+               if not want or want in str(c.get("model", "")).upper()]
+        return sorted(out, key=lambda c: (str(c.get("model", "")),
+                                          str(c.get("close", ""))))
+
+    def run(self):
+        out = self.e_out.text().strip()
+        if not out or not Path(out).is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "一括作成", "出力先フォルダを指定してください（存在する場所）")
+            return
+        entries = self._entries()
+        if not entries:
+            QtWidgets.QMessageBox.information(self, "一括作成", "対象の型式がありません")
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "一括作成",
+                f"{len(entries)}型式ぶんの測定プログラムを作ります。\n出力先: {out}\n"
+                "よろしいですか？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
+        cfg = FanucConfig.from_settings(self.settings)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            rep = batch_build.batch_programs(
+                entries, cfg, out,
+                layout=self.cmb_layout.currentData() or "folder",
+                ext=str(self.settings.get("nc_out_ext", ".NC")),
+                eob=self.settings.get("nc_eob"),
+                overwrite=self.c_over.isChecked())
+        except Exception as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "一括作成", f"失敗しました:\n{e}")
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.table.setRowCount(len(rep))
+        for r, (model, close, state, where) in enumerate(rep):
+            for c, text in enumerate((model, close, state, where)):
+                item = QtWidgets.QTableWidgetItem(str(text))
+                if state == "作れない":
+                    item.setBackground(QtGui.QColor("#fee2e2"))
+                elif state == "作成":
+                    item.setBackground(QtGui.QColor("#dcfce7"))
+                self.table.setItem(r, c, item)
+        self.table.resizeColumnsToContents()
+        self.lbl.setText(batch_build.summarize(rep))
+
+
 class GraphZoomDialog(QtWidgets.QDialog):
     """グラフを画面いっぱいに拡大表示する（現在の表示データを大きく描く）。"""
 
@@ -6899,6 +7029,9 @@ class MainWindow(QtWidgets.QMainWindow):
              "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
             ("パラメータ…", self.show_param_dialog,
              "受注番号から かんたん作成（詳細設定・パラメータDBも中から）"),
+            ("型式ごとに一括作成…", self.show_batch_dialog,
+             "測定条件マスタの型式ぶんの測定プログラムをまとめて作る"
+             "（フォルダ分け／カード向けの平置きを選べる）"),
             ("アラーム…", self.show_alarm_help,
              "FANUCのアラーム番号・メッセージから意味と対処の目安を調べる"),
         ):
@@ -8178,6 +8311,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_help(self):
         """アプリ全体＋新機能の詳細ヘルプを開く。"""
         HelpDialog(self).exec()
+
+    def show_batch_dialog(self):
+        """型式ごとの測定プログラムを一括作成する画面を開く。"""
+        BatchProgramDialog(self, self.settings).exec()
 
     def show_alarm_help(self):
         """FANUCアラームの番号/メッセージから意味・対処を調べる。"""

@@ -328,6 +328,76 @@ def check_capacity_match(text, ctl, amp_map=None, param=AMP_CURRENT_PARAM) -> li
     return out
 
 
+def capacity_from_basic(text, amp_map=None, param=AMP_CURRENT_PARAM) -> dict:
+    """BASICのアンプ最大電流(N2165)から、軸ごとの容量を読み取る。
+
+    実機のファイルが正で、号機マスタの方が古いことがある。そのときに
+    マスタを実機へ合わせるために使う。戻り値: {"X": "20A", ...}
+    """
+    amp_map = amp_map or CAPACITY_TO_AMP_CURRENT
+    rev = {str(v): k for k, v in amp_map.items()}
+    from . import fanuc_param
+    out = {}
+    for label, axis in AXIS_LABEL_TO_NAME.items():
+        v = fanuc_param.get_value(text, param, label)
+        if v is None:
+            continue
+        cap = rev.get(str(v).strip())
+        if cap:
+            out[axis] = cap
+    return out
+
+
+def master_fix_rows(folder, ctls, amp_map=None) -> list:
+    """BASICに合わせて号機マスタを直すべき箇所を出す。
+
+    戻り値: [(号機, 軸, マスタの値, BASICから読んだ値, ファイル名), ...]
+    実機が出したBASICだけを見る（PC製は根拠にしない）。
+    """
+    from pathlib import Path
+
+    from . import param_origin
+    base = Path(folder) if folder else None
+    if not base or not base.is_dir():
+        return []
+    by_unit = {str(c.unit).strip(): c for c in (ctls or [])}
+    out = []
+    for p in sorted(base.iterdir()):
+        if not p.is_file():
+            continue
+        unit = param_origin.unit_of(p.name)
+        ctl = by_unit.get(unit)
+        if not ctl:
+            continue
+        try:
+            data = p.read_bytes()
+        except Exception:
+            continue
+        if param_origin.classify(data)["verdict"] not in ("machine", "converted"):
+            continue                      # PC製は根拠にしない
+        caps = capacity_from_basic(data.decode("cp932", errors="replace"), amp_map)
+        for axis, cap in caps.items():
+            cur = (ctl.caps or {}).get(axis) or ""
+            if cap != cur:
+                out.append((unit, axis, cur, cap, p.name))
+    return out
+
+
+def apply_master_fixes(path, ctls, fixes) -> int:
+    """master_fix_rows の結果を号機マスタへ書き戻す。直した号機の数を返す。"""
+    by_unit = {str(c.unit).strip(): c for c in (ctls or [])}
+    touched = {}
+    for unit, axis, _cur, cap, _name in fixes or []:
+        ctl = by_unit.get(unit)
+        if ctl is None:
+            continue
+        ctl.caps[axis] = _norm_cap(cap)
+        touched[unit] = ctl
+    for ctl in touched.values():
+        upsert_controller(path, ctl)
+    return len(touched)
+
+
 def basic_files_by_unit(folder) -> dict:
     """BASICフォルダを号機ごとにまとめる。{号機: [(ファイル名, 出どころ), ...]}
 

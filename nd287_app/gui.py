@@ -1924,6 +1924,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if mpath and not Path(mpath).is_absolute():
             mpath = str(app_dir() / mpath)
         self._mpath = mpath
+        self._controller_master_path = mpath
         self._controllers = controllers.load_controllers(mpath)
         # モーター→容量 対応表（製品データに Servo Amp Model が無いとき容量を引く）
         cpath = settings.get("motor_capacity_csv", "")
@@ -2849,10 +2850,16 @@ class BasicOriginDialog(QtWidgets.QDialog):
         v.addWidget(self.table, 1)
 
         buttons = QtWidgets.QHBoxLayout()
+        b_fix = QtWidgets.QPushButton("マスタをBASICに合わせる...")
+        b_fix.setToolTip(
+            "実機が出したBASICのアンプ最大電流(N2165)から軸ごとの容量を読み取り、\n"
+            "号機マスタの容量を実機に合わせる。PC製のファイルは根拠にしない")
+        b_fix.clicked.connect(self.fix_master)
         b_csv = QtWidgets.QPushButton("CSV出力")
         b_csv.clicked.connect(self.save_csv)
         b_close = QtWidgets.QPushButton("閉じる")
         b_close.clicked.connect(self.accept)
+        buttons.addWidget(b_fix)
         buttons.addWidget(b_csv)
         buttons.addStretch(1)
         buttons.addWidget(b_close)
@@ -2861,6 +2868,47 @@ class BasicOriginDialog(QtWidgets.QDialog):
         screen = self.screen() or QtWidgets.QApplication.primaryScreen()
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
         self.resize(min(1100, avail.width() - 80), min(640, avail.height() - 80))
+
+    def fix_master(self):
+        """実機のBASICに合わせて号機マスタの容量を直す（確認してから書く）。"""
+        parent = self.parent()
+        ctls = list(getattr(parent, "_controllers", []) or [])
+        path = getattr(parent, "_controller_master_path", "")
+        if not ctls or not path:
+            QtWidgets.QMessageBox.information(
+                self, "マスタをBASICに合わせる",
+                "制御装置マスタが読み込まれていません（設定の「制御装置マスタ」を確認）")
+            return
+        folder = str(Path(self.rows[0][2]).parent) if self.rows else ""
+        fixes = controllers.master_fix_rows(
+            folder, ctls, (parent.settings.get("amp_current_map")
+                           if hasattr(parent, "settings") else None))
+        if not fixes:
+            QtWidgets.QMessageBox.information(
+                self, "マスタをBASICに合わせる",
+                "実機のBASICと号機マスタの容量は一致しています。直すところはありません。")
+            return
+        lines = [f"F{u}　{ax}軸　{cur or '(空)'} → {cap}　（{name}）"
+                 for u, ax, cur, cap, name in fixes]
+        ok = QtWidgets.QMessageBox.question(
+            self, "マスタをBASICに合わせる",
+            f"実機のBASICから読んだ容量に合わせて、号機マスタを{len(lines)}箇所"
+            "直します:\n\n" + "\n".join(lines[:20])
+            + ("\n…" if len(lines) > 20 else "")
+            + f"\n\n書き込み先: {path}\n実行しますか？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        if ok != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            n = controllers.apply_master_fixes(path, ctls, fixes)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "マスタをBASICに合わせる",
+                                          f"書き込みに失敗しました:\n{e}")
+            return
+        QtWidgets.QMessageBox.information(
+            self, "マスタをBASICに合わせる",
+            f"{n}台ぶんを直しました。制御装置の一覧は「更新」で読み直せます。")
 
     @staticmethod
     def _coverage_html(cov):
@@ -3885,7 +3933,8 @@ class ParamDialog(QtWidgets.QDialog):
             text, ctl, self.settings.get("amp_current_map"))
         if cap_ng:
             problems.append("号機マスタの容量と合いません（" + " ／ ".join(cap_ng)
-                            + "）。別の号機のファイルか、マスタが古い可能性")
+                            + "）。実機のファイルが正ならマスタが古いので、"
+                              "制御装置マスタの「BASICに合わせる…」で直せます")
         # 個体データ（原点・グリッドシフト）。作成時に0にする設定なら、
         # そちらで直るものは警告しない（自動で直すものを毎回聞かない）。
         indiv = fanuc_param.individual_data(text)

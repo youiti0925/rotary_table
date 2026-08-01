@@ -358,3 +358,68 @@ class TestCapacityMatch(unittest.TestCase):
         ctl = self._ctl(X="20A")
         self.assertTrue(C.check_capacity_match(t, ctl))
         self.assertEqual(C.check_capacity_match(t, ctl, {"20A": "30"}), [])
+
+
+class TestMasterFixFromBasic(unittest.TestCase):
+    """実機のBASICが正で、号機マスタが古いときにマスタを直す。
+
+    容量→N2165 の対応（20A=25 / 40A=45 / 80A=85 / 160A=165）を逆に使う。
+    """
+
+    MACHINE = b"%\n\r\rN02165Q1A1P25A2P45A3P85A4P165\n\r\r%\n\r\r"
+    PC = b"%\nN02165Q1A1P25A2P45\n%\n"
+
+    def _dir(self, files):
+        d = tempfile.mkdtemp()
+        for name, data in files.items():
+            (Path(d) / name).write_bytes(data)
+        return d
+
+    def test_capacity_read_from_basic(self):
+        caps = C.capacity_from_basic(self.MACHINE.decode("cp932"))
+        self.assertEqual(caps, {"X": "20A", "Y": "40A", "Z": "80A", "A": "160A"})
+
+    def test_fix_rows_lists_differences(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE})
+        ctl = C.Controller("23", caps={"X": "80A", "Y": "40A"})
+        fixes = C.master_fix_rows(d, [ctl])
+        got = {(ax, cur, cap) for _u, ax, cur, cap, _n in fixes}
+        self.assertIn(("X", "80A", "20A"), got)      # 違う → 直す
+        self.assertNotIn(("Y", "40A", "40A"), got)   # 同じ → 出さない
+        self.assertIn(("Z", "", "80A"), got)         # マスタが空 → 埋める
+
+    def test_pc_made_file_is_not_used_as_evidence(self):
+        d = self._dir({"F23BASIC.prm": self.PC})
+        ctl = C.Controller("23", caps={"X": "80A"})
+        self.assertEqual(C.master_fix_rows(d, [ctl]), [])
+
+    def test_unknown_unit_skipped(self):
+        d = self._dir({"F99BASIC.DAT": self.MACHINE})
+        self.assertEqual(C.master_fix_rows(d, [C.Controller("23")]), [])
+
+    def test_apply_writes_master(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE})
+        path = str(Path(d) / "master.csv")
+        ctl = C.Controller("23", cnc="31i-MA", caps={"X": "80A", "Y": "40A"})
+        C.upsert_controller(path, ctl)
+        fixes = C.master_fix_rows(d, [ctl])
+        n = C.apply_master_fixes(path, [ctl], fixes)
+        self.assertEqual(n, 1)
+        again = {str(c.unit): c for c in C.load_controllers(path)}["23"]
+        self.assertEqual(again.caps["X"], "20A")
+        self.assertEqual(again.caps["Z"], "80A")
+        self.assertEqual(again.cnc, "31i-MA")       # 他の項目は保持
+
+    def test_apply_is_idempotent(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE})
+        path = str(Path(d) / "master.csv")
+        ctl = C.Controller("23", caps={"X": "80A"})
+        C.upsert_controller(path, ctl)
+        C.apply_master_fixes(path, [ctl], C.master_fix_rows(d, [ctl]))
+        ctls2 = C.load_controllers(path)
+        self.assertEqual(C.master_fix_rows(d, ctls2), [])
+
+    def test_no_fixes_when_already_matching(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE})
+        ctl = C.Controller("23", caps={"X": "20A", "Y": "40A", "Z": "80A", "A": "160A"})
+        self.assertEqual(C.master_fix_rows(d, [ctl]), [])

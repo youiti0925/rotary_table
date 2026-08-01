@@ -550,7 +550,7 @@ class RawDataDialog(QtWidgets.QDialog):
         self.admin = False
         self.entries = []  # 行 → データ書き戻し先
         self.setWindowTitle("生データ")
-        self.resize(680, 640)
+        fit_to_screen(self, 680, 640)
         layout = QtWidgets.QVBoxLayout(self)
         self.table = QtWidgets.QTableWidget()
         self.table.verticalHeader().setVisible(False)
@@ -650,6 +650,82 @@ class RawDataDialog(QtWidgets.QDialog):
             "適用しました" + (f"（{errors}件は数値でないため無視）" if errors else "")
         )
         self.populate()
+
+
+def wrap_long_labels(widget, min_chars=30):
+    """長い文章のラベルを折り返すようにする。
+
+    折り返さないラベルは「1行に収まる幅」を最小幅として要求するので、
+    文字サイズを上げるとダイアログごと横に広がって画面をはみ出す。
+    見出しや項目名（短いもの）はそのままにしたいので、長いものだけ。
+    """
+    n = 0
+    for lab in widget.findChildren(QtWidgets.QLabel):
+        if not lab.wordWrap() and len(lab.text()) >= min_chars:
+            lab.setWordWrap(True)
+            n += 1
+    return n
+
+
+def wrap_scrollable(dialog, keep_bottom=0):
+    """ダイアログの中身をスクロールに入れ、画面より小さくできるようにする。
+
+    固定の中身をそのまま入れていると、文字サイズを上げたときに
+    「ダイアログの最小サイズ」が画面を超え、下のボタンが押せなくなる。
+    中身をスクロールに入れれば、画面が小さくても必ず収まる。
+
+    keep_bottom … 下から数えていくつのレイアウト項目を（ボタン列として）
+                  スクロールの外に残すか。0なら全部スクロールへ入れる。
+    """
+    old = dialog.layout()
+    if old is None or old.property("scroll_wrapped"):
+        return None
+    items = [old.takeAt(0) for _ in range(old.count())]
+    keep = items[len(items) - keep_bottom:] if keep_bottom else []
+    inner_items = items[:len(items) - keep_bottom] if keep_bottom else items
+
+    inner = QtWidgets.QWidget()
+    iv = QtWidgets.QVBoxLayout(inner)
+    iv.setContentsMargins(0, 0, 0, 0)
+    for it in inner_items:
+        if it.widget() is not None:
+            iv.addWidget(it.widget())
+        elif it.layout() is not None:
+            iv.addLayout(it.layout())
+        elif it.spacerItem() is not None:
+            iv.addItem(it.spacerItem())
+
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setWidget(inner)
+    # ここが肝。明示的に小さい最小を与えないと、中身の最小が
+    # そのままダイアログの最小になり、画面より小さくできない。
+    scroll.setMinimumSize(320, 200)
+    old.addWidget(scroll, 1)
+    for it in keep:
+        if it.widget() is not None:
+            old.addWidget(it.widget())
+        elif it.layout() is not None:
+            old.addLayout(it.layout())
+    old.setProperty("scroll_wrapped", True)
+    return scroll
+
+
+def fit_to_screen(dialog, want_w, want_h, margin=60):
+    """ダイアログを「その画面に収まる大きさ」で開く。
+
+    固定の大きさで resize すると、小さいノートPCや拡大表示のときに
+    画面からはみ出して下のボタンが押せなくなる。実際の作業画面の
+    大きさに合わせて縮める（大きい画面ではそのままの大きさ）。
+    """
+    screen = dialog.screen() or QtWidgets.QApplication.primaryScreen()
+    avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+    w = max(360, min(int(want_w), avail.width() - margin))
+    h = max(280, min(int(want_h), avail.height() - margin))
+    dialog.setMaximumSize(avail.width(), avail.height())
+    dialog.resize(w, h)
+    return w, h
 
 
 class ProgramDialog(QtWidgets.QDialog):
@@ -1214,7 +1290,7 @@ class ParamLogDialog(QtWidgets.QDialog):
     def __init__(self, parent, log_path):
         super().__init__(parent)
         self.setWindowTitle("パラメータ作成ログ")
-        self.resize(900, 520)
+        fit_to_screen(self, 900, 520)
         v = QtWidgets.QVBoxLayout(self)
         rows = nc_param.read_log(log_path)
         if not rows:
@@ -1248,7 +1324,7 @@ class ParamPreviewDialog(QtWidgets.QDialog):
     def __init__(self, parent, rows, subtitle=""):
         super().__init__(parent)
         self.setWindowTitle("作成前プレビュー（旧値→新値）")
-        self.resize(560, 460)
+        fit_to_screen(self, 560, 460)
         v = QtWidgets.QVBoxLayout(self)
         # rows は (番号, 旧, 新) か (番号, 軸, 旧, 新)。軸つき=2軸テーブルの両軸表示
         has_axis = bool(rows) and len(rows[0]) == 4
@@ -1301,7 +1377,7 @@ class ControllerEditDialog(QtWidgets.QDialog):
     def __init__(self, parent, controller=None):
         super().__init__(parent)
         self.setWindowTitle("制御装置の登録／編集（手入力）")
-        self.resize(420, 460)
+        fit_to_screen(self, 420, 460)
         self.result_controller = None
         self.orig_unit = controller.unit if controller else ""
         v = QtWidgets.QVBoxLayout(self)
@@ -1369,7 +1445,7 @@ class BasicScanDialog(QtWidgets.QDialog):
     def __init__(self, parent, basic_dir, master_path):
         super().__init__(parent)
         self.setWindowTitle("BASICから制御装置を取り込む")
-        self.resize(720, 520)
+        fit_to_screen(self, 720, 520)
         self.master_path = master_path
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(QtWidgets.QLabel(
@@ -1479,7 +1555,7 @@ class ControllerMasterDialog(QtWidgets.QDialog):
     def __init__(self, parent, master_path, basic_dir="", settings=None):
         super().__init__(parent)
         self.setWindowTitle("制御装置マスタ（登録・編集）")
-        self.resize(640, 520)
+        fit_to_screen(self, 640, 520)
         self.master_path = master_path
         self.basic_dir = basic_dir
         self.settings = settings if settings is not None else {}
@@ -1612,7 +1688,7 @@ class WebControllerImportDialog(QtWidgets.QDialog):
         self._backup = backup
         self._ctls = []
         self.setWindowTitle("Webから制御装置を取り込む（product-inspection）")
-        self.resize(760, 620)
+        fit_to_screen(self, 760, 620)
         v = QtWidgets.QVBoxLayout(self)
 
         self.sync = FirestoreSync(
@@ -1778,7 +1854,7 @@ class ParamViewerDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("パラメータを見る／比較")
-        self.resize(900, 640)
+        fit_to_screen(self, 900, 640)
         v = QtWidgets.QVBoxLayout(self)
 
         form = QtWidgets.QFormLayout()
@@ -1920,7 +1996,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("受注番号から かんたん作成")
-        self.resize(1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
+        fit_to_screen(self, 1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
         self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
@@ -2128,6 +2204,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         row.addWidget(b_adv); row.addWidget(b_view)
         row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
         v.addLayout(row)
+        # 文字サイズを上げても画面に収まるよう、中身をスクロールへ入れる
+        # （ボタン列だけ外に残して常に押せるようにする）
+        wrap_long_labels(self)
+        wrap_scrollable(self, keep_bottom=1)
 
         if model:
             self.e_model.setText(model)   # 本体の型式を「型式で探す」に初期表示
@@ -2988,7 +3068,7 @@ class ParamDialog(QtWidgets.QDialog):
         self.settings = settings
         self.machine = machine
         self.setWindowTitle("パラメータ変更（差分）の出力")
-        self.resize(740, 600)
+        fit_to_screen(self, 740, 600)
         # 制御装置マスタ（号機・容量など）。あれば号機一覧＋必要容量で絞り込みに使う
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
@@ -2998,6 +3078,9 @@ class ParamDialog(QtWidgets.QDialog):
         outer = QtWidgets.QVBoxLayout(self)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        # 明示的に小さい最小を与えないと、中身の最小がそのまま
+        # ダイアログの最小になり、文字を大きくすると画面に収まらなくなる
+        scroll.setMinimumSize(320, 200)
         inner = QtWidgets.QWidget(); scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
         v = QtWidgets.QVBoxLayout(inner)
@@ -3201,13 +3284,33 @@ class ParamDialog(QtWidgets.QDialog):
         row.addStretch(1)
         for b in (b_check, b_file, b_both, b_prm, b_close):
             row.addWidget(b)
-        outer.addLayout(row)   # ボタンはスクロール外＝常に見える位置に固定
+        # ボタンはスクロール外＝常に見える位置に固定。ただしボタンが8個あるので、
+        # 文字を大きくすると横に並びきらずダイアログごと画面をはみ出す。
+        # 主画面のツールバーと同じく、横スクロールに入れて幅を要求させない。
+        btn_box = QtWidgets.QWidget()
+        btn_box.setLayout(row)
+        btn_scroll = QtWidgets.QScrollArea()
+        btn_scroll.setWidgetResizable(True)
+        btn_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        btn_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        btn_scroll.setWidget(btn_box)
+        btn_scroll.setMinimumWidth(280)
+        btn_scroll.setFixedHeight(btn_box.sizeHint().height() + 4)
+        outer.addWidget(btn_scroll)
+        # 長い説明・エラー文のラベルを折り返す。折り返さないと文字を大きくしたとき
+        # ダイアログごと横に広がって画面をはみ出す
+        wrap_long_labels(self)
 
         self._all = {}
         self._changes = []
         self.e_basic_dir.editingFinished.connect(self._scan_basic_controllers)
         self._scan_basic_controllers()   # 起動時にBASICの場所から制御装置一覧を作る
         self.reload()
+
+    def showEvent(self, event):
+        # あとから setText された長いラベル（エラー文など）にも折り返しを効かせる
+        super().showEvent(event)
+        wrap_long_labels(self)
 
     def _scan_basic_controllers(self):
         """制御装置プルダウンを作り直す。マスタがあれば号機一覧（必要容量で絞り込み）、
@@ -4063,7 +4166,7 @@ class ParamEntryEditDialog(QtWidgets.QDialog):
     def __init__(self, parent, entry=None, defaults=None, existing=None):
         super().__init__(parent)
         self.setWindowTitle("エントリの入力／編集")
-        self.resize(580, 620)
+        fit_to_screen(self, 580, 620)
         self.result_entry = None
         self._existing = existing or []     # 重複チェック用の既存エントリ
         defaults = defaults or {}
@@ -4242,7 +4345,7 @@ class TwoAxisCreateDialog(QtWidgets.QDialog):
     def __init__(self, parent, primary, partner_entries):
         super().__init__(parent)
         self.setWindowTitle("2軸テーブルで作成（傾斜＋回転）")
-        self.resize(560, 280)
+        fit_to_screen(self, 560, 280)
         self.partner = None
         self._partners = list(partner_entries)
         v = QtWidgets.QVBoxLayout(self)
@@ -4347,7 +4450,7 @@ class ParamDBDialog(QtWidgets.QDialog):
         self.owner = owner
         self.settings = owner.settings
         self.setWindowTitle("パラメータ作成データベース")
-        self.resize(1060, 680)
+        fit_to_screen(self, 1060, 680)
         self._entries = []
         v = QtWidgets.QVBoxLayout(self)
         intro = QtWidgets.QLabel(
@@ -4991,7 +5094,7 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
                              note="傾斜再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
         }
         self.setWindowTitle("測定条件の登録/編集")
-        self.resize(660, 480)
+        fit_to_screen(self, 660, 480)
         layout = QtWidgets.QVBoxLayout(self)
 
         top = QtWidgets.QHBoxLayout()
@@ -5157,7 +5260,7 @@ class PastDataDialog(QtWidgets.QDialog):
         super().__init__(win)
         self.win = win
         self.setWindowTitle("過去データ検索（.BS/.KS）")
-        self.resize(1180, 560)
+        fit_to_screen(self, 1180, 560)
         layout = QtWidgets.QVBoxLayout(self)
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("型式"))
@@ -5317,7 +5420,7 @@ class AnalysisDialog(QtWidgets.QDialog):
         super().__init__(win)
         self.win = win
         self.setWindowTitle("分析")
-        self.resize(1040, 720)
+        fit_to_screen(self, 1040, 720)
         self.records = []
         self.headers = []
         self.rows = []
@@ -5800,7 +5903,7 @@ class PitchCorrectionDialog(QtWidgets.QDialog):
         super().__init__(win)
         self.win = win
         self.setWindowTitle("ピッチエラー補正（提出用）")
-        self.resize(920, 720)
+        fit_to_screen(self, 920, 720)
         self._rows = []
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -6013,7 +6116,7 @@ class FanucPitchParamDialog(QtWidgets.QDialog):
         self._interval = interval_deg
         self._params = None
         self.setWindowTitle("FANUCピッチエラー補正パラメータ生成")
-        self.resize(760, 640)
+        fit_to_screen(self, 760, 640)
         layout = QtWidgets.QVBoxLayout(self)
 
         info = QtWidgets.QLabel(
@@ -6154,9 +6257,12 @@ class BatchProgramDialog(QtWidgets.QDialog):
         self.settings = settings
         self.setWindowTitle("型式ごとに測定プログラムを一括作成")
         v = QtWidgets.QVBoxLayout(self)
-        v.addWidget(QtWidgets.QLabel(
+        intro = QtWidgets.QLabel(
             "測定条件マスタの型式ぶんの測定プログラムをまとめて作ります。"
-            "刻みが登録されていない型式は作らず、理由を一覧に出します。"))
+            "刻みが登録されていない型式は作らず、理由を一覧に出します。")
+        intro.setWordWrap(True)      # 折り返さないと文字を大きくしたとき横に伸びる
+        v.addWidget(intro)
+        self._wrap_labels_later = True
 
         form = QtWidgets.QFormLayout()
         self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")))
@@ -6338,7 +6444,7 @@ class Iso230Dialog(QtWidgets.QDialog):
     def __init__(self, win, stats, meta=None):
         super().__init__(win)
         self.setWindowTitle("JIS B 6190-2（ISO 230-2）評価")
-        self.resize(760, 560)
+        fit_to_screen(self, 760, 560)
         self._stats = stats
         self._meta = meta or {}
         v = QtWidgets.QVBoxLayout(self)
@@ -6420,7 +6526,7 @@ class HelpDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, start_title=None):
         super().__init__(parent)
         self.setWindowTitle("詳細ヘルプ")
-        self.resize(860, 620)
+        fit_to_screen(self, 860, 620)
         layout = QtWidgets.QVBoxLayout(self)
 
         split = QtWidgets.QHBoxLayout()
@@ -6463,7 +6569,7 @@ class AlarmHelpDialog(QtWidgets.QDialog):
     def __init__(self, parent, settings):
         super().__init__(parent)
         self.setWindowTitle("FANUCアラーム検索")
-        self.resize(820, 600)
+        fit_to_screen(self, 820, 600)
         csv_path = settings.get("fanuc_alarm_csv") if settings else None
         if csv_path and not Path(csv_path).is_absolute():
             csv_path = str(app_dir() / csv_path)
@@ -6570,7 +6676,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
-        self.resize(1200, 800)
+        fit_to_screen(self, 1200, 800)
         self.dev = device
         self.settings = settings
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない

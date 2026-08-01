@@ -113,3 +113,99 @@ class TestBatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFitToScreen(unittest.TestCase):
+    """ダイアログは必ず画面に収まる大きさで開く。
+
+    固定の大きさで開くと、小さいノートPCや拡大表示のときに画面から
+    はみ出して下のボタンが押せなくなる。
+    """
+
+    def setUp(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.QtWidgets = QtWidgets
+
+    def test_large_request_is_capped_to_the_screen(self):
+        from nd287_app.gui import fit_to_screen
+        dlg = self.QtWidgets.QDialog()
+        avail = self.app.primaryScreen().availableGeometry()
+        w, h = fit_to_screen(dlg, 9999, 9999)
+        self.assertLessEqual(w, avail.width())
+        self.assertLessEqual(h, avail.height())
+        dlg.deleteLater()
+
+    def test_small_request_is_kept(self):
+        from nd287_app.gui import fit_to_screen
+        dlg = self.QtWidgets.QDialog()
+        w, h = fit_to_screen(dlg, 400, 300)
+        self.assertEqual((w, h), (400, 300))
+        dlg.deleteLater()
+
+    def test_never_smaller_than_usable(self):
+        from nd287_app.gui import fit_to_screen
+        dlg = self.QtWidgets.QDialog()
+        w, h = fit_to_screen(dlg, 10, 10)
+        self.assertGreaterEqual(w, 360)
+        self.assertGreaterEqual(h, 280)
+        dlg.deleteLater()
+
+
+class TestDialogsFitOnSmallScreen(unittest.TestCase):
+    """どのダイアログも 1366x768 のノートPCに収まること。
+
+    文字サイズを上げると「ダイアログの最小サイズ」が画面を超え、
+    下のボタンが押せなくなる事故が繰り返し起きた。最小サイズで判定する。
+    """
+
+    TARGET_W, TARGET_H = 1366, 730     # 1366x768 からタスクバーぶんを引く
+
+    def setUp(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def _check(self, make):
+        import copy
+        from nd287_app import themes
+        from nd287_app.settings import DEFAULTS
+        bad = []
+        for pt in (7, 12, 16, 22):
+            themes.apply_font(self.app, pt)
+            themes.apply_theme(self.app, themes.DEFAULT_THEME)
+            dlg = make(copy.deepcopy(DEFAULTS))
+            dlg.show()
+            for _ in range(5):
+                self.app.processEvents()
+            m = dlg.minimumSizeHint()
+            if m.width() > self.TARGET_W or m.height() > self.TARGET_H:
+                bad.append(f"{pt}pt {m.width()}x{m.height()}")
+            dlg.close()
+            dlg.deleteLater()
+            self.app.processEvents()
+        themes.apply_font(self.app, 7)
+        return bad
+
+    def test_param_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.ParamDialog(None, s)), [])
+
+    def test_param_wizard_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.ParamWizardDialog(None, s)), [])
+
+    def test_batch_program_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.BatchProgramDialog(None, s)), [])
+
+    def test_basic_origin_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.BasicOriginDialog(None, [], "x", None)), [])
+
+    def test_help_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.HelpDialog(None)), [])

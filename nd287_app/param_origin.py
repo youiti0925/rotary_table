@@ -12,6 +12,15 @@ BASICフォルダには実機のバックアップと、PC側で作られたマ�
     PCのツールが作ったもの         … LF のみ、または CRLF
 補助として、実機は ISOコードに無い文字（";"・小文字・ASCII外）を出さない。
 
+★この判定の限界（重要）
+    アプリ自身も実機と同じ区切り（LF CR CR）で書き出すので、
+    「アプリが出力したファイル」と「実機が出したファイル」は区別できない。
+    判定は「実機と同じ形式か」であって「実機から出てきたか」ではない。
+    したがって BASICフォルダには<b>アプリの出力を置かないこと</b>。
+    置くと machine_reference（実機の番号の和集合）や master_fix_rows
+    （PC製は根拠にしない）の前提が崩れ、PC側ツールが足した番号が
+    「実機にある番号」として通ってしまう。
+
 使い方:
     from .param_origin import classify, scan_folder
     info = classify(Path("F23BASIC.DAT").read_bytes())
@@ -75,6 +84,9 @@ def file_kind(data: bytes) -> str:
 
 def classify(data: bytes) -> dict:
     """バイト列から出どころを判定する。
+
+    ★判定できるのは「実機と同じ形式か」まで。アプリ自身も同じ形式で書くので、
+      アプリの出力は machine と判定される（モジュール冒頭の注意を参照）。
 
     戻り値: {"verdict", "label", "score", "reasons", "kind", "eob", "lines"}
     score は大きいほど実機らしい。+3以上で実機、-2以下でPC、その間は判定保留。

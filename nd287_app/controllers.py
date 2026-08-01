@@ -316,6 +316,34 @@ def check_capacity_match(text, ctl, amp_map=None, param=AMP_CURRENT_PARAM) -> li
         amr = fanuc_param.get_value(text, param, _label_of_axis(text, axis))
         out.append(f"{axis}軸: マスタは{cur} だがファイルは {cap}"
                    + (f"（N{fanuc_param._norm_num(param)}={amr}）" if amr else ""))
+    # マスタにあるのにファイルに「軸そのものが無い」場合。「重なった軸が合って
+    # いれば一致」にすると、2軸機のダンプを4軸の号機の名前で置いても気づけない。
+    # ただし「軸はあるが容量が読めない」（AMRが未知の値）は足りないとは言わない。
+    declared = axes_in_basic(text)
+    if declared:
+        missing = [a for a in AXES if (ctl.caps or {}).get(a) and a not in declared]
+        if missing:
+            out.append("軸が足りません: マスタは "
+                       + "・".join(f"{a}({ctl.caps[a]})" for a in missing)
+                       + " を持っていますが、ファイルにありません")
+    return out
+
+
+def axes_in_basic(text) -> list:
+    """BASICが持っている軸の一覧。1020（軸名のASCIIコード）で決まる。
+
+    容量が読めるかどうかとは別。軸はあるが AMR が未知で容量が読めない、
+    という場合を「軸が足りない」と誤って言わないために分けてある。
+    """
+    from . import fanuc_param
+    out = []
+    for i in range(1, 13):
+        code = fanuc_param.get_value(text, "1020", f"A{i}")
+        if code is None or not str(code).strip().lstrip("-").isdigit():
+            continue
+        letter = _AXIS_CODE.get(int(code))
+        if letter and letter not in out:
+            out.append(letter)
     return out
 
 
@@ -341,8 +369,9 @@ def capacity_from_basic(text, amp_map=None, param=AMP_CURRENT_PARAM) -> dict:
     amp_map を渡すとその対応を優先する（機種で違うときの逃げ道）。
     """
     caps = controller_from_basic_text(text, "").caps
-    out = {a: c for a, c in (caps or {}).items() if c}
+    out = dict(caps or {})
     if amp_map:
+        # 既定の規則(AMR=容量+5)で読めなかった軸も救えるよう、空を捨てる前に当てる
         from . import fanuc_param
         for axis in list(out):
             lab = _label_of_axis(text, axis)
@@ -352,7 +381,7 @@ def capacity_from_basic(text, amp_map=None, param=AMP_CURRENT_PARAM) -> dict:
             hit = [k for k, x in amp_map.items() if str(x) == str(v).strip()]
             if hit:
                 out[axis] = _norm_cap(hit[0])
-    return out
+    return {a: c for a, c in out.items() if c}
 
 
 def master_fix_rows(folder, ctls, amp_map=None) -> list:
@@ -367,15 +396,19 @@ def master_fix_rows(folder, ctls, amp_map=None) -> list:
     base = Path(folder) if folder else None
     if not base or not base.is_dir():
         return []
-    by_unit = {str(c.unit).strip(): c for c in (ctls or [])}
     out = []
-    for p in sorted(base.iterdir()):
-        if not p.is_file():
+    for ctl in (ctls or []):
+        unit = str(ctl.unit).strip()
+        if not unit:
             continue
-        unit = param_origin.unit_of(p.name)
-        ctl = by_unit.get(unit)
-        if not ctl:
+        # 号機ごとに1本だけを根拠にする。フォルダ内の同じ号機のファイルを
+        # 片端から見ると、コピーや別号機のバックアップ（F31BASIC_backup 等）から
+        # 矛盾した行が出て、後から書いた方が黙って勝ってしまう。
+        # 実際に製品ファイルを作るときと同じ選び方（実機優先）にそろえる。
+        path = basic_file_for_unit(base, unit)
+        if not path:
             continue
+        p = Path(path)
         try:
             data = p.read_bytes()
         except Exception:

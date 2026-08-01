@@ -495,3 +495,68 @@ class TestDuplicateSpecJudgement(unittest.TestCase):
         self.assertEqual(C.same_spec(a, self._ctl("2", X="20A")), [])
         self.assertEqual(C.same_spec(a, self._ctl("2", X="40A")), ["X容量"])
         self.assertEqual(C.same_spec(a, None), [])
+
+
+class TestReviewFixes(unittest.TestCase):
+    """レビューで見つかった不具合の再発防止。"""
+
+    MACHINE_4AX = (b"%\n\r\rN01020Q1A1P88A2P89A3P90A4P65\n\r\r"
+                   b"N02165Q1A1P25A2P45A3P85A4P165\n\r\r%\n\r\r")
+    MACHINE_2AX = (b"%\n\r\rN01020Q1A1P88A2P89\n\r\r"
+                   b"N02165Q1A1P25A2P45\n\r\r%\n\r\r")
+    ODD_AMR = (b"%\n\r\rN01020Q1A1P88\n\r\rN02165Q1A1P30\n\r\r%\n\r\r")
+
+    def _dir(self, files):
+        d = tempfile.mkdtemp()
+        for name, data in files.items():
+            (Path(d) / name).write_bytes(data)
+        return d
+
+    def test_one_source_per_unit(self):
+        """同じ号機に紛らわしいコピーがあっても、根拠は1本だけにする。
+
+        片端から見ると矛盾した行が出て、後から書いた方が黙って勝ってしまう。
+        製品ファイルを作るときと同じ選び方（実機優先）にそろえる。
+        """
+        d = self._dir({"F31BASIC.PRM": self.MACHINE_4AX,
+                       "F31BASIC_backup.PRM": self.MACHINE_2AX})
+        ctl = C.Controller("31", caps={"X": "80A", "Y": "80A"})
+        fixes = C.master_fix_rows(d, [ctl])
+        self.assertLessEqual(len({f[4] for f in fixes}), 1)
+
+    def test_amp_map_rescues_unreadable_amr(self):
+        """対応表は「既定の規則で読めなかった値」にこそ効く必要がある。"""
+        text = self.ODD_AMR.decode("cp932")
+        self.assertEqual(C.capacity_from_basic(text), {})        # AMR=30 は読めない
+        self.assertEqual(C.capacity_from_basic(text, {"25A": "30"}), {"X": "25A"})
+
+    def test_missing_axes_are_reported(self):
+        """マスタにあってファイルに無い軸を見逃さない。
+
+        重なった軸が合っていれば一致、にすると2軸機のダンプを4軸の号機の
+        名前で置いても気づけない。
+        """
+        ctl = C.Controller("31", caps={"X": "20A", "Y": "40A",
+                                       "Z": "80A", "A": "160A"})
+        ng = C.check_capacity_match(self.MACHINE_2AX.decode("cp932"), ctl)
+        self.assertTrue(any("軸が足りません" in x for x in ng))
+        self.assertTrue(any("Z(80A)" in x for x in ng))
+
+    def test_matching_file_still_passes(self):
+        ctl = C.Controller("31", caps={"X": "20A", "Y": "40A",
+                                       "Z": "80A", "A": "160A"})
+        self.assertEqual(
+            C.check_capacity_match(self.MACHINE_4AX.decode("cp932"), ctl), [])
+
+    def test_unreadable_capacity_is_not_called_missing(self):
+        """軸はあるが容量が読めない場合を「軸が足りない」と言わない。"""
+        ctl = C.Controller("31", caps={"X": "20A"})
+        ng = C.check_capacity_match(self.ODD_AMR.decode("cp932"), ctl)
+        self.assertEqual(ng, [])
+
+    def test_axes_in_basic(self):
+        self.assertEqual(C.axes_in_basic(self.MACHINE_4AX.decode("cp932")),
+                         ["X", "Y", "Z", "A"])
+        self.assertEqual(C.axes_in_basic(self.MACHINE_2AX.decode("cp932")),
+                         ["X", "Y"])
+        self.assertEqual(C.axes_in_basic("%\nN01825Q1A1P3000\n%\n"), [])

@@ -590,18 +590,43 @@ class TestZeroIndividual(unittest.TestCase):
         self.assertIn("N01850 A1 P 0 A2 P 0", new)   # 空白の形はそのまま
         self.assertIn("N01825 A1 P 3000", new)
 
-    def test_product_value_wins_over_zeroing(self):
-        # 製品データがグリッドシフトを指定していたら、0化で潰さない
-        new, _m, _f = B.build_text(self.RAW, {"01850": "1234"}, 1,
-                                   "", B.ZERO_INDIVIDUAL_PARAMS)
-        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "1234")
-        self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")   # 指定外の軸は0
+    def test_product_values_do_not_bring_individual_data_back(self):
+        """製品データが持ち込む個体データは0化より前に外す。
 
-    def test_multi_axis_zeroing_also_lets_product_win(self):
-        new, _m, _f = B.build_text_multi(
-            self.RAW, {1: {"01850": "1234"}}, None, "", B.ZERO_INDIVIDUAL_PARAMS)
-        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "1234")
+        製品データは「別の号機の完成品とBASICの差分」なので、その号機の
+        グリッドシフト・バックラッシが必ず混ざってくる。0にした直後に
+        別の機械の実測値で上書きされては、0にする意味が無い。
+        （しかも軸ラベルは落ちるので、別の軸へ入ってしまう）
+        """
+        new, _m, _f = B.build_text(self.RAW, {"01850": "1234", "01825": "2500"}, 1,
+                                   "", B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "0")
         self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")
+        self.assertEqual(F_PRM.get_value(new, "1825", "A1"), "2500")  # 他は入る
+
+    def test_multi_axis_also_excludes_individual_data(self):
+        new, _m, _f = B.build_text_multi(
+            self.RAW, {1: {"01850": "1234", "01825": "2500"}}, None, "",
+            B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "0")
+        self.assertEqual(F_PRM.get_value(new, "1825", "A1"), "2500")
+
+    def test_drop_zero_params_reports_what_it_removed(self):
+        keep, dropped = B.drop_zero_params(
+            {"01850": "-94", "01851": "4", "01825": "2500"},
+            B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(keep, {"01825": "2500"})
+        self.assertEqual(dropped, {"01850": "-94", "01851": "4"})
+
+    def test_drop_zero_params_off_keeps_everything(self):
+        keep, dropped = B.drop_zero_params({"01850": "-94"}, None)
+        self.assertEqual(keep, {"01850": "-94"})
+        self.assertEqual(dropped, {})
+
+    def test_preview_does_not_claim_zeroing_when_off(self):
+        # 0化OFFのときにプレビューだけ「0にする」と出さない
+        self.assertEqual(B.preview_zero_rows(self.RAW, None), [])
+        self.assertTrue(B.preview_zero_rows(self.RAW))
 
 
 class TestDropNumbersRobustness(unittest.TestCase):

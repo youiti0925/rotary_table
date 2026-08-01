@@ -99,6 +99,27 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
     return out
 
 
+def drop_zero_params(values: dict, zero_params) -> tuple:
+    """製品値から「0にする番号」を取り除く。戻り値 (残った値, 取り除いた {番号:値})。
+
+    製品データは、別の号機の完成品と BASIC の差分から作られる。つまり
+    その号機の 1850(グリッドシフト)・1851/1852(バックラッシ補正) が
+    そのまま混ざってくる。0にしてから製品値を入れると、0にした直後に
+    別の機械の実測値で上書きされてしまう（しかも軸も別のところへ入る）。
+    出荷ファイルではこれらは0にするので、製品値の側から先に外す。
+    """
+    if not zero_params:
+        return dict(values or {}), {}
+    want = {fanuc_param._norm_num(x) for x in zero_params}
+    keep, dropped = {}, {}
+    for num, v in (values or {}).items():
+        if fanuc_param._norm_num(num) in want:
+            dropped[str(num)] = v
+        else:
+            keep[num] = v
+    return keep, dropped
+
+
 def build_text(raw: str, values: dict, axis: int, seiban: str = "",
                zero_params=None) -> tuple:
     """BASIC テキスト raw に values({番号:値}) を入れた新テキストを返す。
@@ -110,10 +131,10 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
     """
     if fanuc_param.looks_like_fanuc_prm(raw):
         values = resolve_product_values(raw, values, axis)   # '除去・*マージ（元のBASICを見る）
+        # 製品データが持ち込む個体データ（別の号機の実測値）を先に外してから0にする
+        values, _dropped = drop_zero_params(values, zero_params)
         text = raw
         if zero_params:
-            # 先に0にしてから製品値を入れる。順序が逆だと、製品データが
-            # グリッドシフト等を指定していたときに0で潰してしまう。
             text, _z = zero_individual(text, zero_params)
         newtext, missing = fanuc_param.apply_product_values(text, values, axis)
         return newtext, missing, "fanuc"
@@ -188,13 +209,13 @@ def product_axis_values(basic_text: str, product_text: str) -> tuple:
 ZERO_INDIVIDUAL_PARAMS = ("1850", "1851", "1852")
 
 
-def individual_zero_rows(raw: str, params=None) -> list:
+def individual_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
     """0にすべき項目のうち、いま0でないものを [(番号, ラベル, 旧値)] で返す。
 
     軸を限らず、そのファイルに入っている全軸を対象にする。作る軸だけ0にしても、
     他の軸に前の機械の値が残ったまま出荷されてしまうため。
     """
-    params = params or ZERO_INDIVIDUAL_PARAMS
+    params = params or ()          # None/空 は「0にしない」（既定へ戻さない）
     if not fanuc_param.looks_like_fanuc_prm(raw):
         return []
     out = []
@@ -214,7 +235,7 @@ def individual_zero_rows(raw: str, params=None) -> list:
     return out
 
 
-def zero_individual(raw: str, params=None) -> tuple:
+def zero_individual(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> tuple:
     """グリッドシフト・バックラッシ補正を全軸0にする。
 
     戻り値: (新テキスト, [(番号, ラベル, 旧値)])。0にした所だけが変わる。
@@ -300,14 +321,15 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
         return newtext, [(m, "") for m in missing], fmt
     text = raw
     if zero_params:
-        # 単軸と同じく、先に0にしてから製品値を入れる（製品値を優先）
         text, _z = zero_individual(text, zero_params)
     missing = []
     for ax in sorted(axis_values):
         vals = resolve_product_values(raw, axis_values[ax], ax)   # '除去・*マージ
+        vals, _d = drop_zero_params(vals, zero_params)   # 個体データは持ち込まない
         text, miss = fanuc_param.apply_product_values(text, vals, ax)
         missing += [(m, ax) for m in miss]
     cvals = resolve_product_values(raw, common, None)
+    cvals, _d = drop_zero_params(cvals, zero_params)
     text, miss = fanuc_param.apply_common_values(text, cvals)
     missing += [(m, "") for m in miss]
     return text, missing, "fanuc"
@@ -401,7 +423,7 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
     return rows
 
 
-def preview_zero_rows(raw: str, params=None) -> list:
+def preview_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
     """0にする項目のプレビュー行 [(番号(軸), 旧値, "0")]。"""
     return [(f"{num}({label})" if label else str(num), old, "0")
             for num, label, old in individual_zero_rows(raw, params)]

@@ -712,6 +712,31 @@ def wrap_scrollable(dialog, keep_bottom=0):
     return scroll
 
 
+def param_out_ext(settings):
+    """機械へ渡すパラメータファイルの拡張子（既定 .DAT＝実機が出力する形）。"""
+    return str((settings or {}).get("param_out_ext") or ".DAT")
+
+
+def param_eob(settings):
+    """パラメータ/プログラムのブロック区切り（既定は実機と同じ LF CR CR）。"""
+    return (settings or {}).get("nc_eob") or fanuc.DEFAULT_EOB
+
+
+def zero_params_for(settings, checkbox=None):
+    """出荷ファイルで0にする番号（グリッドシフト・バックラッシ補正）。OFFなら None。
+
+    機械個体の実測値なので前の機械の値を持ち込まない。
+    checkbox を渡すと、その画面のチェックも見る。
+    """
+    settings = settings or {}
+    if not bool(settings.get("zero_individual", True)):
+        return None
+    if checkbox is not None and not checkbox.isChecked():
+        return None
+    return tuple(settings.get("zero_individual_params",
+                              param_build.ZERO_INDIVIDUAL_PARAMS))
+
+
 def fit_to_screen(dialog, want_w, want_h, margin=60):
     """ダイアログを「その画面に収まる大きさ」で開く。
 
@@ -2307,17 +2332,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
                else "background:#eff6ff; color:#1d4ed8;"))
 
     def _zero_params(self):
-        """出荷ファイルで0にする番号（グリッドシフト・バックラッシ補正）。
-
-        機械個体の実測値なので、前の機械の値を持ち込まない。OFFなら None。
-        """
-        if not bool(self.settings.get("zero_individual", True)):
-            return None
-        chk = getattr(self, "chk_zero_indiv", None)
-        if chk is not None and not chk.isChecked():
-            return None
-        return tuple(self.settings.get("zero_individual_params",
-                                       param_build.ZERO_INDIVIDUAL_PARAMS))
+        return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
 
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
@@ -2862,7 +2877,10 @@ class BasicOriginDialog(QtWidgets.QDialog):
             f"<b>{folder}</b><br>{param_origin.summarize(rows)}<br>"
             "拡張子ではなく中身のバイトで判定しています。"
             "実機のパンチ形式は区切りが <code>LF CR CR</code>、PC製は <code>LF</code>／"
-            "<code>CRLF</code> です。<b>製品ファイルは「実機」の行を元に作ってください。</b>")
+            "<code>CRLF</code> です。<b>製品ファイルは「実機」の行を元に作ってください。</b>"
+            "<br><span style='color:#b45309'>※分かるのは「実機と同じ形式か」までです。"
+            "アプリの出力も同じ形式になるので、<b>このフォルダにアプリで作った"
+            "ファイルを置かないでください</b>（実機のものと区別できなくなります）。</span>")
         head.setWordWrap(True)
         v.addWidget(head)
 
@@ -3957,25 +3975,13 @@ class ParamDialog(QtWidgets.QDialog):
                           file_b=self.e_product.text().strip()).exec()
 
     def _zero_params(self):
-        """出荷ファイルで0にする番号（グリッドシフト・バックラッシ補正）。
-
-        機械個体の実測値なので、前の機械の値を持ち込まない。OFFなら None。
-        """
-        if not bool(self.settings.get("zero_individual", True)):
-            return None
-        chk = getattr(self, "chk_zero_indiv", None)
-        if chk is not None and not chk.isChecked():
-            return None
-        return tuple(self.settings.get("zero_individual_params",
-                                       param_build.ZERO_INDIVIDUAL_PARAMS))
+        return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
 
     def _param_ext(self):
-        """機械へ渡すパラメータファイルの拡張子（既定 .DAT＝実機が出力する形）。"""
-        return str(self.settings.get("param_out_ext") or ".DAT")
+        return param_out_ext(self.settings)
 
     def _param_eob(self):
-        """パラメータファイルのブロック区切り（既定は実機と同じ LF CR CR）。"""
-        return self.settings.get("nc_eob") or fanuc.DEFAULT_EOB
+        return param_eob(self.settings)
 
     def _reference_backup(self, master_path=None):
         """番号照合に使う参照を (テキスト, 出どころの説明) で返す。無ければ ("", "")。
@@ -4445,6 +4451,15 @@ class ParamDBDialog(QtWidgets.QDialog):
     COLS = ["ID", "型式", "種別", "モード", "モーター", "モーター番号", "方向",
             "ギア比", "制御", "軸", "Seiban", "登録日", "件数", "使用BASIC"]
 
+    def _param_ext(self):
+        return param_out_ext(self.settings)
+
+    def _param_eob(self):
+        return param_eob(self.settings)
+
+    def _zero_params(self):
+        return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
+
     def __init__(self, owner: "ParamDialog"):
         super().__init__(owner)
         self.owner = owner
@@ -4869,7 +4884,9 @@ class ParamDBDialog(QtWidgets.QDialog):
             return
         try:
             out_path, missing, fmt = param_build.create_file(
-                master, out, values, axis=axis, prefix=prefix, seiban=seiban)
+                master, out, values, axis=axis, prefix=prefix, seiban=seiban,
+                ext=self._param_ext(), eob=self._param_eob(),
+                zero_params=self._zero_params())
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return

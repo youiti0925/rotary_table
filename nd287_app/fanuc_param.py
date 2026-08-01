@@ -73,6 +73,50 @@ def prm_bytes(text: str, eob: str = None) -> bytes:
     return "".join(l + eob for l in lines).encode("ascii", "ignore")
 
 
+# 機械の個体ごとに決まる（＝他の号機へ持ち込んではいけない）パラメータ。
+# 番号・ビットは機種で違うことがあるので、設定で変えられるようにしてある。
+INDIVIDUAL_ORIGIN_PARAM = "1815"
+INDIVIDUAL_ORIGIN_BIT = 5        # APZ = 原点確立済み
+INDIVIDUAL_SHIFT_PARAM = "1850"  # グリッドシフト（原点の実測補正）
+AXIS_LABELS = ("A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8")
+
+
+def individual_data(text: str, *, origin_param=INDIVIDUAL_ORIGIN_PARAM,
+                    origin_bit=INDIVIDUAL_ORIGIN_BIT,
+                    shift_param=INDIVIDUAL_SHIFT_PARAM) -> list:
+    """その機械の個体データ（原点・グリッドシフト）が入っていないかを見る。
+
+    仕様（CNCユニット・モーター容量・アンプ）が同じ号機どうしでも、
+    原点の位置は据付けごとに違う。これが入ったファイルを別の号機へ入れると、
+    ・グリッドシフト … その機械で実測した原点補正が別の機械に入る
+    ・原点確立済み(APZ=1) … 実際は確立していないのに確立済みとして扱われる
+    ことになる。「容量が同じなら流用できる」が成り立たない理由がここ。
+
+    戻り値: 見つかった項目の説明リスト（空なら個体データ無し）。
+    """
+    found = []
+    hit_axes = [a for a in AXIS_LABELS
+                if _bit_of(get_value(text, origin_param, a), origin_bit) == 1]
+    if not hit_axes and _bit_of(get_value(text, origin_param), origin_bit) == 1:
+        hit_axes = ["(軸指定なし)"]
+    if hit_axes:
+        found.append(f"原点確立済み（N{_norm_num(origin_param)} #{origin_bit} APZ=1）: "
+                     + "・".join(hit_axes))
+    shifts = []
+    for a in AXIS_LABELS:
+        v = get_value(text, shift_param, a)
+        if v is None:
+            continue
+        try:
+            if float(v) != 0.0:
+                shifts.append(f"{a}={v}")
+        except ValueError:
+            continue
+    if shifts:
+        found.append(f"グリッドシフト（N{_norm_num(shift_param)}）: " + "・".join(shifts))
+    return found
+
+
 def validate_prm(text: str, reference: str = "") -> list:
     """機械が取込に失敗しそうな点を洗い出す（読ませる前の自己点検）。
 

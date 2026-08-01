@@ -2801,10 +2801,13 @@ class BasicOriginDialog(QtWidgets.QDialog):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
-        for r, (name, info, _p) in enumerate(rows):
+        for r, (name, info, p) in enumerate(rows):
+            reasons = list(info["reasons"])
+            if info.get("individual"):
+                reasons.insert(0, "★個体データ入り: " + " ／ ".join(info["individual"]))
             cells = (name, info["kind"], info["label"], info["eob"],
                      str(info["lines"]), info.get("cnc_id", ""),
-                     " / ".join(info["reasons"]))
+                     " / ".join(reasons))
             for c, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 if info["verdict"] == "machine":
@@ -3220,6 +3223,13 @@ class ParamDialog(QtWidgets.QDialog):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             rows = param_origin.scan_folder(folder)
+            # 機械の個体データ（原点・グリッドシフト）が入っているものに印を付ける
+            for _name, info, path in rows:
+                try:
+                    info["individual"] = fanuc_param.individual_data(
+                        Path(path).read_bytes().decode("cp932", errors="replace"))
+                except Exception:
+                    info["individual"] = []
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         if not rows:
@@ -3818,6 +3828,14 @@ class ParamDialog(QtWidgets.QDialog):
         info = param_origin.classify(data)
         text = data.decode("cp932", errors="replace")
         problems = []
+        # その機械の個体データ（原点・グリッドシフト）が入っていないか。
+        # 仕様が同じ号機でも原点は据付けごとに違うので、流用してはいけない。
+        indiv = fanuc_param.individual_data(text)
+        if indiv:
+            problems.append(
+                "このBASICには機械の個体データが入っています（"
+                + " ／ ".join(indiv)
+                + "）。別の号機に使うと原点がずれます")
         if info["verdict"] == "pc":
             problems.append(
                 f"このBASICはPCで作られたものです（{info['reasons'][0]}）。"

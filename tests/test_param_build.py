@@ -457,3 +457,57 @@ class TestMachineReference(unittest.TestCase):
 
     def test_missing_folder(self):
         self.assertEqual(B.machine_reference("/no/such/dir"), ("", []))
+
+
+class TestIndividualData(unittest.TestCase):
+    """機械の個体データ（原点・グリッドシフト）が入っていないか。
+
+    仕様（CNCユニット・容量・アンプ）が同じ号機どうしでも、原点は据付けごとに
+    違う。実データ: F24 と F80 はマスタ上まったく同じ仕様だが、そのBASICには
+    グリッドシフト A1=5420/A2=9400 と APZ=1（原点確立済み）が入っていた。
+    「容量が同じなら流用できる」が成り立たない理由。
+    """
+
+    CLEAN = ("%\nN01815Q1A1P00000000A2P00000000\n"
+             "N01850Q1A1P0A2P0\nN01825Q1A1P3000\n%\n")
+    WITH_ORIGIN = ("%\nN01815Q1A1P00110010A2P00110010\n"
+                   "N01850Q1A1P5420A2P9400\nN01825Q1A1P3000\n%\n")
+
+    def test_clean_basic_has_none(self):
+        self.assertEqual(F_PRM.individual_data(self.CLEAN), [])
+
+    def test_grid_shift_detected(self):
+        found = F_PRM.individual_data(self.WITH_ORIGIN)
+        self.assertTrue(any("グリッドシフト" in f for f in found))
+        self.assertTrue(any("5420" in f for f in found))
+
+    def test_origin_established_detected(self):
+        found = F_PRM.individual_data(self.WITH_ORIGIN)
+        self.assertTrue(any("APZ" in f for f in found))
+        self.assertTrue(any("A1・A2" in f for f in found))
+
+    def test_origin_only(self):
+        text = "%\nN01815Q1A1P00100000\nN01850Q1A1P0\n%\n"
+        found = F_PRM.individual_data(text)
+        self.assertEqual(len(found), 1)
+        self.assertIn("APZ", found[0])
+
+    def test_shift_only(self):
+        text = "%\nN01815Q1A1P00000000\nN01850Q1A1P-94\n%\n"
+        found = F_PRM.individual_data(text)
+        self.assertEqual(len(found), 1)
+        self.assertIn("-94", found[0])
+
+    def test_bit_and_number_are_configurable(self):
+        # 番号・ビットは機種で違うことがあるので変えられる
+        text = "%\nN01815Q1A1P00000010\n%\n"
+        self.assertEqual(F_PRM.individual_data(text), [])
+        found = F_PRM.individual_data(text, origin_bit=1)
+        self.assertTrue(any("#1" in f for f in found))
+
+    def test_unlabelled_origin(self):
+        text = "%\nN01815Q1P00100000\n%\n"
+        self.assertTrue(any("軸指定なし" in f for f in F_PRM.individual_data(text)))
+
+    def test_empty_text(self):
+        self.assertEqual(F_PRM.individual_data("%\n%\n"), [])

@@ -18,6 +18,7 @@ BASICフォルダには実機のバックアップと、PC側で作られたマ�
     info["verdict"]  # "machine" / "pc" / "unknown"
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -39,6 +40,20 @@ def _eob_counts(data: bytes) -> tuple:
     crlf = data.count(b"\r\n") - punch - conv * 3
     lf = data.count(b"\n") - punch - conv * 3 - max(crlf, 0)
     return punch, conv, max(crlf, 0), max(lf, 0)
+
+
+def cnc_id(data: bytes) -> str:
+    """先頭に書かれた制御装置ID（CNC ID）。無ければ空。
+
+    新しい制御装置は、パラメータを出力するとき
+        %(CNCID=3C7B5D01,F6914B1A,5E32C389,4E92C4C8)
+    のように % の直後へ自分のIDをコメントで書く。パラメータの値ではないので
+    読み込んでも設定は変わらないが、「そのファイルがどの制御装置から出たか」を
+    示す唯一の手がかりになる。別の号機のファイルに同じIDが入っていたら、
+    どちらかが取り違え（コピー）である。
+    """
+    m = re.search(rb"CNCID\s*=\s*([0-9A-Fa-f,]+)", bytes(data or b"")[:400])
+    return m.group(1).decode("ascii", "ignore").upper() if m else ""
 
 
 def file_kind(data: bytes) -> str:
@@ -116,7 +131,8 @@ def classify(data: bytes) -> dict:
     verdict = ("converted" if (score >= 3 and converted) else
                "machine" if score >= 3 else "pc" if score <= -2 else "unknown")
     return {"verdict": verdict, "label": VERDICT_LABEL[verdict], "score": score,
-            "reasons": reasons, "kind": file_kind(data), "eob": eob, "lines": total}
+            "reasons": reasons, "kind": file_kind(data), "eob": eob, "lines": total,
+            "cnc_id": cnc_id(data), "digest": hashlib.sha256(data).hexdigest()}
 
 
 def scan_folder(folder, exts=None) -> list:
@@ -138,7 +154,7 @@ def scan_folder(folder, exts=None) -> list:
         except Exception as e:            # 読めないファイルは飛ばさず理由を出す
             info = {"verdict": "unknown", "label": VERDICT_LABEL["unknown"],
                     "score": 0, "reasons": [f"読めません: {e}"], "kind": "不明",
-                    "eob": "", "lines": 0}
+                    "eob": "", "lines": 0, "cnc_id": "", "digest": ""}
         out.append((p.name, info, p))
     return out
 
@@ -150,3 +166,42 @@ def summarize(rows) -> str:
         n[info["verdict"]] = n.get(info["verdict"], 0) + 1
     return (f"{len(rows)}件: 実機 {n['machine']} / 実機(改行変換済) {n['converted']}"
             f" / PC {n['pc']} / 保留 {n['unknown']}")
+
+
+def duplicate_groups(rows) -> list:
+    """中身が完全に同じファイルの組を返す（scan_folder の結果を渡す）。
+
+    別の号機の名前で置いてあるのに中身が同じなら、どちらかは取り違え（コピー）。
+    そのまま使うと、別の機械のサーボ設定を書き込むことになる。
+    戻り値: [[名前, 名前, ...], ...]（2本以上の組だけ、名前順）
+    """
+    by_digest = {}
+    for name, info, _p in rows:
+        d = info.get("digest")
+        if d:
+            by_digest.setdefault(d, []).append(name)
+    return sorted((sorted(v) for v in by_digest.values() if len(v) > 1),
+                  key=lambda g: g[0])
+
+
+def unit_of(name: str) -> str:
+    """ファイル名から号機番号を取り出す（'F23BASIC.DAT' → '23'）。無ければ空。"""
+    m = re.match(r"F(\d+)BASIC", str(name), re.IGNORECASE)
+    return str(int(m.group(1))) if m else ""
+
+
+def cross_unit_duplicates(rows) -> list:
+    """「別の号機どうしで中身が同じ」組だけを返す（同じ号機の重複は除く）。"""
+    return [g for g in duplicate_groups(rows)
+            if len({unit_of(n) for n in g if unit_of(n)}) > 1]
+
+
+def shared_cnc_ids(rows) -> list:
+    """同じCNC IDが別の号機に付いている組を返す [(ID, [名前...])]。"""
+    by_id = {}
+    for name, info, _p in rows:
+        i = info.get("cnc_id")
+        if i:
+            by_id.setdefault(i, []).append(name)
+    return [(i, sorted(v)) for i, v in sorted(by_id.items())
+            if len({unit_of(n) for n in v if unit_of(n)}) > 1]

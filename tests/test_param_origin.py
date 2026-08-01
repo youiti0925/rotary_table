@@ -126,3 +126,56 @@ class TestConvertedAndOldFormat(unittest.TestCase):
             (Path(d) / "F23BASIC.DAT").write_bytes(MACHINE_PARAM)
             rows = scan_folder(d)
         self.assertIn("実機(改行変換済) 1", summarize(rows))
+
+
+class TestDuplicatesAndCncId(unittest.TestCase):
+    """別の号機なのに中身が同じ＝取り違え。CNC ID は「どの制御装置から出たか」の印。"""
+
+    WITH_ID = (b"%(CNCID=3C7B5D01,F6914B1A,5E32C389,4E92C4C8)\n"
+               b"N00000Q1L1P0\nN01825Q1A1P3000\n%\n")
+
+    def _rows(self, files):
+        with tempfile.TemporaryDirectory() as d:
+            for name, data in files.items():
+                (Path(d) / name).write_bytes(data)
+            return scan_folder(d)
+
+    def test_cnc_id_extracted(self):
+        from nd287_app.param_origin import cnc_id
+        self.assertEqual(cnc_id(self.WITH_ID),
+                         "3C7B5D01,F6914B1A,5E32C389,4E92C4C8")
+        self.assertEqual(cnc_id(MACHINE_PARAM), "")
+        self.assertEqual(cnc_id(None), "")
+
+    def test_cross_unit_duplicate_detected(self):
+        from nd287_app.param_origin import cross_unit_duplicates
+        rows = self._rows({"F24BASIC.prm": self.WITH_ID,
+                           "F80BASIC.prm": self.WITH_ID,
+                           "F23BASIC.DAT": MACHINE_PARAM})
+        self.assertEqual(cross_unit_duplicates(rows),
+                         [["F24BASIC.prm", "F80BASIC.prm"]])
+
+    def test_same_unit_duplicate_is_not_flagged(self):
+        # 同じ号機の .DAT と .prm が同じ中身でも取り違えではない
+        from nd287_app.param_origin import cross_unit_duplicates
+        rows = self._rows({"F23BASIC.DAT": MACHINE_PARAM,
+                           "F23BASIC.prm": MACHINE_PARAM})
+        self.assertEqual(cross_unit_duplicates(rows), [])
+
+    def test_shared_cnc_id_across_units(self):
+        from nd287_app.param_origin import shared_cnc_ids
+        rows = self._rows({"F24BASIC.prm": self.WITH_ID,
+                           "F80BASIC.prm": self.WITH_ID})
+        ids = shared_cnc_ids(rows)
+        self.assertEqual(len(ids), 1)
+        self.assertEqual(ids[0][1], ["F24BASIC.prm", "F80BASIC.prm"])
+
+    def test_unit_of(self):
+        from nd287_app.param_origin import unit_of
+        self.assertEqual(unit_of("F23BASIC.DAT"), "23")
+        self.assertEqual(unit_of("F09BASIC"), "9")
+        self.assertEqual(unit_of("readme.txt"), "")
+
+    def test_digest_in_info(self):
+        info = classify(MACHINE_PARAM)
+        self.assertEqual(len(info["digest"]), 64)

@@ -2738,7 +2738,8 @@ class BasicOriginDialog(QtWidgets.QDialog):
     持っていない番号が入っていることがあり、書き戻すと取込が止まる。
     """
 
-    HEADERS = ("ファイル", "種類", "出どころ", "区切り(EOB)", "行数", "判定の根拠")
+    HEADERS = ("ファイル", "種類", "出どころ", "区切り(EOB)", "行数", "CNC ID",
+               "判定の根拠")
 
     def __init__(self, parent, rows, folder, cov=None):
         super().__init__(parent)
@@ -2774,6 +2775,27 @@ class BasicOriginDialog(QtWidgets.QDialog):
                 "border-radius:6px; padding:6px 9px;")
             v.addWidget(okmsg)
 
+        # 別の号機なのに中身が同じ＝どちらかが取り違え（コピー）。そのまま使うと
+        # 別の機械のサーボ設定を書き込むことになるので、いちばん強く出す。
+        dup = param_origin.cross_unit_duplicates(rows)
+        same_id = param_origin.shared_cnc_ids(rows)
+        if dup or same_id:
+            lines = ["<b>別の号機どうしで中身が同じファイルがあります（取り違えの疑い）</b>"]
+            for g in dup:
+                lines.append("・" + " ＝ ".join(g) + "　（バイト単位で完全一致）")
+            for i, names in same_id:
+                lines.append(f"・{'、'.join(names)}　（同じCNC ID <code>{i}</code>"
+                             "＝同じ制御装置から出たもの）")
+            lines.append("どちらか一方は別の機械のものです。"
+                         "そのまま使うと違う機械のサーボ設定を書き込みます。")
+            warn = QtWidgets.QLabel("<br>".join(lines))
+            warn.setWordWrap(True)
+            warn.setTextFormat(QtCore.Qt.RichText)
+            warn.setStyleSheet(
+                "color:#7c2d12; background:#fff7ed; border:1px solid #fdba74;"
+                "border-radius:6px; padding:6px 9px;")
+            v.addWidget(warn)
+
         self.table = QtWidgets.QTableWidget(len(rows), len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -2781,7 +2803,8 @@ class BasicOriginDialog(QtWidgets.QDialog):
         self.table.setAlternatingRowColors(True)
         for r, (name, info, _p) in enumerate(rows):
             cells = (name, info["kind"], info["label"], info["eob"],
-                     str(info["lines"]), " / ".join(info["reasons"]))
+                     str(info["lines"]), info.get("cnc_id", ""),
+                     " / ".join(info["reasons"]))
             for c, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 if info["verdict"] == "machine":
@@ -2834,7 +2857,14 @@ class BasicOriginDialog(QtWidgets.QDialog):
             w.writerow(self.HEADERS)
             for name, info, p in self.rows:
                 w.writerow([name, info["kind"], info["label"], info["eob"],
-                            info["lines"], " / ".join(info["reasons"])])
+                            info["lines"], info.get("cnc_id", ""),
+                            " / ".join(info["reasons"])])
+            dup = param_origin.cross_unit_duplicates(self.rows)
+            if dup:
+                w.writerow([])
+                w.writerow(["別の号機どうしで中身が同じ（取り違えの疑い）"])
+                for g in dup:
+                    w.writerow(g)
             if self.cov:
                 w.writerow([])
                 w.writerow(["実機から取ってくる必要があるBASIC"])

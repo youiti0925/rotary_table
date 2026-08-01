@@ -2901,6 +2901,12 @@ class ParamDialog(QtWidgets.QDialog):
         form_job.addRow("制御装置（一覧）", brow)
         form_job.addRow("使うBASIC",
                         self._with_browse(self.e_master_prm, self._browse_master_prm))
+        # 選ばれたBASICが実機のものかを、その場に出す（黙って選ばない）
+        self.lbl_basic_origin = QtWidgets.QLabel()
+        self.lbl_basic_origin.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_basic_origin.setWordWrap(True)
+        self.lbl_basic_origin.setVisible(False)
+        form_job.addRow("", self.lbl_basic_origin)
 
         prod_w = QtWidgets.QWidget()
         prod_h = QtWidgets.QHBoxLayout(prod_w)
@@ -3075,9 +3081,11 @@ class ParamDialog(QtWidgets.QDialog):
             return
         if self._controllers:
             ctl = next((c for c in self._controllers if c.unit == data), None)
-            path = controllers.basic_file_for_unit(self.e_basic_dir.text().strip(), data)
+            path, info = controllers.basic_choice_for_unit(
+                self.e_basic_dir.text().strip(), data)
             if path:
                 self.e_master_prm.setText(path)
+                self._show_basic_origin_hint(path, info)
             else:
                 QtWidgets.QMessageBox.information(
                     self, "BASIC",
@@ -3092,6 +3100,7 @@ class ParamDialog(QtWidgets.QDialog):
                         self.cmb_axis.setCurrentIndex(i)
         else:
             self.e_master_prm.setText(data)
+            self._show_basic_origin_hint(data)
 
     def _browse_master_prm(self):
         start = self.e_master_prm.text() or self.e_basic_dir.text()
@@ -3099,6 +3108,33 @@ class ParamDialog(QtWidgets.QDialog):
             self, "BASIC .prm（FANUC）", start, "パラメータ (*.prm *.PRM *.DAT *.dat *.txt);;すべて (*.*)")
         if p:
             self.e_master_prm.setText(p)
+            self._show_basic_origin_hint(p)
+
+    def _show_basic_origin_hint(self, path, info=None):
+        """選ばれたBASICが実機のものかを、その場に出す（黙って選ばない）。
+
+        号機を選べばBASICは自動で決まるが、どれが選ばれてそれが実機のものかは
+        画面に出ないと分からない。以前は拡張子で決めていて、F23 のように
+        実機の .DAT とPC製の .prm が並んでいると .prm を掴んでいた。
+        """
+        if info is None:
+            try:
+                with Path(path).open("rb") as f:
+                    info = param_origin.classify(f.read(65536))
+            except Exception:
+                info = None
+        if not info:
+            self.lbl_basic_origin.setText("")
+            self.lbl_basic_origin.setVisible(False)
+            return
+        color = {"machine": "#15803d", "converted": "#a16207",
+                 "pc": "#b91c1c"}.get(info["verdict"], "#6b7280")
+        extra = ("　※実機のバックアップがあるならそちらを使ってください"
+                 if info["verdict"] == "pc" else "")
+        self.lbl_basic_origin.setText(
+            f"<span style='color:{color}'>{Path(path).name} … "
+            f"{info['label']}（{info['eob']}）{extra}</span>")
+        self.lbl_basic_origin.setVisible(True)
 
     def _show_basic_origin(self):
         """BASICフォルダの各ファイルが実機のものかPC製かを一覧で出す。"""

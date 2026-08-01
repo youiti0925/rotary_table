@@ -183,3 +183,57 @@ class TestManualRegister(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBasicFileOriginPriority(unittest.TestCase):
+    """号機からBASICを選ぶとき、実機が出したものを優先する。
+
+    以前は拡張子（.prm を最優先）で決めていたため、F23 のように実機の .DAT と
+    PC製の .prm が並んでいると、制御装置が読み込めなかった .prm を掴んでいた。
+    """
+
+    MACHINE = b"%\n\r\rN00000Q1L1P0\n\r\rN01825Q1A1P3000\n\r\r%\n\r\r"
+    PC = b"%\nN00000Q1L1P0\nN01825Q1A1P3000\n%\n"
+
+    def _dir(self, files):
+        d = tempfile.mkdtemp()
+        for name, data in files.items():
+            (Path(d) / name).write_bytes(data)
+        return d
+
+    def test_machine_dat_beats_pc_prm(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE, "F23BASIC.prm": self.PC})
+        self.assertTrue(
+            C.basic_file_for_unit(d, "23").endswith("F23BASIC.DAT"))
+
+    def test_machine_prm_beats_pc_dat(self):
+        # 逆の並びでも、拡張子ではなく中身で選ぶ
+        d = self._dir({"F82BASIC.PRM": self.MACHINE, "F82BASIC.DAT": self.PC})
+        self.assertTrue(
+            C.basic_file_for_unit(d, "82").endswith("F82BASIC.PRM"))
+
+    def test_extension_order_still_applies_within_same_origin(self):
+        d = self._dir({"F30BASIC.txt": self.MACHINE, "F30BASIC.prm": self.MACHINE})
+        self.assertTrue(
+            C.basic_file_for_unit(d, "30").endswith("F30BASIC.prm"))
+
+    def test_pc_only_is_still_returned(self):
+        # 実機が無ければPC製でも返す（使えないより使える方がよい。画面で赤く出す）
+        d = self._dir({"F80BASIC.prm": self.PC})
+        self.assertTrue(
+            C.basic_file_for_unit(d, "80").endswith("F80BASIC.prm"))
+
+    def test_choice_reports_origin(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE, "F23BASIC.prm": self.PC})
+        path, info = C.basic_choice_for_unit(d, "23")
+        self.assertTrue(path.endswith("F23BASIC.DAT"))
+        self.assertEqual(info["verdict"], "machine")
+
+    def test_choice_missing_unit(self):
+        d = self._dir({"F23BASIC.DAT": self.MACHINE})
+        self.assertEqual(C.basic_choice_for_unit(d, "99"), (None, None))
+
+    def test_unit_number_still_exact(self):
+        d = self._dir({"F10BASIC.DAT": self.MACHINE, "F100BASIC.DAT": self.MACHINE})
+        self.assertTrue(
+            C.basic_file_for_unit(d, "10").endswith("F10BASIC.DAT"))

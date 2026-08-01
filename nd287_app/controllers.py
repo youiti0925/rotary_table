@@ -248,9 +248,16 @@ def basic_file_for_unit(folder, unit):
 
     ファイル名は `F<号機>BASIC`（拡張子は .PRM/.prm/.DAT/.dat/.txt や無しなど様々）。
     号機番号がちょうど一致するものを返す（'1' が 'F10'/'F100' に誤一致しない）。
-    複数あれば .prm → .txt → .dat → 拡張子なし の順で優先。見つからなければ None。
+    見つからなければ None。
+
+    複数あるときは<b>実機が出したものを優先</b>する。以前は拡張子（.prm を最優先）
+    で決めていたため、F23 のように .DAT（実機）と .prm（PC製）が並んでいると
+    <u>読み込めなかった方の .prm を掴んでいた</u>。拡張子は出どころを表さない
+    （.PRM でも実機のものがあり、.DAT でもPC製がある）ので、中身で決める。
     """
     from pathlib import Path
+
+    from . import param_origin
     u = str(unit or "").strip()
     if not u or not folder or not Path(folder).is_dir():
         return None
@@ -264,11 +271,41 @@ def basic_file_for_unit(folder, unit):
     if not cands:
         return None
 
+    def origin_rank(p):
+        # 判定は先頭だけ読めば足りる（区切りの形はファイル全体で同じ）
+        try:
+            with p.open("rb") as f:
+                head = f.read(65536)
+        except Exception:
+            return 9
+        return {"machine": 0, "converted": 1, "unknown": 2, "pc": 3}.get(
+            param_origin.classify(head)["verdict"], 3)
+
     def rank(p):
-        return {".prm": 0, ".txt": 1, ".dat": 2, "": 3}.get(p.suffix.lower(), 4)
+        ext = {".prm": 0, ".txt": 1, ".dat": 2, "": 3}.get(p.suffix.lower(), 4)
+        return (origin_rank(p), ext)
 
     cands.sort(key=rank)
     return str(cands[0])
+
+
+def basic_choice_for_unit(folder, unit) -> tuple:
+    """号機に対応するBASICと、その出どころを (パス, info) で返す。
+
+    画面に「どれを選んだか・それは実機のものか」を出すために使う。
+    見つからなければ (None, None)。
+    """
+    from pathlib import Path
+
+    from . import param_origin
+    path = basic_file_for_unit(folder, unit)
+    if not path:
+        return None, None
+    try:
+        with Path(path).open("rb") as f:
+            return path, param_origin.classify(f.read(65536))
+    except Exception:
+        return path, None
 
 
 # 制御装置マスタCSVの列順（書き出し・追記で使う）

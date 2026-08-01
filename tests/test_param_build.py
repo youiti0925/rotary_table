@@ -511,3 +511,81 @@ class TestIndividualData(unittest.TestCase):
 
     def test_empty_text(self):
         self.assertEqual(F_PRM.individual_data("%\n%\n"), [])
+
+
+class TestZeroIndividual(unittest.TestCase):
+    """グリッドシフト・バックラッシ補正は出荷ファイルでは0にする。
+
+    機械個体の実測値なので、前の機械の値を持ち込まない。作る軸だけでなく
+    全軸を0にする（他軸に値が残ったまま出荷されるのを防ぐ）。
+    """
+
+    RAW = ("%\nN01825Q1A1P3000A2P3000\n"
+           "N01850Q1A1P5420A2P9400\n"
+           "N01851Q1A1P4A2P0\n"
+           "N01852Q1A1P4A2P0\n%\n")
+
+    def test_finds_non_zero_only(self):
+        rows = B.individual_zero_rows(self.RAW)
+        self.assertEqual(rows, [("1850", "A1", "5420"), ("1850", "A2", "9400"),
+                                ("1851", "A1", "4"), ("1852", "A1", "4")])
+
+    def test_zeroes_all_axes(self):
+        new, rows = B.zero_individual(self.RAW)
+        self.assertEqual(len(rows), 4)
+        self.assertIn("N01850Q1A1P0A2P0", new)
+        self.assertIn("N01851Q1A1P0A2P0", new)
+
+    def test_other_lines_untouched(self):
+        new, _ = B.zero_individual(self.RAW)
+        self.assertIn("N01825Q1A1P3000A2P3000", new)
+        a, b = self.RAW.split("\n"), new.split("\n")
+        self.assertEqual(len(a), len(b))
+        self.assertEqual(sum(1 for x, y in zip(a, b) if x != y), 3)
+
+    def test_idempotent(self):
+        once, _ = B.zero_individual(self.RAW)
+        twice, rows = B.zero_individual(once)
+        self.assertEqual(rows, [])
+        self.assertEqual(once, twice)
+
+    def test_clean_file_unchanged(self):
+        clean = "%\nN01850Q1A1P0A2P0\n%\n"
+        new, rows = B.zero_individual(clean)
+        self.assertEqual(rows, [])
+        self.assertEqual(new, clean)
+
+    def test_params_configurable(self):
+        rows = B.individual_zero_rows(self.RAW, params=("1851",))
+        self.assertEqual(rows, [("1851", "A1", "4")])
+
+    def test_build_text_applies_it(self):
+        new, missing, fmt = B.build_text(self.RAW, {"01825": "2500"}, 1, "",
+                                         B.ZERO_INDIVIDUAL_PARAMS)
+        self.assertEqual(F_PRM.get_value(new, "1825", "A1"), "2500")
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "0")
+        self.assertEqual(F_PRM.get_value(new, "1850", "A2"), "0")
+
+    def test_build_text_skips_when_off(self):
+        new, _m, _f = B.build_text(self.RAW, {"01825": "2500"}, 1, "", None)
+        self.assertEqual(F_PRM.get_value(new, "1850", "A1"), "5420")
+
+    def test_preview_rows(self):
+        rows = B.preview_zero_rows(self.RAW)
+        self.assertIn(("1850(A1)", "5420", "0"), rows)
+        self.assertIn(("1851(A1)", "4", "0"), rows)
+
+    def test_headercsv_is_not_touched(self):
+        csv_like = 'Seiban,50013078\r\n"1850","5420",""\r\n'
+        self.assertEqual(B.individual_zero_rows(csv_like), [])
+
+    def test_old_format_supported(self):
+        # 旧書式（Q1なし・空白区切り）。looks_like_fanuc_prm は3行以上で判定するので
+        # 実ファイルと同じく複数行の見本を使う
+        old = ("%\nN01825 A1 P 3000\nN01850 A1 P 5420 A2 P 9400\n"
+               "N01851 A1 P 4\nN01852 A1 P 0\n%\n")
+        new, rows = B.zero_individual(old)
+        self.assertEqual(rows, [("1850", "A1", "5420"), ("1850", "A2", "9400"),
+                                ("1851", "A1", "4")])
+        self.assertIn("N01850 A1 P 0 A2 P 0", new)   # 空白の形はそのまま
+        self.assertIn("N01825 A1 P 3000", new)

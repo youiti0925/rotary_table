@@ -2095,6 +2095,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_origin.setToolTip("レファレンス点復帰/原点確立のビットをON/OFFします。"
                                    "既定は1815 #5(APZ)。違うビットなら設定で変更可")
         f3.addRow("原点確立", self.cmb_origin)
+        zp = "・".join(str(x) for x in settings.get(
+            "zero_individual_params", ["1850", "1851", "1852"]))
+        self.chk_zero_indiv = QtWidgets.QCheckBox(
+            f"グリッドシフト・バックラッシ補正（{zp}）を0にする")
+        self.chk_zero_indiv.setChecked(bool(settings.get("zero_individual", True)))
+        self.chk_zero_indiv.setToolTip(
+            "機械個体の実測値なので、出荷するファイルには前の機械の値を残さない。\n"
+            "作る軸だけでなく全軸を0にする（他軸に値が残ったまま出荷されるのを防ぐ）。\n"
+            "0にする箇所は作成前プレビューに出る")
+        f3.addRow("", self.chk_zero_indiv)
         col_right.addWidget(box3)
         col_right.addStretch(1)             # 右カラムは上詰め
 
@@ -2212,6 +2222,19 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "padding:6px; border-radius:4px; "
             + ("background:#dcfce7; color:#166534; font-weight:bold;" if ok
                else "background:#eff6ff; color:#1d4ed8;"))
+
+    def _zero_params(self):
+        """出荷ファイルで0にする番号（グリッドシフト・バックラッシ補正）。
+
+        機械個体の実測値なので、前の機械の値を持ち込まない。OFFなら None。
+        """
+        if not bool(self.settings.get("zero_individual", True)):
+            return None
+        chk = getattr(self, "chk_zero_indiv", None)
+        if chk is not None and not chk.isChecked():
+            return None
+        return tuple(self.settings.get("zero_individual_params",
+                                       param_build.ZERO_INDIVIDUAL_PARAMS))
 
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
@@ -2660,13 +2683,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
         # プレビュー（軸つき）
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
                 for (num, ax, old, new) in param_build.preview_rows_multi(raw, axis_values)]
+        zparams = self._zero_params()
+        rows += [(num, "全軸", old, new)
+                 for (num, old, new) in param_build.preview_zero_rows(raw, zparams)]
         sub = ("＋".join(f["kind"] for f in sel)
                + f" → {fname}（{ctl.label()}）")
         if not ParamPreviewDialog(self, rows, subtitle=sub).exec():
             return
         try:
             out_path, missing, fmt = param_build.create_file_multi(
-                master, out, axis_values, prefix=prefix, seiban=seiban)
+                master, out, axis_values, prefix=prefix, seiban=seiban,
+                ext=self.settings.get("param_out_ext", ".DAT"),
+                eob=self.settings.get("nc_eob"), zero_params=zparams)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(e))
             return
@@ -3504,6 +3532,8 @@ class ParamDialog(QtWidgets.QDialog):
         axis = int(self.cmb_axis.currentData() or 4)
         # 作成前プレビュー（旧値→新値）。中止なら書き込まない
         rows = param_build.preview_rows(raw, values, axis)
+        rows += [(num, old, new) for (num, old, new)
+                 in param_build.preview_zero_rows(raw, self._zero_params())]
         fname = param_build.filename(prefix, seiban, self._param_ext())
         if not ParamPreviewDialog(
                 self, rows,
@@ -3511,7 +3541,8 @@ class ParamDialog(QtWidgets.QDialog):
                          f"（{nc_param.axis_name(axis)} 軸）").exec():
             return
         try:
-            newtext, missing, fmt = param_build.build_text(raw, values, axis, seiban)
+            newtext, missing, fmt = param_build.build_text(
+                raw, values, axis, seiban, self._zero_params())
             self._dropped_numbers = []
             newtext = self._confirm_prm(newtext, fmt, fname)
             if newtext is None:
@@ -3597,6 +3628,8 @@ class ParamDialog(QtWidgets.QDialog):
         # 作成前プレビュー（軸つき）。中止なら書き込まない
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
                 for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis, common)]
+        rows += [(num, "全軸", old, new) for (num, old, new)
+                 in param_build.preview_zero_rows(raw, self._zero_params())]
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
@@ -3604,7 +3637,7 @@ class ParamDialog(QtWidgets.QDialog):
             return
         try:
             text_multi, missing, fmt = param_build.build_text_multi(
-                raw, per_axis, common, seiban)
+                raw, per_axis, common, seiban, self._zero_params())
             self._dropped_numbers = []
             text_multi = self._confirm_prm(text_multi, fmt, fname)
             if text_multi is None:
@@ -3756,6 +3789,19 @@ class ParamDialog(QtWidgets.QDialog):
                           file_a=self.e_master_prm.text().strip(),
                           file_b=self.e_product.text().strip()).exec()
 
+    def _zero_params(self):
+        """出荷ファイルで0にする番号（グリッドシフト・バックラッシ補正）。
+
+        機械個体の実測値なので、前の機械の値を持ち込まない。OFFなら None。
+        """
+        if not bool(self.settings.get("zero_individual", True)):
+            return None
+        chk = getattr(self, "chk_zero_indiv", None)
+        if chk is not None and not chk.isChecked():
+            return None
+        return tuple(self.settings.get("zero_individual_params",
+                                       param_build.ZERO_INDIVIDUAL_PARAMS))
+
     def _param_ext(self):
         """機械へ渡すパラメータファイルの拡張子（既定 .DAT＝実機が出力する形）。"""
         return str(self.settings.get("param_out_ext") or ".DAT")
@@ -3840,7 +3886,14 @@ class ParamDialog(QtWidgets.QDialog):
         if cap_ng:
             problems.append("号機マスタの容量と合いません（" + " ／ ".join(cap_ng)
                             + "）。別の号機のファイルか、マスタが古い可能性")
+        # 個体データ（原点・グリッドシフト）。作成時に0にする設定なら、
+        # そちらで直るものは警告しない（自動で直すものを毎回聞かない）。
         indiv = fanuc_param.individual_data(text)
+        zp = self._zero_params() or ()
+        if zp:
+            zero_nums = {fanuc_param._norm_num(x) for x in zp}
+            indiv = [x for x in indiv
+                     if not any(f"N{n}" in x for n in zero_nums)]
         if indiv:
             problems.append(
                 "このBASICには機械の個体データが入っています（"
@@ -4729,7 +4782,10 @@ class ParamDBDialog(QtWidgets.QDialog):
             return
         try:
             out_path, missing, fmt = param_build.create_file_multi(
-                master, out, per_axis, prefix=prefix, seiban=seiban)
+                master, out, per_axis, prefix=prefix, seiban=seiban,
+                ext=self.settings.get("param_out_ext", ".DAT"),
+                eob=self.settings.get("nc_eob"),
+                zero_params=self._zero_params())
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return

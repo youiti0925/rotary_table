@@ -99,15 +99,20 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
     return out
 
 
-def build_text(raw: str, values: dict, axis: int, seiban: str = "") -> tuple:
+def build_text(raw: str, values: dict, axis: int, seiban: str = "",
+               zero_params=None) -> tuple:
     """BASIC テキスト raw に values({番号:値}) を入れた新テキストを返す。
 
     戻り値: (新テキスト, 反映できなかった番号リスト, 形式 'fanuc'/'headercsv')。
     N形式は指定軸だけ差替え（他軸・他バイトは不変）。ヘッダ＋CSV形式は Seiban も差替え。
+    zero_params を渡すと、その番号（既定はグリッドシフト・バックラッシ補正）を
+    全軸0にする。出荷するファイルに前の機械の実測値を残さないため。
     """
     if fanuc_param.looks_like_fanuc_prm(raw):
         values = resolve_product_values(raw, values, axis)   # '除去・*マージ
         newtext, missing = fanuc_param.apply_product_values(raw, values, axis)
+        if zero_params:
+            newtext, _z = zero_individual(newtext, zero_params)
         return newtext, missing, "fanuc"
     doc = prm_format.parse_prm(raw)
     if seiban:
@@ -147,13 +152,14 @@ def filename(prefix: str, seiban: str, ext: str = ".DAT") -> str:
 
 
 def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
-                seiban: str, ext: str = ".DAT", eob: str = None) -> tuple:
+                seiban: str, ext: str = ".DAT", eob: str = None,
+                zero_params=None) -> tuple:
     """BASIC を元に <頭文字><Seiban><拡張子> を out_dir に作成する。
 
     戻り値: (出力Path, 反映できなかった番号リスト, 形式)。
     """
     raw = read_master(master_path)
-    newtext, missing, fmt = build_text(raw, values, axis, seiban)
+    newtext, missing, fmt = build_text(raw, values, axis, seiban, zero_params)
     out = Path(out_dir) / filename(prefix, seiban, ext)
     write_text(out, newtext, fmt, eob)
     return out, missing, fmt
@@ -169,6 +175,52 @@ def product_axis_values(basic_text: str, product_text: str) -> tuple:
             and fanuc_param.looks_like_fanuc_prm(product_text)):
         return {}, {}
     return fanuc_param.diff_by_axis(basic_text, product_text)
+
+
+# 出荷するファイルでは0にしておく項目（実機で「ゼロで大丈夫」と確認）。
+#   1850 グリッドシフト     … 原点の実測補正。据付けごとに違うので持ち込まない
+#   1851 バックラッシ補正量  … 機械個体の測定値
+#   1852 早送り時のバックラッシ補正量
+# 番号は機種で違うことがあるので settings の "zero_individual_params" で変更できる。
+ZERO_INDIVIDUAL_PARAMS = ("1850", "1851", "1852")
+
+
+def individual_zero_rows(raw: str, params=None) -> list:
+    """0にすべき項目のうち、いま0でないものを [(番号, ラベル, 旧値)] で返す。
+
+    軸を限らず、そのファイルに入っている全軸を対象にする。作る軸だけ0にしても、
+    他の軸に前の機械の値が残ったまま出荷されてしまうため。
+    """
+    params = params or ZERO_INDIVIDUAL_PARAMS
+    if not fanuc_param.looks_like_fanuc_prm(raw):
+        return []
+    out = []
+    for num in params:
+        for line in str(raw).replace("\r", "\n").split("\n"):
+            if fanuc_param._norm_num(fanuc_param.param_number(line)) \
+                    != fanuc_param._norm_num(num):
+                continue
+            for (label, _t, value) in (fanuc_param.segments(line) or []):
+                try:
+                    if float(value) == 0.0:
+                        continue
+                except ValueError:
+                    continue
+                out.append((str(num), label, value))
+            break
+    return out
+
+
+def zero_individual(raw: str, params=None) -> tuple:
+    """グリッドシフト・バックラッシ補正を全軸0にする。
+
+    戻り値: (新テキスト, [(番号, ラベル, 旧値)])。0にした所だけが変わる。
+    """
+    rows = individual_zero_rows(raw, params)
+    text = raw
+    for num, label, _old in rows:
+        text, _ok = fanuc_param.set_value(text, num, "0", label or None)
+    return text, rows
 
 
 def with_servo_options(raw: str, axis, values: dict, *, zero_motor=False,
@@ -225,7 +277,7 @@ def product_change_values(basic_text: str, product_text: str) -> dict:
 
 
 def build_text_multi(raw: str, axis_values: dict, common: dict = None,
-                     seiban: str = "") -> tuple:
+                     seiban: str = "", zero_params=None) -> tuple:
     """BASIC raw に「複数軸ぶんの値」を入れた新テキストを返す（2軸テーブル用）。
 
     axis_values={軸番号: {番号:値}} を各軸へ、common={番号:値} を共通スロットへ適用。
@@ -252,18 +304,21 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
     cvals = resolve_product_values(raw, common, None)
     text, miss = fanuc_param.apply_common_values(text, cvals)
     missing += [(m, "") for m in miss]
+    if zero_params:
+        text, _z = zero_individual(text, zero_params)
     return text, missing, "fanuc"
 
 
 def create_file_multi(master_path, out_dir, axis_values: dict, common: dict = None,
                       *, prefix: str, seiban: str, ext: str = ".DAT",
-                      eob: str = None) -> tuple:
+                      eob: str = None, zero_params=None) -> tuple:
     """BASIC を元に、複数軸ぶんを入れた <頭文字><Seiban><拡張子> を作成する（2軸用）。
 
     戻り値: (出力Path, 反映できなかった [(番号, 軸), ...], 形式)。
     """
     raw = read_master(master_path)
-    newtext, missing, fmt = build_text_multi(raw, axis_values, common, seiban)
+    newtext, missing, fmt = build_text_multi(
+        raw, axis_values, common, seiban, zero_params)
     out = Path(out_dir) / filename(prefix, seiban, ext)
     write_text(out, newtext, fmt, eob)
     return out, missing, fmt
@@ -340,6 +395,12 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
             old = prm_format.param_value(doc, num) if doc else None
         rows.append((str(num), "" if old is None else str(old), str(newv)))
     return rows
+
+
+def preview_zero_rows(raw: str, params=None) -> list:
+    """0にする項目のプレビュー行 [(番号(軸), 旧値, "0")]。"""
+    return [(f"{num}({label})" if label else str(num), old, "0")
+            for num, label, old in individual_zero_rows(raw, params)]
 
 
 def detect_mode(raw: str, values: dict, axis: int, *, number="1815", bit=1,

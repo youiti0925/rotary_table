@@ -314,6 +314,11 @@ class TestParamValidate(unittest.TestCase):
     def test_flags_missing_percent(self):
         self.assertTrue(self._has(F_PRM.validate_prm("N01825Q1A1P3000"), "%"))
 
+    def test_cnc_id_header_is_accepted(self):
+        # 実機は "%(CNCID=…)" と、% の後ろに制御装置IDを付けて出すことがある
+        ok = "%(CNCID=3C7B5D01,F6914B1A)\nN01825Q1A1P3000\n%"
+        self.assertEqual(F_PRM.validate_prm(ok), [])
+
     def test_flags_semicolon(self):
         self.assertTrue(self._has(
             F_PRM.validate_prm("%\nN01825Q1A1P3000 ;\n%"), '";"'))

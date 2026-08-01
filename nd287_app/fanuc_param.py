@@ -83,7 +83,9 @@ def validate_prm(text: str, reference: str = "") -> list:
              if l.strip()]
     if not lines:
         return ["ファイルが空です"]
-    if lines[0].strip() != "%" or lines[-1].strip() != "%":
+    # 先頭・末尾は % で始まっていればよい。実機は "%(CNCID=3C7B5D01,…)" のように
+    # % の後ろに制御装置IDのコメントを付けて出すことがある（F24/F80 で確認）。
+    if not lines[0].strip().startswith("%") or not lines[-1].strip().startswith("%"):
         problems.append("先頭と末尾が % になっていません（FANUCの読取開始/終了記号）")
     if ";" in text:
         problems.append('";" は文字として書けません（EOBは改行）')

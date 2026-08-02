@@ -370,6 +370,13 @@ def validate(text: str, cfg: FanucConfig = None) -> list:
         problems.append("O番号（プログラム番号）の行がありません")
     if not any(re.search(r"\bM(30|99|02)\b", l) for l in stripped):
         problems.append("M30/M99（プログラム終わり）がありません")
+    # 途中の % は「読取終わり」。そこから先が読み込まれない
+    # （パラメータ側の実データ F35BASIC で実際に起きていた）
+    mid = [i for i, l in enumerate(stripped[1:-1], start=2) if l.strip().startswith("%")]
+    if mid:
+        problems.append(
+            f"途中に % があります（{len(mid)}箇所）。% は読取終わりの記号なので、"
+            "そこから先が読み込まれません")
     for i, line in enumerate(lines, 1):
         if not line.strip():
             continue

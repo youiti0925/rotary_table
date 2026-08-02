@@ -463,3 +463,25 @@ class TestCombinedSequence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMidFilePercentInProgram(unittest.TestCase):
+    """途中の % は読取終わり。そこから先が読み込まれない。
+
+    パラメータ側の実データ（F35BASIC）で実際に起きていたので、
+    プログラム側でも同じ検出をする。手編集で % を足すと起こり得る。
+    """
+
+    def test_detected(self):
+        probs = validate("%\nO0100\nG91G00Z10.\n%\nM30\n%")
+        self.assertTrue(any("途中に %" in p for p in probs), probs)
+
+    def test_normal_program_is_clean(self):
+        self.assertEqual(validate("%\nO0100\nG91G00Z10.\nM30\n%"), [])
+
+    def test_generated_program_has_none(self):
+        cfg = FanucConfig()
+        text = generate(cfg, rotary=True, wheel_pitch=90, wheel_start=0,
+                        wheel_end=360, worm_pitch=1.0, worm_range=2.0,
+                        include_repeat=False)
+        self.assertFalse(any("途中に %" in p for p in validate(text, cfg)))

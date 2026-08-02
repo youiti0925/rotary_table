@@ -289,56 +289,87 @@ def value_on_axis(text: str, number, axis_num):
     return None
 
 
-def apply_product_values(text: str, values: dict, axis_num) -> tuple:
-    """製品の値 {番号: 値} を BASIC の指定軸へ一括反映する。
+def _split_common_key(key) -> tuple:
+    """共通値の辞書キーを (番号, ラベル) にほどく。
 
-    戻り値: (新テキスト, 反映できなかった番号のリスト)。番号は BASIC に無いもの。
+    キーは (番号, ラベル) でも 番号 だけでもよい。後者はラベル不明として扱う。
+    """
+    if isinstance(key, tuple):
+        return key[0], (key[1] if len(key) > 1 else None)
+    return key, None
+
+
+def apply_product_values(text: str, values: dict, axis_num) -> tuple:
+    """製品の値を BASIC の指定軸へ一括反映する。
+
+    キーは 番号 でも (番号, ラベル) でもよい。ラベル付き（L2/S2 など軸でない
+    スロット）は、指定軸ではなく<b>そのラベルのスロット</b>へ書く。
+    軸ラベルは製品データの側で落としてある（別の軸へ入れ直せるようにするため）。
+    戻り値: (新テキスト, 反映できなかった番号のリスト)。
     """
     missing = []
-    for number, value in values.items():
+    for key, value in values.items():
         if value is None or str(value) == "":
             continue
-        text, ok = set_on_axis(text, number, value, axis_num)
+        number, label = _split_common_key(key)
+        if label:
+            text, ok = set_common(text, number, value, label)
+        else:
+            text, ok = set_on_axis(text, number, value, axis_num)
         if not ok:
-            missing.append(str(number))
+            missing.append(f"{number}({label})" if label else str(number))
     return text, missing
 
 
-def set_common(text: str, number, value) -> tuple:
-    """軸に属さない値(L1/S1/T1/無ラベル)だけを差し替える（A軸は触らない）。
+# 軸でないスロットの探索順。ラベルが分からないときだけ使う。
+COMMON_LABELS = ("L1", "S1", "T1", "")
 
-    2軸テーブルで「共通(系統)パラメータ」を、誤って片方の軸へ入れないための専用版。
-    フォールバックは「無ラベル」限定（None だと先頭のA軸に書いてしまう）。
+
+def set_common(text: str, number, value, label=None) -> tuple:
+    """軸に属さない値(L1/L2…/S1/S2…/T1/無ラベル)を差し替える（A軸は触らない）。
+
+    label を渡したら、そのスロットだけに書く。無ければ失敗を返す。
+    多系統・複数主軸の機械では L2/L3/L4・S2〜S6 に別の値が入っており、
+    ラベルを見ずに「最初に見つかったスロット」へ書くと、
+    第2系統向けの値が第1系統(L1)に入って元の設定を壊す。
+    label 省略時だけ従来どおり L1→S1→T1→無ラベル の順で探す。
     戻り値 (新テキスト, 成否)。
     """
-    for label in ("L1", "S1", "T1", ""):
-        new, ok = set_value(text, number, value, label)
+    if label:
+        return set_value(text, number, value, label)
+    for lab in COMMON_LABELS:
+        new, ok = set_value(text, number, value, lab)
         if ok:
             return new, True
     return text, False
 
 
-def common_value(text: str, number):
+def common_value(text: str, number, label=None):
     """set_common が実際に書き込むスロットの現在値（同じ探索順。無ければ None）。"""
-    for label in ("L1", "S1", "T1", ""):
-        v = get_value(text, number, label)
+    if label:
+        return get_value(text, number, label)
+    for lab in COMMON_LABELS:
+        v = get_value(text, number, lab)
         if v is not None:
             return v
     return None
 
 
 def apply_common_values(text: str, values: dict) -> tuple:
-    """共通値 {番号: 値} を BASIC の共通スロット(L1/S1/T1/無ラベル)へ反映する。
+    """共通値を BASIC の共通スロットへ反映する。
 
-    戻り値 (新テキスト, 反映できなかった番号のリスト)。
+    values のキーは {(番号, ラベル): 値}（推奨）または {番号: 値}。
+    ラベルがあればそのスロットだけに書く（第2系統の値を第1系統に入れない）。
+    戻り値 (新テキスト, 反映できなかった [番号 または "番号(ラベル)"] のリスト)。
     """
     missing = []
-    for number, value in values.items():
+    for key, value in values.items():
         if value is None or str(value) == "":
             continue
-        text, ok = set_common(text, number, value)
+        number, label = _split_common_key(key)
+        text, ok = set_common(text, number, value, label)
         if not ok:
-            missing.append(str(number))
+            missing.append(f"{number}({label})" if label else str(number))
     return text, missing
 
 
@@ -353,8 +384,9 @@ def diff_by_axis(master_text: str, product_text: str) -> tuple:
 
     2軸テーブルでは完成製品ファイルが傾斜軸・回転軸の両方を変更している。
     diff() は軸ラベルを保持するので、それを軸番号で振り分けて返す。
-    戻り値: (per_axis: {軸番号: {番号: 値}}, common: {番号: 値})。
-    値が None（製品側に無い番号）は除外する。
+    戻り値: (per_axis: {軸番号: {番号: 値}}, common: {(番号, ラベル): 値})。
+    common のキーにラベル(L1/L2/S1/S2…)を残すのは、多系統・複数主軸の機械で
+    第2系統向けの値を第1系統(L1)へ入れないため。値が None（製品側に無い番号）は除外。
     """
     per_axis, common = {}, {}
     for (number, label, _mv, ov) in diff(master_text, product_text):
@@ -362,7 +394,8 @@ def diff_by_axis(master_text: str, product_text: str) -> tuple:
             continue
         ax = axis_of_label(label)
         if ax is None:
-            common[number] = ov
+            # ラベル(L1/L2/S1/S2…)を残す。落とすと第2系統の値が第1系統へ入る。
+            common[(number, label or "")] = ov
         else:
             per_axis.setdefault(ax, {})[number] = ov
     return per_axis, common

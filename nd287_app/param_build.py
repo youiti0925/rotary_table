@@ -86,16 +86,21 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
     if not fanuc_param.looks_like_fanuc_prm(basic_text):
         return dict(values)
     out = {}
-    for num, val in values.items():
+    for key, val in values.items():
+        # キーは 番号 でも (番号, ラベル) でもよい。共通値はラベル付きで来る
+        num, label = fanuc_param._split_common_key(key)
         v = str(val).strip()
         if v.startswith("'"):
             v = v[1:].strip()
         if "*" in v:
-            cur = fanuc_param.get_value(basic_text, num, f"A{axis}") if axis else None
-            if cur is None:
-                cur = fanuc_param.get_value(basic_text, num)
+            if label:
+                cur = fanuc_param.get_value(basic_text, num, label)
+            else:
+                cur = fanuc_param.get_value(basic_text, num, f"A{axis}") if axis else None
+                if cur is None:
+                    cur = fanuc_param.get_value(basic_text, num)
             v = _merge_bits(v, cur or "")
-        out[num] = v
+        out[key] = v
     return out
 
 
@@ -112,11 +117,12 @@ def drop_zero_params(values: dict, zero_params) -> tuple:
         return dict(values or {}), {}
     want = {fanuc_param._norm_num(x) for x in zero_params}
     keep, dropped = {}, {}
-    for num, v in (values or {}).items():
+    for key, v in (values or {}).items():
+        num, _label = fanuc_param._split_common_key(key)
         if fanuc_param._norm_num(num) in want:
-            dropped[str(num)] = v
+            dropped[str(key)] = v
         else:
-            keep[num] = v
+            keep[key] = v
     return keep, dropped
 
 
@@ -284,15 +290,30 @@ def with_servo_options(raw: str, axis, values: dict, *, zero_motor=False,
 def product_change_values(basic_text: str, product_text: str) -> dict:
     """完成製品 .prm から「BASICへ入れる変更値 {番号:値}」を平坦に取り出す。
 
-    軸へ再ターゲット（別の軸へ入れ直す）できるよう、軸ラベルを落として番号→値で返す。
+    軸へ再ターゲット（別の軸へ入れ直す）できるよう、<b>軸ラベルだけ</b>を落とす。
+    L2/L3/S2… のような軸でないラベルは (番号, ラベル) のまま残す。落とすと
+    第2系統向けの値が第1系統(L1)へ入り、元の設定を壊す。
     FANUC N形式（完成製品）は BASIC との差分、ヘッダ＋CSV形式は全パラメータ値。
     かんたん作成（Seiban起点）で、製品の傾斜/回転ファイルを号機の割当軸へ入れるのに使う。
     """
     if fanuc_param.looks_like_fanuc_prm(product_text):
         if fanuc_param.looks_like_fanuc_prm(basic_text):
-            return {num: ov for (num, _l, _m, ov)
-                    in fanuc_param.diff(basic_text, product_text) if ov is not None}
-        return {num: v for (num, _l), v in fanuc_param.values_map(product_text).items()}
+            out = {}
+            for (num, lab, _m, ov) in fanuc_param.diff(basic_text, product_text):
+                if ov is None:
+                    continue
+                if lab and fanuc_param.axis_of_label(lab) is None:
+                    out[(num, lab)] = ov   # L2/S2 等はラベルを残す（別系統を壊さない）
+                else:
+                    out[num] = ov          # 軸は再ターゲットするので落とす
+            return out
+        out = {}
+        for (num, lab), v in fanuc_param.values_map(product_text).items():
+            if lab and fanuc_param.axis_of_label(lab) is None:
+                out[(num, lab)] = v
+            else:
+                out[num] = v
+        return out
     try:
         doc = prm_format.parse_prm(product_text)
         return {num: v for (num, v, _jp, _en) in prm_format.iter_params(doc) if v != ""}
@@ -367,11 +388,13 @@ def preview_rows_multi(raw: str, axis_values: dict, common: dict = None) -> list
             # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
             old = fanuc_param.value_on_axis(raw, num, ax)
             rows.append((str(num), ax, "" if old is None else str(old), str(newv)))
-    for num, newv in resolve_product_values(raw, common, None).items():
+    for key, newv in resolve_product_values(raw, common, None).items():
         if newv == "":
             continue
-        old = fanuc_param.common_value(raw, num)
-        rows.append((str(num), "", "" if old is None else str(old), str(newv)))
+        num, label = fanuc_param._split_common_key(key)
+        old = fanuc_param.common_value(raw, num, label)
+        rows.append((f"{num}({label})" if label else str(num), "",
+                     "" if old is None else str(old), str(newv)))
     return rows
 
 

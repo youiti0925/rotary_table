@@ -138,7 +138,8 @@ class TestMultiAxis(unittest.TestCase):
         product, _ = F.set_value(basic, "8130", "4", "L1")
         per_axis, common = B.product_axis_values(basic, product)
         self.assertEqual(per_axis, {})
-        self.assertEqual(common, {"08130": "4"})
+        # 共通値はラベル付きで返る（L2/S2 を L1 へ入れないため）
+        self.assertEqual(common, {("08130", "L1"): "4"})
         newtext, missing, _ = B.build_text_multi(basic, per_axis, common)
         self.assertEqual(missing, [])
         self.assertEqual(F.get_value(newtext, "8130", "L1"), "4")
@@ -650,3 +651,69 @@ class TestDropNumbersRobustness(unittest.TestCase):
     def test_none_list(self):
         _kept, removed = F_PRM.drop_numbers(self.TEXT, None)
         self.assertEqual(removed, [])
+
+
+class TestMultiPathLabels(unittest.TestCase):
+    """第2系統・第2主軸(L2/L3/L4, S2〜S6)の値を第1系統に書かない。
+
+    ラベルを落として番号だけにすると、書き込み側が L1→S1→T1→無ラベル の順で
+    「最初に見つかったスロット」に書くため、L2 向けの値が L1 に入り、
+    第1系統の設定（例 N03202 プログラム保護）が黙って壊れる。
+    実データ F18BASIC.DAT で再現した。
+    """
+
+    BASIC = ("%\nN03202Q1L1P01000000L2P00000000 \n"
+             "N00982Q1S1P0S2P0 \nN01825Q1A1P3000A4P3000\n%\n")
+
+    def _product(self, line_old, line_new):
+        return self.BASIC.replace(line_old, line_new)
+
+    def test_second_path_value_goes_to_l2(self):
+        prod = self._product("N03202Q1L1P01000000L2P00000000 ",
+                             "N03202Q1L1P01000000L2P10001111 ")
+        per_axis, common = B.product_axis_values(self.BASIC, prod)
+        self.assertEqual(common, {("03202", "L2"): "10001111"})
+        new, missing, _f = B.build_text_multi(self.BASIC, per_axis, common)
+        self.assertEqual(F_PRM.get_value(new, "3202", "L1"), "01000000")  # 第1系統は無事
+        self.assertEqual(F_PRM.get_value(new, "3202", "L2"), "10001111")
+        self.assertEqual(missing, [])
+
+    def test_second_spindle_value_goes_to_s2(self):
+        prod = self._product("N00982Q1S1P0S2P0 ", "N00982Q1S1P0S2P1234 ")
+        per_axis, common = B.product_axis_values(self.BASIC, prod)
+        new, _m, _f = B.build_text_multi(self.BASIC, per_axis, common)
+        self.assertEqual(F_PRM.get_value(new, "982", "S1"), "0")
+        self.assertEqual(F_PRM.get_value(new, "982", "S2"), "1234")
+
+    def test_single_axis_path_too(self):
+        prod = self._product("N03202Q1L1P01000000L2P00000000 ",
+                             "N03202Q1L1P01000000L2P10001111 ")
+        vals = B.product_change_values(self.BASIC, prod)
+        self.assertEqual(vals, {("03202", "L2"): "10001111"})
+        new, missing, _f = B.build_text(self.BASIC, vals, 4)
+        self.assertEqual(F_PRM.get_value(new, "3202", "L1"), "01000000")
+        self.assertEqual(F_PRM.get_value(new, "3202", "L2"), "10001111")
+        self.assertEqual(missing, [])
+
+    def test_axis_labels_are_still_dropped_for_retargeting(self):
+        # 軸ラベルは落とす（別の軸へ入れ直せるようにするため）
+        prod = self._product("N01825Q1A1P3000A4P3000", "N01825Q1A1P9999A4P3000")
+        vals = B.product_change_values(self.BASIC, prod)
+        self.assertEqual(vals, {"01825": "9999"})
+        new, _m, _f = B.build_text(self.BASIC, vals, 4)     # A4 へ入れ直す
+        self.assertEqual(F_PRM.get_value(new, "1825", "A4"), "9999")
+        self.assertEqual(F_PRM.get_value(new, "1825", "A1"), "3000")
+
+    def test_missing_label_is_reported(self):
+        # そのラベルのスロットが無ければ、黙って別の場所へ書かず未反映にする
+        new, missing = F_PRM.apply_product_values(self.BASIC, {("03202", "L4"): "1"}, 4)
+        self.assertEqual(missing, ["03202(L4)"])
+        self.assertEqual(F_PRM.get_value(new, "3202", "L1"), "01000000")
+
+    def test_preview_shows_the_label(self):
+        prod = self._product("N03202Q1L1P01000000L2P00000000 ",
+                             "N03202Q1L1P01000000L2P10001111 ")
+        per_axis, common = B.product_axis_values(self.BASIC, prod)
+        rows = B.preview_rows_multi(self.BASIC, per_axis, common)
+        self.assertTrue(any(r[0] == "03202(L2)" and r[2] == "00000000"
+                            and r[3] == "10001111" for r in rows), rows)

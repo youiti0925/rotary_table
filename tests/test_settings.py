@@ -35,12 +35,42 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(loaded["save_root"], r"D:\測定データ")
 
     def test_broken_file_returns_defaults(self):
+        """壊れていても既定値で起動できる。ただし黙って戻さない。
+
+        黙って既定値にすると、次の保存で本番の設定（保存先のK:ドライブ・
+        BASICの場所・FTPのパスワード等）が上書きで消える。
+        壊れたファイルは名前を変えて残し、画面に出すための印を付ける。
+        """
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "settings.json")
             with open(path, "w") as f:
                 f.write("{ this is not json")
             s = load_settings(path)
-        self.assertEqual(s, DEFAULTS)
+            broken = [f for f in os.listdir(d) if ".broken-" in f]
+            self.assertEqual(len(broken), 1)          # 退避してある
+            self.assertFalse(os.path.exists(path))    # 壊れたまま残さない
+        self.assertIn("_load_error", s)
+        self.assertEqual({k: v for k, v in s.items() if not k.startswith("_")},
+                         DEFAULTS)
+
+    def test_save_keeps_one_backup_and_is_atomic(self):
+        from nd287_app.settings import save_settings
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            save_settings({"a": 1}, path)
+            save_settings({"a": 2}, path)
+            self.assertEqual(json.loads(open(path).read())["a"], 2)
+            bak = path + ".bak"
+            self.assertTrue(os.path.exists(bak))       # 直前の1世代が残る
+            self.assertEqual(json.loads(open(bak).read())["a"], 1)
+            self.assertFalse(os.path.exists(path + ".tmp"))   # 書きかけを残さない
+
+    def test_save_does_not_write_internal_marks(self):
+        from nd287_app.settings import save_settings
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            save_settings({"a": 1, "_load_error": "x"}, path)
+            self.assertNotIn("_load_error", json.loads(open(path).read()))
 
     def test_partial_file_fills_defaults(self):
         with tempfile.TemporaryDirectory() as d:

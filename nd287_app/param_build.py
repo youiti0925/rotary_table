@@ -123,7 +123,7 @@ def drop_params(values: dict, params) -> tuple:
     for key, v in (values or {}).items():
         num, _label = fanuc_param._split_common_key(key)
         if fanuc_param._norm_num(num) in want:
-            dropped[str(key)] = v
+            dropped[key] = v          # キーの形（番号 / (番号,ラベル)）を保つ
         else:
             keep[key] = v
     return keep, dropped
@@ -151,7 +151,7 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
     全軸0にする。出荷するファイルに前の機械の実測値を残さないため。
     soft_limit は 'apply'(既定・客先どおり) / 'skip'(入れない) / 'disable'(無効化)。
     """
-    soft_params = soft_params or SOFT_LIMIT_PARAMS
+    soft_params = _soft_params(soft_params)
     if soft_mode(soft_limit) != "apply":
         # 客先パラメータのソフトリミットを入れない（検査中は邪魔になることがある）
         values, _s = drop_params(values, soft_params)
@@ -247,7 +247,10 @@ CARD_FREE_WARN = 2 * 1024 * 1024   # 空きがこれ未満なら知らせる
 
 
 def _fmt_size(n) -> str:
-    n = float(n or 0)
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        n = 0.0
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
             return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
@@ -262,7 +265,14 @@ def folder_status(out_dir, need: int = 0, *, file_warn: int = CARD_FILE_WARN,
     <b>制御装置の画面にファイルが出てこない</b>（実機で確認）。作る前に知らせる。
     """
     import shutil
-    p = Path(out_dir) if out_dir else None
+    try:
+        need = int(need or 0)
+    except (TypeError, ValueError):
+        need = 0            # 呼び側が変な値を渡しても止まらない
+    try:
+        p = Path(out_dir) if out_dir else None
+    except TypeError:
+        return "", []
     if not p or not p.is_dir():
         return "", []
     try:
@@ -299,10 +309,13 @@ def check_received(path, reference: str = "") -> tuple:
     実データの F35BASIC は途中に % があって258行が読まれない状態だったが、
     誰も気づかないまま置かれていた。FTPで受け取った瞬間にここで知らせる。
     """
-    p = Path(path)
+    try:
+        p = Path(path)
+    except TypeError:
+        return "", ["ファイルの場所が正しくありません"]
     try:
         data = p.read_bytes()
-    except OSError as e:
+    except (OSError, TypeError, ValueError) as e:
         return "", [f"読めません: {e}"]
     if not data.strip():
         return "", ["中身が空です"]
@@ -411,6 +424,14 @@ SOFT_LIMIT_OFF = {"1320": "-1", "1321": "1"}
 SOFT_LIMIT_MODES = ("apply", "skip", "disable")
 
 
+def _soft_params(params):
+    """ソフトリミットの番号。None は既定、空リストは「対象なし」。
+
+    zero_individual_params と同じ扱いにそろえる（空＝無効。空で既定へ戻さない）。
+    """
+    return SOFT_LIMIT_PARAMS if params is None else tuple(params)
+
+
 def soft_mode(mode) -> str:
     """ソフトリミットの指定を 'apply'/'skip'/'disable' に正規化する（不明は apply）。"""
     m = str(mode or "").strip().lower()
@@ -462,7 +483,7 @@ def soft_limit_rows(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> list:
     if not axes or not fanuc_param.looks_like_fanuc_prm(raw):
         return []
     out = []
-    for num in (params or SOFT_LIMIT_PARAMS):
+    for num in _soft_params(params):
         for ax in axes:
             label = f"A{ax}"
             cur = fanuc_param.get_value(raw, num, label)
@@ -486,17 +507,22 @@ def disable_soft_limit(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> tuple:
 
 def soft_limit_preview(raw: str, values: dict, axes, mode,
                        params=SOFT_LIMIT_PARAMS) -> list:
-    """作成前プレビューに足す行 [(番号, ラベル, 旧値, 新値)]。
+    """作成前プレビューに足す行 [(番号, ラベル, 旧値, 新値, 変わるか)]。
 
     skip  … 客先値を入れないので「そのまま」と出す（黙って落とさない）
     disable … 実際に書く値を出す
+
+    5つ目の「変わるか」を返すのは、画面が<b>新値の文字列を見て</b>件数を数えて
+    いたため。「そのまま（入れない）」も「変わった」と数えられ、全5件中5件が
+    変更と出ていた（実際に変わるのは1件）。文言を変えるたびに壊れる作りなので、
+    数えるための旗をこちらで持つ。
     """
     mode = soft_mode(mode)
     if mode == "apply":
         return []
     if mode == "disable":
-        return soft_limit_rows(raw, axes, params)
-    _keep, dropped = drop_params(values, params or SOFT_LIMIT_PARAMS)
+        return [(n, l, o, v, True) for (n, l, o, v) in soft_limit_rows(raw, axes, params)]
+    _keep, dropped = drop_params(values, _soft_params(params))
     rows = []
     for key in sorted(dropped, key=str):
         num, label = fanuc_param._split_common_key(key)
@@ -504,7 +530,7 @@ def soft_limit_preview(raw: str, values: dict, axes, mode,
             lab = label or (f"A{ax}" if ax else None)
             cur = fanuc_param.get_value(raw, num, lab) if lab else None
             rows.append((str(num), lab or "", "" if cur is None else str(cur),
-                         "そのまま（入れない）"))
+                         "そのまま（入れない）", False))
     return rows
 
 
@@ -589,7 +615,7 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
     """
     axis_values = axis_values or {}
     common = common or {}
-    soft_params = soft_params or SOFT_LIMIT_PARAMS
+    soft_params = _soft_params(soft_params)
     skip_soft = soft_mode(soft_limit) != "apply"
     if not fanuc_param.looks_like_fanuc_prm(raw):
         # ヘッダ＋CSV形式は軸が無い。全値を束ねて従来処理（軸=0）にフォールバック
@@ -649,12 +675,20 @@ def preview_rows_multi(raw: str, axis_values: dict, common: dict = None) -> list
     rows = []
     for ax in sorted(axis_values):
         vals = resolve_product_values(raw, axis_values[ax], ax)  # 表示も実際に書く値で
-        for num, newv in vals.items():
+        for key, newv in vals.items():
             if newv == "":
                 continue
-            # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
-            old = fanuc_param.value_on_axis(raw, num, ax)
-            rows.append((str(num), ax, "" if old is None else str(old), str(newv)))
+            # キーは 番号 でも (番号, ラベル) でもよい。ほどかずに使うと
+            # 番号欄に "('01800', 'L1')" と出て旧値が空欄になる（実データで38%）
+            num, label = fanuc_param._split_common_key(key)
+            if label:
+                old = fanuc_param.common_value(raw, num, label)
+                shown = f"{num}({label})"
+            else:
+                # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
+                old = fanuc_param.value_on_axis(raw, num, ax)
+                shown = str(num)
+            rows.append((shown, ax, "" if old is None else str(old), str(newv)))
     for key, newv in resolve_product_values(raw, common, None).items():
         if newv == "":
             continue
@@ -701,15 +735,21 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
         except Exception:
             doc = None
     rows = []
-    for num, newv in values.items():
+    for key, newv in values.items():
         if newv == "":
             continue
-        if is_fanuc:
+        num, label = fanuc_param._split_common_key(key)   # ラベル付きキーもほどく
+        if is_fanuc and label:
+            old = fanuc_param.common_value(raw, num, label)
+            shown = f"{num}({label})"
+        elif is_fanuc:
             # 実際に書き込むスロットの現在値（別軸の値を旧値として出さない）
             old = fanuc_param.value_on_axis(raw, num, axis)
+            shown = str(num)
         else:
             old = prm_format.param_value(doc, num) if doc else None
-        rows.append((str(num), "" if old is None else str(old), str(newv)))
+            shown = str(num)
+        rows.append((shown, "" if old is None else str(old), str(newv)))
     return rows
 
 
@@ -717,6 +757,94 @@ def preview_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
     """0にする項目のプレビュー行 [(番号(軸), 旧値, "0")]。"""
     return [(f"{num}({label})" if label else str(num), old, "0")
             for num, label, old in individual_zero_rows(raw, params)]
+
+
+# プレビュー行の区分（画面で色分け・件数の数え方を変えるために使う）
+KIND_PRODUCT = "製品値"
+KIND_ZERO = "0にする"
+KIND_SOFT = "ソフトリミット"
+KIND_MISSING = "BASICに無い"
+
+
+def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = None,
+            common: dict = None, seiban: str = "", zero_params=None,
+            soft_limit=None, soft_params=None, eob=None, reference: str = "") -> dict:
+    """作成の中身を1回だけ決める。<b>プレビューと書き込みで必ず同じものを使う</b>。
+
+    これを作った理由: 同じ処理が作成画面5経路にコピーされていて、
+    片方だけ直す事故が実際に2回起きた（0化のプレビューがDBの2経路だけ抜ける、
+    ソフトリミットの除外が5経路すべてで抜ける）。プレビューが「108.0を書く」と
+    言いながら1バイトも書かない、という一番まずい状態になっていた。
+
+    戻り値 dict:
+      rows     … プレビュー行 [(番号, 軸, 旧値, 新値, 区分, 変わるか)]
+      newtext / missing / fmt … 書き込む内容
+      applied / total … 反映できた数（実際に書く値で数える）
+      need     … 出力の実バイト数（カードの空き確認に使う）
+      problems … 書く前の点検（validate_prm）
+      values / axis_values / common … 実際に書く値（除外・解決済み）
+    """
+    single = axis_values is None
+    axis_values = dict(axis_values or ({} if values is None else {axis: values}))
+    common = dict(common or {})
+    zero_params = tuple(zero_params or ())
+    sparams = _soft_params(soft_params)
+    mode = soft_mode(soft_limit)
+    axes = sorted(a for a in axis_values if a)
+    is_fanuc = fanuc_param.looks_like_fanuc_prm(raw)
+
+    rows, out_axis, dropped_soft = [], {}, {}
+    for ax, vals in axis_values.items():
+        vals = resolve_product_values(raw, vals, ax) if is_fanuc else dict(vals or {})
+        if mode != "apply":
+            vals, dsoft = drop_params(vals, sparams)
+            dropped_soft.update(dsoft)
+        if is_fanuc:
+            vals, _dz = drop_zero_params(vals, zero_params)
+        out_axis[ax] = vals
+    out_common = resolve_product_values(raw, common, None) if is_fanuc else dict(common)
+    if mode != "apply":
+        out_common, dsoft = drop_params(out_common, sparams)
+        dropped_soft.update(dsoft)
+    if is_fanuc:
+        out_common, _dz = drop_zero_params(out_common, zero_params)
+
+    # --- ここから下は「実際に書く値」だけを見る（画面と中身がずれない） ---
+    if single:
+        ax = next(iter(out_axis), axis)
+        for (num, old, new) in preview_rows(raw, out_axis.get(ax, {}), ax):
+            kind = KIND_MISSING if (is_fanuc and old == "") else KIND_PRODUCT
+            rows.append((num, "", old, new, kind, old != new))
+    else:
+        for (num, a, old, new) in preview_rows_multi(raw, out_axis, out_common):
+            kind = KIND_MISSING if (is_fanuc and old == "") else KIND_PRODUCT
+            rows.append((num, a, old, new, kind, old != new))
+    for (num, old, new) in preview_zero_rows(raw, zero_params):
+        rows.append((num, "全軸", old, new, KIND_ZERO, old != new))
+    for (num, lab, old, new, changed) in soft_limit_preview(
+            raw, dropped_soft, axes or ([axis] if axis else []), mode, sparams):
+        rows.append((f"{num}({lab})" if lab else num, lab, old, new,
+                     KIND_SOFT, changed))
+
+    if single:
+        ax = next(iter(out_axis), axis)
+        newtext, missing, fmt = build_text(raw, out_axis.get(ax, {}), ax, seiban,
+                                           zero_params, mode, sparams)
+        total = len(out_axis.get(ax, {}))
+        miss_n = len(missing)
+    else:
+        newtext, missing, fmt = build_text_multi(raw, out_axis, out_common, seiban,
+                                                 zero_params, mode, sparams)
+        total = sum(len(v) for v in out_axis.values()) + len(out_common)
+        miss_n = len(missing)
+    need = (len(fanuc_param.prm_bytes(newtext, eob)) if fmt == "fanuc"
+            else len(newtext.encode("cp932", "replace")))
+    problems = fanuc_param.validate_prm(newtext, reference) if fmt == "fanuc" else []
+    return {"rows": rows, "newtext": newtext, "missing": missing, "fmt": fmt,
+            "applied": total - miss_n, "total": total, "need": need,
+            "problems": problems, "values": out_axis.get(axis, {}),
+            "axis_values": out_axis, "common": out_common,
+            "dropped_soft": dropped_soft}
 
 
 def detect_mode(raw: str, values: dict, axis: int, *, number="1815", bit=1,

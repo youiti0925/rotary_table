@@ -690,11 +690,12 @@ class TestSoftLimit(unittest.TestCase):
         self.assertEqual(F_PRM.get_value(new, "1825", "A4"), "2500")
 
     def test_preview_shows_what_will_happen(self):
+        # 5つ目は「実際に変わるか」。画面はこの旗で数える（文字列比較をやめた）
         rows = B.soft_limit_preview(self.RAW, dict(self.CUST), [4], "skip")
-        self.assertIn(("01320", "A4", "-1.0", "そのまま（入れない）"), rows)
+        self.assertIn(("01320", "A4", "-1.0", "そのまま（入れない）", False), rows)
         done, _m, _f = B.build_text(self.RAW, dict(self.CUST), 4)
         rows = B.soft_limit_preview(done, {}, [4], "disable")
-        self.assertIn(("1320", "A4", "-100.0", "-1.0"), rows)
+        self.assertIn(("1320", "A4", "-100.0", "-1.0", True), rows)
 
     def test_preview_empty_when_applying(self):
         self.assertEqual(B.soft_limit_preview(self.RAW, dict(self.CUST), [4],

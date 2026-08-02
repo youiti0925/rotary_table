@@ -400,6 +400,12 @@ class SettingsDialog(QtWidgets.QDialog):
         outer = QtWidgets.QVBoxLayout(self)
         outer.addLayout(columns)
         outer.addWidget(buttons)
+        # 文字サイズを大きくすると画面からはみ出し、OK/キャンセルが押せなくなる。
+        # ★この画面で文字サイズを変えるので、押せなくなると元に戻せなくなる。
+        # 中身をスクロールへ入れ、ボタン列だけ外に残す。
+        wrap_long_labels(self)
+        wrap_scrollable(self, keep_bottom=1)
+        fit_to_screen(self, 900, 640)
 
     def _make_file_row(self, value, title):
         """CSVファイルパス用の「入力欄＋参照...」行を作る。
@@ -665,7 +671,46 @@ def wrap_long_labels(widget, min_chars=30):
         if not lab.wordWrap() and len(lab.text()) >= min_chars:
             lab.setWordWrap(True)
             n += 1
+    # チェックボックスは折り返せない（Qtの仕様）ので、長いものは
+    # かっこ書きの説明をツールチップへ送って短くする。放っておくと
+    # 1つで 980px を要求し、文字を大きくしたときに画面をはみ出す。
+    for box in widget.findChildren(QtWidgets.QAbstractButton):
+        if isinstance(box, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+            continue                       # ボタンは横スクロールで面倒を見る
+        text = box.text()
+        if len(text) < min_chars:
+            continue
+        head = text
+        while len(head) >= min_chars:
+            cut = re.sub(r"（[^（）]*）\s*$", "", head).strip()
+            if cut == head or not cut:
+                break
+            head = cut
+        if head == text:
+            continue
+        box.setText(head)
+        tip = box.toolTip()
+        box.setToolTip(text if not tip else f"{text}\n\n{tip}")
+        n += 1
     return n
+
+
+def hscroll_buttons(row):
+    """ボタン列を横スクロールに入れて、幅を要求させないようにする。
+
+    ボタンが多い画面は、文字を大きくすると横に並びきらず、
+    ダイアログごと画面をはみ出して端のボタンが押せなくなる。
+    """
+    box = QtWidgets.QWidget()
+    box.setLayout(row)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    scroll.setWidget(box)
+    scroll.setMinimumWidth(280)
+    scroll.setFixedHeight(box.sizeHint().height() + 4)
+    return scroll
 
 
 def wrap_scrollable(dialog, keep_bottom=0):
@@ -1408,6 +1453,187 @@ class ParamLogDialog(QtWidgets.QDialog):
         v.addLayout(row)
 
 
+# --- BASIC とパラメータの点検（作成画面5経路で共通に使う）------------------
+# 以前は ParamDialog のメソッドだったため、かんたん作成とパラメータDBからは
+# 一度も呼ばれていなかった（日常の入口はかんたん作成なので、
+# 「途中に %」「実機に無い番号」がまったく警告されていなかった）。
+_LAST_DROPPED = []      # confirm_prm が除いた番号（呼び側がログに使う）
+
+
+def reference_backup(settings, master_path=None):
+    """番号照合に使う参照を (テキスト, 出どころの説明) で返す。無ければ ("", "")。
+
+    探す順:
+      1. 選んだBASIC自体が実機のものなら、それが実機のバックアップそのもの
+         （番号は定義上一致するので照合は不要）
+      2. 同じ号機の実機ファイルが同じフォルダにあれば それ
+         （例: F23BASIC.prm を選んだとき隣の F23BASIC.DAT）
+      3. 同じ号機の実機が無い（PC側のBASICしか無い）とき: フォルダにある
+         実機BASIC全部の「番号の和集合」。どの実機も持っていない番号だけが
+         引っかかるので、号機ごとの差でむやみに警告しない
+      4. 設定の「マスタ/バックアップ」
+    """
+    if master_path:
+        try:
+            p = Path(master_path)
+            raw = p.read_bytes()
+            if param_origin.classify(raw)["verdict"] in ("machine", "converted"):
+                return "", ""        # 実機そのもの＝照合する相手が要らない
+            unit = re.match(r"[A-Za-z]*\d+", p.stem)
+            if unit:
+                for sib in sorted(p.parent.iterdir()):
+                    if sib == p or not sib.is_file():
+                        continue
+                    if not sib.stem.upper().startswith(unit.group(0).upper()):
+                        continue
+                    if param_origin.classify(sib.read_bytes())["verdict"] in (
+                            "machine", "converted"):
+                        return (sib.read_bytes().decode("cp932", errors="replace"),
+                                f"同じ号機の実機 {sib.name}")
+            # 同じ号機の実機が無い＝PC側しか無い場合
+            text = raw.decode("cp932", errors="replace")
+            ref, used = param_build.machine_reference(p.parent, like=text,
+                                                      exclude=p)
+            if ref:
+                return ref, (f"フォルダの実機BASIC {len(used)}本の番号を合わせたもの"
+                             f"（{', '.join(used[:3])}{' ほか' if len(used) > 3 else ''}）")
+        except Exception:
+            pass
+    path = str((settings or {}).get("param_master_backup") or "").strip()
+    if not path:
+        return "", ""
+    try:
+        return (Path(path).read_bytes().decode("cp932", errors="replace"),
+                f"設定のマスタ/バックアップ {Path(path).name}")
+    except Exception:
+        return "", ""
+
+def check_basic(parent, settings, master_path):
+    """選んだBASICが制御装置向きかを見て、問題があれば確認を取る。
+
+    BASICは元データなので、これ自体を機械へ入れるわけではない。見るのは
+    「そこから作る製品ファイルが読めるか」に効く点だけ:
+      ・実機が出したものか（PC製は、その制御装置に無い番号が混じることがある）
+      ・実機のバックアップと番号がずれていないか
+    区切り(EOB)はアプリが出力時に実機の形へそろえるので、ここでは問わない。
+    """
+    try:
+        data = Path(master_path).read_bytes()
+    except Exception:
+        return True
+    info = param_origin.classify(data)
+    text = data.decode("cp932", errors="replace")
+    problems = []
+    # その機械の個体データ（原点・グリッドシフト）が入っていないか。
+    # 仕様が同じ号機でも原点は据付けごとに違うので、流用してはいけない。
+    # 号機マスタの容量と、ファイルのアンプ最大電流が合っているか。
+    # 合わなければ「その号機のファイルではない」か「マスタが古い」。
+    unit = param_origin.unit_of(Path(master_path).name)
+    # 号機マスタは画面が持っている（持たない画面もあるので getattr で受ける）
+    known = getattr(parent, "_controllers", None) or []
+    ctl = next((c for c in known
+                if str(c.unit).strip() == unit), None) if unit else None
+    cap_ng = controllers.check_capacity_match(
+        text, ctl, (settings or {}).get("amp_current_map"))
+    if cap_ng:
+        problems.append("号機マスタの容量と合いません（" + " ／ ".join(cap_ng)
+                        + "）。実機のファイルが正ならマスタが古いので、"
+                          "制御装置マスタの「BASICに合わせる…」で直せます")
+    # 個体データ（原点・グリッドシフト）。作成時に0にする設定なら、
+    # そちらで直るものは警告しない（自動で直すものを毎回聞かない）。
+    indiv = fanuc_param.individual_data(text)
+    getzp = getattr(parent, "_zero_params", None)
+    zp = (getzp() if callable(getzp) else zero_params_for(settings)) or ()
+    if zp:
+        zero_nums = {fanuc_param._norm_num(x) for x in zp}
+        indiv = [x for x in indiv
+                 if not any(f"N{n}" in x for n in zero_nums)]
+    if indiv:
+        problems.append(
+            "このBASICには機械の個体データが入っています（"
+            + " ／ ".join(indiv)
+            + "）。別の号機に使うと原点がずれます")
+    if info["verdict"] == "pc":
+        problems.append(
+            f"このBASICはPCで作られたものです（{info['reasons'][0]}）。"
+            "実機が出したバックアップを使う方が確実です")
+    ref, how = reference_backup(settings, master_path)
+    if ref:
+        extra = fanuc_param.unknown_numbers(text, ref)
+        if extra:
+            problems.append(
+                f"実機に無い番号が {len(extra)}個 あります"
+                f"（N{extra[0]:05d}〜N{extra[-1]:05d}／照合元: {how}）。"
+                "作成のときに除くこともできます")
+    problems += [p for p in fanuc_param.validate_prm(text)
+                 if "実機のバックアップに無い" not in p]
+    if not problems:
+        return True
+    return QtWidgets.QMessageBox.question(
+        parent, "BASICの点検",
+        f"{Path(master_path).name} に気になる点があります:\n\n・"
+        + "\n・".join(problems[:6])
+        + "\n\nこのBASICで作成を続けますか？",
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+
+def confirm_prm(parent, settings, text, fmt, fname, master_path=""):
+    """書き込む前に点検する。戻り値は「書き出すテキスト」、中止なら None。
+
+    実機に無い番号が見つかったら、その場で除いて作れるようにする。
+    実機のバックアップが手元に無く、PC側のBASICしか無くても、
+    制御装置が取り込めるファイルを作れるようにするため。
+    除くのは「フォルダのどの実機BASICにも無い番号」だけなので、
+    その制御装置が持っている番号を落とすことはない。
+    """
+    if fmt != "fanuc":
+        return text
+    ref, how = reference_backup(settings, master_path)
+    problems = fanuc_param.validate_prm(text, ref)
+    if not problems:
+        return text
+    extra = fanuc_param.unknown_numbers(text, ref) if ref else []
+    msg = (f"{fname} に、制御装置が取り込めない可能性のある点があります:\n\n・"
+           + "\n・".join(problems[:6]))
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle("パラメータの点検")
+    box.setIcon(QtWidgets.QMessageBox.Warning)
+    if extra:
+        box.setText(msg + f"\n\n照合元: {how}")
+        b_drop = box.addButton(f"実機に無い{len(extra)}個を除いて作成",
+                               QtWidgets.QMessageBox.AcceptRole)
+        b_keep = box.addButton("そのまま作成", QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(b_drop)
+        box.exec()
+        if box.clickedButton() is b_drop:
+            kept, removed = fanuc_param.drop_numbers(text, extra)
+            _LAST_DROPPED[:] = removed
+            return kept
+        return text if box.clickedButton() is b_keep else None
+    box.setText(msg + "\n\nこのまま作成しますか？")
+    box.addButton("作成", QtWidgets.QMessageBox.AcceptRole)
+    box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
+    box.exec()
+    return text if box.buttonRole(box.clickedButton()) == \
+        QtWidgets.QMessageBox.AcceptRole else None
+
+
+def _preview_row(r):
+    """プレビュー行を (番号, 軸, 旧値, 新値, 区分, 変わるか) にそろえる。
+
+    古い3列・4列の形も受け取れるようにして、呼び側を一度に直さなくてよくする。
+    「変わるか」は新値の文字列比較ではなく旗で持つ（文言を変えると壊れるため）。
+    """
+    if len(r) >= 6:
+        return (str(r[0]), r[1], str(r[2]), str(r[3]), r[4], bool(r[5]))
+    if len(r) == 4:
+        num, axis, old, new = r[0], r[1], str(r[2]), str(r[3])
+    else:
+        num, axis, old, new = r[0], "", str(r[1]), str(r[2])
+    return (str(num), axis, old, new, param_build.KIND_PRODUCT, old != new)
+
+
 class ParamPreviewDialog(QtWidgets.QDialog):
     """作成前プレビュー: BASIC の旧値 → これから書き込む新値 を一覧で確認する。
 
@@ -1429,35 +1655,49 @@ class ParamPreviewDialog(QtWidgets.QDialog):
             w.setStyleSheet("background:#fef2f2; color:#b91c1c; padding:6px; "
                             "border:1px solid #fecaca; border-radius:4px;")
             v.addWidget(w)
-        # rows は (番号, 旧, 新) か (番号, 軸, 旧, 新)。軸つき=2軸テーブルの両軸表示
-        has_axis = bool(rows) and len(rows[0]) == 4
-        norm = [(r[0], r[1], r[2], r[3]) if has_axis else (r[0], "", r[1], r[2])
-                for r in rows]
-        changed = sum(1 for (_n, _a, o, nw) in norm if o != nw)
+        # rows は (番号, 旧, 新) / (番号, 軸, 旧, 新) /
+        #        (番号, 軸, 旧, 新, 区分, 変わるか)  ← param_build.prepare の形
+        norm = [_preview_row(r) for r in rows]
+        changed = sum(1 for r in norm if r[5])
+        missing = sum(1 for r in norm if r[4] == param_build.KIND_MISSING)
+        note2 = ""
+        if missing:
+            # 「BASICにその番号が無い」は読込失敗の原因になった条件そのもの。
+            # ふつうの変更行と同じ見た目で埋もれさせない
+            note2 = f"\nうち {missing} 件は BASIC にその番号がありません（要確認）。"
         head = QtWidgets.QLabel(
             (subtitle + "\n" if subtitle else "")
-            + f"全 {len(norm)} 件中 {changed} 件が BASIC と異なります。"
-              "内容を確認して『作成』を押してください。"
+            + f"全 {len(norm)} 件中 {changed} 件が BASIC と変わります。"
+              "内容を確認して『作成』を押してください。" + note2
             + ("\n" + note if note else ""))
         head.setWordWrap(True)
         v.addWidget(head)
-        cols = ["番号", "軸", "旧値(BASIC)", "新値"] if has_axis else ["番号", "旧値(BASIC)", "新値"]
+        cols = ["番号", "軸", "区分", "旧値(BASIC)", "新値"]
         t = QtWidgets.QTableWidget(len(norm), len(cols))
         t.setHorizontalHeaderLabels(cols)
         t.verticalHeader().setVisible(False)
         t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        t.horizontalHeader().setStretchLastSection(True)
-        for i, (num, axis, old, new) in enumerate(norm):
-            cells = (num, axis, old, new) if has_axis else (num, old, new)
-            newcol = len(cells) - 1
-            for j, text in enumerate(cells):
+        colors = {param_build.KIND_MISSING: "#b91c1c",   # BASICに無い＝いちばん危ない
+                  param_build.KIND_ZERO: "#b45309",      # 0にする（個体データの消去）
+                  param_build.KIND_SOFT: "#1d4ed8"}      # ソフトリミット
+        for i, (num, axis, old, new, kind, is_chg) in enumerate(norm):
+            for j, text in enumerate((num, str(axis), kind, old, new)):
                 it = QtWidgets.QTableWidgetItem(text)
-                if old != new and j == newcol:
-                    it.setForeground(QtGui.QBrush(QtGui.QColor("#dc2626")))
+                color = colors.get(kind)
+                if color and j in (2, 4):
+                    it.setForeground(QtGui.QBrush(QtGui.QColor(color)))
+                elif not is_chg:
+                    it.setForeground(QtGui.QBrush(QtGui.QColor("#9ca3af")))  # 変わらない行
                 t.setItem(i, j, it)
         t.resizeColumnsToContents()
-        t.horizontalHeader().setStretchLastSection(True)
         v.addWidget(t, 1)
+        legend = QtWidgets.QLabel(
+            f"<span style='color:#b91c1c'>■</span> {param_build.KIND_MISSING}"
+            f"　<span style='color:#b45309'>■</span> {param_build.KIND_ZERO}"
+            f"　<span style='color:#1d4ed8'>■</span> {param_build.KIND_SOFT}"
+            f"　<span style='color:#9ca3af'>■</span> 変わらない行")
+        legend.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(legend)
         bb = QtWidgets.QDialogButtonBox()
         ok = bb.addButton("作成", QtWidgets.QDialogButtonBox.AcceptRole)
         ok.setObjectName("primary")
@@ -1559,6 +1799,13 @@ class FtpServerDialog(QtWidgets.QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
         wrap_long_labels(self)
+        wrap_scrollable(self, keep_bottom=1)
+        # 入力を変えたら早見表もすぐ直す（古い値を機械に書き写さないため）
+        for w, sig in ((self.e_user, "textChanged"), (self.e_pass, "textChanged"),
+                       (self.sp_port, "valueChanged"),
+                       (self.cmb_style, "currentIndexChanged"),
+                       (self.e_root, "textChanged")):
+            getattr(w, sig).connect(lambda *_a: self._refresh_table())
         self._refresh_table()
 
     def _browse_row(self, line):
@@ -2518,7 +2765,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
         row.addWidget(b_adv); row.addWidget(b_view)
         row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
-        v.addLayout(row)
+        v.addWidget(hscroll_buttons(row))
         # 文字サイズを上げても画面に収まるよう、中身をスクロールへ入れる
         # （ボタン列だけ外に残して常に押せるようにする）
         wrap_long_labels(self)
@@ -2630,6 +2877,30 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     def _soft_params(self):
         return soft_params_for(self.settings)
+
+    def _plan(self, raw, *, values=None, axis=None, axis_values=None, common=None,
+              seiban="", master_path=""):
+        """作成の中身を1回だけ決める（プレビューと書き込みで同じものを使う）。
+
+        以前は画面ごとに同じ処理をコピーしていて、片方だけ直す事故が起きた。
+        ここを通せば、どの作成画面でも同じ順序・同じ点検になる。
+        """
+        ref, _how = reference_backup(self.settings, master_path or None)
+        return param_build.prepare(
+            raw, values, axis=axis, axis_values=axis_values, common=common,
+            seiban=seiban, zero_params=self._zero_params(),
+            soft_limit=self._soft_limit(), soft_params=self._soft_params(),
+            eob=param_eob(self.settings), reference=ref)
+
+    def _basic_ok(self, master_path):
+        """使うBASICの点検（どの作成画面からでも同じ確認をする）。"""
+        return check_basic(self, self.settings, master_path)
+
+    def _confirm_out(self, text, fmt, fname, master_path=""):
+        """書き込む前の点検（どの作成画面からでも同じ確認をする）。"""
+        out = confirm_prm(self, self.settings, text, fmt, fname, master_path)
+        self._dropped_numbers = list(_LAST_DROPPED)
+        return out
 
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
@@ -3083,24 +3354,26 @@ class ParamWizardDialog(QtWidgets.QDialog):
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
                 for (num, ax, old, new) in param_build.preview_rows_multi(raw, axis_values)]
         zparams = self._zero_params()
-        rows += [(num, "全軸", old, new)
-                 for (num, old, new) in param_build.preview_zero_rows(raw, zparams)]
-        soft, sparams = self._soft_limit(), self._soft_params()
-        rows += [(num, _label_axis_name(lab), old, new)
-                 for (num, lab, old, new) in param_build.soft_limit_preview(
-                     raw, _merged_values(axis_values), sorted(axis_values),
-                     soft, sparams)]
+        plan = self._plan(raw, axis_values=axis_values, seiban=seiban,
+                          master_path=master)
+        rows = [(num, nc_param.axis_name(ax) if isinstance(ax, int) and ax
+                 else (ax or "共通"), old, new, kind, chg)
+                for (num, ax, old, new, kind, chg) in plan["rows"]]
         sub = ("＋".join(f["kind"] for f in sel)
                + f" → {fname}（{ctl.label()}）")
         if not ParamPreviewDialog(self, rows, subtitle=sub,
-                                  out_dir=out, need=len(raw)).exec():
+                                  out_dir=out, need=plan["need"]).exec():
             return
         try:
-            out_path, missing, fmt = param_build.create_file_multi(
-                master, out, axis_values, prefix=prefix, seiban=seiban,
-                ext=param_out_ext(self.settings), name=fname,
-                eob=self.settings.get("nc_eob"), zero_params=zparams,
-                soft_limit=soft, soft_params=sparams)
+            # 書く前の点検（実機に無い番号・途中の % など）。以前はこの経路だけ
+            # 一度も通っていなかった＝日常の入口で警告が出ていなかった
+            newtext = self._confirm_out(plan["newtext"], plan["fmt"], fname, master)
+            if newtext is None:
+                return
+            out_path = Path(out) / fname
+            param_build.write_text(out_path, newtext, plan["fmt"],
+                                   self.settings.get("nc_eob"))
+            missing, fmt = plan["missing"], plan["fmt"]
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(e))
             return
@@ -3615,16 +3888,7 @@ class ParamDialog(QtWidgets.QDialog):
         # ボタンはスクロール外＝常に見える位置に固定。ただしボタンが8個あるので、
         # 文字を大きくすると横に並びきらずダイアログごと画面をはみ出す。
         # 主画面のツールバーと同じく、横スクロールに入れて幅を要求させない。
-        btn_box = QtWidgets.QWidget()
-        btn_box.setLayout(row)
-        btn_scroll = QtWidgets.QScrollArea()
-        btn_scroll.setWidgetResizable(True)
-        btn_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        btn_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        btn_scroll.setWidget(btn_box)
-        btn_scroll.setMinimumWidth(280)
-        btn_scroll.setFixedHeight(btn_box.sizeHint().height() + 4)
-        outer.addWidget(btn_scroll)
+        outer.addWidget(hscroll_buttons(row))
         # 長い説明・エラー文のラベルを折り返す。折り返さないと文字を大きくしたとき
         # ダイアログごと横に広がって画面をはみ出す
         wrap_long_labels(self)
@@ -4026,25 +4290,21 @@ class ParamDialog(QtWidgets.QDialog):
         prefix = self.cmb_prefix.currentData() or "T"
         axis = int(self.cmb_axis.currentData() or 4)
         kind = nc_param.kind_from_prefix(prefix)
-        soft, sparams = self._soft_limit(), self._soft_params()
-        # 作成前プレビュー（旧値→新値）。中止なら書き込まない
-        rows = param_build.preview_rows(raw, values, axis)
-        rows += [(num, old, new) for (num, old, new)
-                 in param_build.preview_zero_rows(raw, self._zero_params())]
-        rows += [(f"{num}({lab})" if lab else num, old, new) for (num, lab, old, new)
-                 in param_build.soft_limit_preview(raw, values, [axis], soft, sparams)]
+        # 作成の中身は param_build.prepare が1回だけ決める。
+        # プレビューに出したものと、実際に書くものを必ず一致させるため
+        plan = self._plan(raw, values=values, axis=axis, seiban=seiban,
+                          master_path=master_path)
         fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
                                model=self.e_model.text().strip(),
                                axes=[(nc_param.axis_name(axis), kind)])
         if not ParamPreviewDialog(
-                self, rows,
+                self, plan["rows"],
                 subtitle=f"{self.e_model.text().strip() or '—'} → {fname}"
                          f"（{nc_param.axis_name(axis)} 軸）",
-                out_dir=str(d), need=len(raw)).exec():
+                out_dir=str(d), need=plan["need"]).exec():
             return
         try:
-            newtext, missing, fmt = param_build.build_text(
-                raw, values, axis, seiban, self._zero_params(), soft, sparams)
+            newtext, missing, fmt = plan["newtext"], plan["missing"], plan["fmt"]
             self._dropped_numbers = []
             newtext = self._confirm_prm(newtext, fmt, fname)
             if newtext is None:
@@ -4064,7 +4324,7 @@ class ParamDialog(QtWidgets.QDialog):
             controller=nc_param.controller_from_basic(master_path),
             axis=nc_param.axis_name(axis), seiban=seiban,
             basic=Path(master_path).name, out=fname,
-            applied=len(values) - len(missing), total=len(values))
+            applied=plan["applied"], total=plan["total"])
         # 製品データ（完成済み.prm）から抽出した「変更点」だけをデータベースへ登録し、
         # 次回は同じ型式を製品データ無しでも作れるようにする（source=="diff" のときだけ）。
         reg_msg = ""
@@ -4131,24 +4391,19 @@ class ParamDialog(QtWidgets.QDialog):
                                model=self.e_model.text().strip(),
                                axes=[(nc_param.axis_name(a), "") for a in axes])
         axis_label = "＋".join(nc_param.axis_name(a) for a in axes)
-        soft, sparams = self._soft_limit(), self._soft_params()
-        # 作成前プレビュー（軸つき）。中止なら書き込まない
-        rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
-                for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis, common)]
-        rows += [(num, "全軸", old, new) for (num, old, new)
-                 in param_build.preview_zero_rows(raw, self._zero_params())]
-        rows += [(num, _label_axis_name(lab), old, new)
-                 for (num, lab, old, new) in param_build.soft_limit_preview(
-                     raw, _merged_values(per_axis, common), axes, soft, sparams)]
+        plan = self._plan(raw, axis_values=per_axis, common=common, seiban=seiban,
+                          master_path=master_path)
+        rows = [(num, nc_param.axis_name(ax) if isinstance(ax, int) and ax
+                 else (ax or "共通"), old, new, kind, chg)
+                for (num, ax, old, new, kind, chg) in plan["rows"]]
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
                          f"{self.e_model.text().strip() or '—'} → {fname}",
-                out_dir=str(out_dir), need=len(raw)).exec():
+                out_dir=str(out_dir), need=plan["need"]).exec():
             return
         try:
-            text_multi, missing, fmt = param_build.build_text_multi(
-                raw, per_axis, common, seiban, self._zero_params(), soft, sparams)
+            text_multi, missing, fmt = plan["newtext"], plan["missing"], plan["fmt"]
             self._dropped_numbers = []
             text_multi = self._confirm_prm(text_multi, fmt, fname)
             if text_multi is None:
@@ -4310,6 +4565,30 @@ class ParamDialog(QtWidgets.QDialog):
     def _soft_params(self):
         return soft_params_for(self.settings)
 
+    def _plan(self, raw, *, values=None, axis=None, axis_values=None, common=None,
+              seiban="", master_path=""):
+        """作成の中身を1回だけ決める（プレビューと書き込みで同じものを使う）。
+
+        以前は画面ごとに同じ処理をコピーしていて、片方だけ直す事故が起きた。
+        ここを通せば、どの作成画面でも同じ順序・同じ点検になる。
+        """
+        ref, _how = reference_backup(self.settings, master_path or None)
+        return param_build.prepare(
+            raw, values, axis=axis, axis_values=axis_values, common=common,
+            seiban=seiban, zero_params=self._zero_params(),
+            soft_limit=self._soft_limit(), soft_params=self._soft_params(),
+            eob=param_eob(self.settings), reference=ref)
+
+    def _basic_ok(self, master_path):
+        """使うBASICの点検（どの作成画面からでも同じ確認をする）。"""
+        return check_basic(self, self.settings, master_path)
+
+    def _confirm_out(self, text, fmt, fname, master_path=""):
+        """書き込む前の点検（どの作成画面からでも同じ確認をする）。"""
+        out = confirm_prm(self, self.settings, text, fmt, fname, master_path)
+        self._dropped_numbers = list(_LAST_DROPPED)
+        return out
+
     def _param_ext(self):
         return param_out_ext(self.settings)
 
@@ -4317,159 +4596,16 @@ class ParamDialog(QtWidgets.QDialog):
         return param_eob(self.settings)
 
     def _reference_backup(self, master_path=None):
-        """番号照合に使う参照を (テキスト, 出どころの説明) で返す。無ければ ("", "")。
-
-        探す順:
-          1. 選んだBASIC自体が実機のものなら、それが実機のバックアップそのもの
-             （番号は定義上一致するので照合は不要）
-          2. 同じ号機の実機ファイルが同じフォルダにあれば それ
-             （例: F23BASIC.prm を選んだとき隣の F23BASIC.DAT）
-          3. 同じ号機の実機が無い（PC側のBASICしか無い）とき: フォルダにある
-             実機BASIC全部の「番号の和集合」。どの実機も持っていない番号だけが
-             引っかかるので、号機ごとの差でむやみに警告しない
-          4. 設定の「マスタ/バックアップ」
-        """
-        if master_path:
-            try:
-                p = Path(master_path)
-                raw = p.read_bytes()
-                if param_origin.classify(raw)["verdict"] in ("machine", "converted"):
-                    return "", ""        # 実機そのもの＝照合する相手が要らない
-                unit = re.match(r"[A-Za-z]*\d+", p.stem)
-                if unit:
-                    for sib in sorted(p.parent.iterdir()):
-                        if sib == p or not sib.is_file():
-                            continue
-                        if not sib.stem.upper().startswith(unit.group(0).upper()):
-                            continue
-                        if param_origin.classify(sib.read_bytes())["verdict"] in (
-                                "machine", "converted"):
-                            return (sib.read_bytes().decode("cp932", errors="replace"),
-                                    f"同じ号機の実機 {sib.name}")
-                # 同じ号機の実機が無い＝PC側しか無い場合
-                text = raw.decode("cp932", errors="replace")
-                ref, used = param_build.machine_reference(p.parent, like=text,
-                                                          exclude=p)
-                if ref:
-                    return ref, (f"フォルダの実機BASIC {len(used)}本の番号を合わせたもの"
-                                 f"（{', '.join(used[:3])}{' ほか' if len(used) > 3 else ''}）")
-            except Exception:
-                pass
-        path = str(self.settings.get("param_master_backup") or "").strip()
-        if not path:
-            return "", ""
-        try:
-            return (Path(path).read_bytes().decode("cp932", errors="replace"),
-                    f"設定のマスタ/バックアップ {Path(path).name}")
-        except Exception:
-            return "", ""
+        return reference_backup(self.settings, master_path)
 
     def _check_basic(self, master_path):
-        """選んだBASICが制御装置向きかを見て、問題があれば確認を取る。
-
-        BASICは元データなので、これ自体を機械へ入れるわけではない。見るのは
-        「そこから作る製品ファイルが読めるか」に効く点だけ:
-          ・実機が出したものか（PC製は、その制御装置に無い番号が混じることがある）
-          ・実機のバックアップと番号がずれていないか
-        区切り(EOB)はアプリが出力時に実機の形へそろえるので、ここでは問わない。
-        """
-        try:
-            data = Path(master_path).read_bytes()
-        except Exception:
-            return True
-        info = param_origin.classify(data)
-        text = data.decode("cp932", errors="replace")
-        problems = []
-        # その機械の個体データ（原点・グリッドシフト）が入っていないか。
-        # 仕様が同じ号機でも原点は据付けごとに違うので、流用してはいけない。
-        # 号機マスタの容量と、ファイルのアンプ最大電流が合っているか。
-        # 合わなければ「その号機のファイルではない」か「マスタが古い」。
-        unit = param_origin.unit_of(Path(master_path).name)
-        ctl = next((c for c in self._controllers
-                    if str(c.unit).strip() == unit), None) if unit else None
-        cap_ng = controllers.check_capacity_match(
-            text, ctl, self.settings.get("amp_current_map"))
-        if cap_ng:
-            problems.append("号機マスタの容量と合いません（" + " ／ ".join(cap_ng)
-                            + "）。実機のファイルが正ならマスタが古いので、"
-                              "制御装置マスタの「BASICに合わせる…」で直せます")
-        # 個体データ（原点・グリッドシフト）。作成時に0にする設定なら、
-        # そちらで直るものは警告しない（自動で直すものを毎回聞かない）。
-        indiv = fanuc_param.individual_data(text)
-        zp = self._zero_params() or ()
-        if zp:
-            zero_nums = {fanuc_param._norm_num(x) for x in zp}
-            indiv = [x for x in indiv
-                     if not any(f"N{n}" in x for n in zero_nums)]
-        if indiv:
-            problems.append(
-                "このBASICには機械の個体データが入っています（"
-                + " ／ ".join(indiv)
-                + "）。別の号機に使うと原点がずれます")
-        if info["verdict"] == "pc":
-            problems.append(
-                f"このBASICはPCで作られたものです（{info['reasons'][0]}）。"
-                "実機が出したバックアップを使う方が確実です")
-        ref, how = self._reference_backup(master_path)
-        if ref:
-            extra = fanuc_param.unknown_numbers(text, ref)
-            if extra:
-                problems.append(
-                    f"実機に無い番号が {len(extra)}個 あります"
-                    f"（N{extra[0]:05d}〜N{extra[-1]:05d}／照合元: {how}）。"
-                    "作成のときに除くこともできます")
-        problems += [p for p in fanuc_param.validate_prm(text)
-                     if "実機のバックアップに無い" not in p]
-        if not problems:
-            return True
-        return QtWidgets.QMessageBox.question(
-            self, "BASICの点検",
-            f"{Path(master_path).name} に気になる点があります:\n\n・"
-            + "\n・".join(problems[:6])
-            + "\n\nこのBASICで作成を続けますか？",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+        return check_basic(self, self.settings, master_path)
 
     def _confirm_prm(self, text, fmt, fname):
-        """書き込む前に点検する。戻り値は「書き出すテキスト」、中止なら None。
-
-        実機に無い番号が見つかったら、その場で除いて作れるようにする。
-        実機のバックアップが手元に無く、PC側のBASICしか無くても、
-        制御装置が取り込めるファイルを作れるようにするため。
-        除くのは「フォルダのどの実機BASICにも無い番号」だけなので、
-        その制御装置が持っている番号を落とすことはない。
-        """
-        if fmt != "fanuc":
-            return text
-        ref, how = self._reference_backup(self.e_master_prm.text().strip())
-        problems = fanuc_param.validate_prm(text, ref)
-        if not problems:
-            return text
-        extra = fanuc_param.unknown_numbers(text, ref) if ref else []
-        msg = (f"{fname} に、制御装置が取り込めない可能性のある点があります:\n\n・"
-               + "\n・".join(problems[:6]))
-        box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle("パラメータの点検")
-        box.setIcon(QtWidgets.QMessageBox.Warning)
-        if extra:
-            box.setText(msg + f"\n\n照合元: {how}")
-            b_drop = box.addButton(f"実機に無い{len(extra)}個を除いて作成",
-                                   QtWidgets.QMessageBox.AcceptRole)
-            b_keep = box.addButton("そのまま作成", QtWidgets.QMessageBox.DestructiveRole)
-            box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
-            box.setDefaultButton(b_drop)
-            box.exec()
-            if box.clickedButton() is b_drop:
-                kept, removed = fanuc_param.drop_numbers(text, extra)
-                self._dropped_numbers = removed
-                return kept
-            return text if box.clickedButton() is b_keep else None
-        box.setText(msg + "\n\nこのまま作成しますか？")
-        box.addButton("作成", QtWidgets.QMessageBox.AcceptRole)
-        box.addButton("中止", QtWidgets.QMessageBox.RejectRole)
-        box.exec()
-        return text if box.buttonRole(box.clickedButton()) == \
-            QtWidgets.QMessageBox.AcceptRole else None
+        text = confirm_prm(self, self.settings, text, fmt, fname,
+                           self.e_master_prm.text().strip())
+        self._dropped_numbers = list(_LAST_DROPPED)
+        return text
 
     def _persist(self):
         try:
@@ -4800,6 +4936,30 @@ class ParamDBDialog(QtWidgets.QDialog):
     def _soft_params(self):
         return soft_params_for(self.settings)
 
+    def _plan(self, raw, *, values=None, axis=None, axis_values=None, common=None,
+              seiban="", master_path=""):
+        """作成の中身を1回だけ決める（プレビューと書き込みで同じものを使う）。
+
+        以前は画面ごとに同じ処理をコピーしていて、片方だけ直す事故が起きた。
+        ここを通せば、どの作成画面でも同じ順序・同じ点検になる。
+        """
+        ref, _how = reference_backup(self.settings, master_path or None)
+        return param_build.prepare(
+            raw, values, axis=axis, axis_values=axis_values, common=common,
+            seiban=seiban, zero_params=self._zero_params(),
+            soft_limit=self._soft_limit(), soft_params=self._soft_params(),
+            eob=param_eob(self.settings), reference=ref)
+
+    def _basic_ok(self, master_path):
+        """使うBASICの点検（どの作成画面からでも同じ確認をする）。"""
+        return check_basic(self, self.settings, master_path)
+
+    def _confirm_out(self, text, fmt, fname, master_path=""):
+        """書き込む前の点検（どの作成画面からでも同じ確認をする）。"""
+        out = confirm_prm(self, self.settings, text, fmt, fname, master_path)
+        self._dropped_numbers = list(_LAST_DROPPED)
+        return out
+
     def __init__(self, owner: "ParamDialog"):
         super().__init__(owner)
         self.owner = owner
@@ -4925,13 +5085,13 @@ class ParamDBDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl)
 
         row = QtWidgets.QHBoxLayout()
-        b_repeat = QtWidgets.QPushButton("前回と同じ制御装置で即作成")
+        b_repeat = QtWidgets.QPushButton("前回と同じで作成")
         b_repeat.setToolTip("選択エントリに登録された制御装置(BASIC)・軸をそのまま使い、"
                             "Seibanだけ変えて即作成（リピート品の最短手順）")
         b_repeat.clicked.connect(self.repeat_same_controller)
-        b_make = QtWidgets.QPushButton("制御装置を選んで作成→出力先")
+        b_make = QtWidgets.QPushButton("制御装置を選んで作成")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.make_from_entry)
-        b_make2 = QtWidgets.QPushButton("2軸で作成（傾斜＋回転）…")
+        b_make2 = QtWidgets.QPushButton("2軸で作成…")
         b_make2.setToolTip("2軸テーブル用。選択中エントリ＋相手エントリの2軸を、"
                            "1つのBASICへ入れて1ファイルにまとめて作成します")
         b_make2.clicked.connect(self.make_two_axis)
@@ -4941,7 +5101,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         row.addWidget(b_repeat); row.addWidget(b_make); row.addWidget(b_make2)
         row.addWidget(b_dump)
         row.addStretch(1); row.addWidget(b_close)
-        v.addLayout(row)
+        v.addWidget(hscroll_buttons(row))
+        wrap_long_labels(self)
+        wrap_scrollable(self, keep_bottom=1)   # 文字を大きくしても収まるように
 
         self.reload()
 
@@ -5219,10 +5381,11 @@ class ParamDBDialog(QtWidgets.QDialog):
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{ex}")
             return
-        soft, sparams = self._soft_limit(), self._soft_params()
-        rows = param_build.preview_rows(raw, values, axis)
-        rows += [(num, old, new) for (num, _lab, old, new)
-                 in param_build.soft_limit_preview(raw, values, [axis], soft, sparams)]
+        if not self._basic_ok(master):        # 使うBASICの点検（以前この経路だけ無かった）
+            return
+        plan = self._plan(raw, values=values, axis=axis, seiban=seiban,
+                          master_path=master)
+        rows = plan["rows"]
         kind = nc_param.kind_from_prefix(prefix) or e.kind
         fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
                                model=e.model,
@@ -5230,14 +5393,15 @@ class ParamDBDialog(QtWidgets.QDialog):
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）",
-                out_dir=out, need=len(raw)).exec():
+                out_dir=out, need=plan["need"]).exec():
             return
         try:
-            out_path, missing, fmt = param_build.create_file(
-                master, out, values, axis=axis, prefix=prefix, seiban=seiban,
-                ext=self._param_ext(), eob=self._param_eob(), name=fname,
-                zero_params=self._zero_params(),
-                soft_limit=soft, soft_params=sparams)
+            newtext = self._confirm_out(plan["newtext"], plan["fmt"], fname, master)
+            if newtext is None:
+                return
+            out_path = Path(out) / fname
+            param_build.write_text(out_path, newtext, plan["fmt"], self._param_eob())
+            missing, fmt = plan["missing"], plan["fmt"]
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return
@@ -5246,7 +5410,7 @@ class ParamDBDialog(QtWidgets.QDialog):
             mode=e.mode, motor=e.motor,
             controller=nc_param.controller_from_basic(master),
             axis=nc_param.axis_name(axis), seiban=seiban, basic=Path(master).name,
-            out=out_path.name, applied=len(values) - len(missing), total=len(values))
+            out=out_path.name, applied=plan["applied"], total=plan["total"])
         # 作成＝履歴登録（制御/軸/Seibanが変われば別エントリとして残る）
         reg = ""
         if self._csv_path():
@@ -5265,7 +5429,7 @@ class ParamDBDialog(QtWidgets.QDialog):
         msg = (f"作成しました:\n・{out_path.name}\n"
                f"（{Path(master).name} の {nc_param.axis_name(axis)} 軸へ {e.model}"
                f"{'／' + e.mode + 'クロ' if e.mode else ''} の設定を適用）\n"
-               f"値の反映: {len(values) - len(missing)} / {len(values)} 件{reg}")
+               f"値の反映: {plan['applied']} / {plan['total']} 件{reg}")
         if missing:
             msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
@@ -5312,25 +5476,25 @@ class ParamDBDialog(QtWidgets.QDialog):
                                axes=[(nc_param.axis_name(a1), e.kind),
                                      (nc_param.axis_name(a2), partner.kind)])
         axis_label = f"{nc_param.axis_name(a1)}＋{nc_param.axis_name(a2)}"
-        soft, sparams = self._soft_limit(), self._soft_params()
-        rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
-                for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis)]
-        rows += [(num, _label_axis_name(lab), old, new)
-                 for (num, lab, old, new) in param_build.soft_limit_preview(
-                     raw, _merged_values(per_axis), [a1, a2], soft, sparams)]
+        if not self._basic_ok(master):        # 使うBASICの点検（以前この経路だけ無かった）
+            return
+        plan = self._plan(raw, axis_values=per_axis, seiban=seiban, master_path=master)
+        rows = [(num, nc_param.axis_name(ax) if isinstance(ax, int) and ax
+                 else (ax or "共通"), old, new, kind, chg)
+                for (num, ax, old, new, kind, chg) in plan["rows"]]
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
                          f"{e.model} ＋ {partner.model} → {fname}",
-                out_dir=out, need=len(raw)).exec():
+                out_dir=out, need=plan["need"]).exec():
             return
         try:
-            out_path, missing, fmt = param_build.create_file_multi(
-                master, out, per_axis, prefix=prefix, seiban=seiban,
-                ext=self._param_ext(), name=fname,
-                eob=self.settings.get("nc_eob"),
-                zero_params=self._zero_params(),
-                soft_limit=soft, soft_params=sparams)
+            newtext = self._confirm_out(plan["newtext"], plan["fmt"], fname, master)
+            if newtext is None:
+                return
+            out_path = Path(out) / fname
+            param_build.write_text(out_path, newtext, plan["fmt"], self._param_eob())
+            missing, fmt = plan["missing"], plan["fmt"]
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return
@@ -7792,11 +7956,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.master_judge = None
         try:
             self.masters = load_masters(self.settings)
-        except Exception as e:
+        except Exception as ex:
+            # except を抜けると e は消えるので、先に文字列にしてから遅延表示する
+            # （lambda の中で e を参照すると発火時に必ず NameError になる）
+            msg = f"型式マスタの読み込みに失敗: {ex}"
             self.masters = None
-            QtCore.QTimer.singleShot(
-                0, lambda: self.statusBar().showMessage(f"型式マスタの読み込みに失敗: {e}")
-            )
+            QtCore.QTimer.singleShot(0, lambda: self.statusBar().showMessage(msg))
         # 起動後にマスタの欠落を確認して、見つからなければ画面が出てから警告する
         QtCore.QTimer.singleShot(300, self.warn_missing_masters)
         self.e_model.editingFinished.connect(self.on_model_entered)

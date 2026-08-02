@@ -6,6 +6,7 @@
 
 import copy
 import json
+import time
 import sys
 from pathlib import Path
 
@@ -236,8 +237,22 @@ def load_settings(path=None) -> dict:
         settings.update(raw)
     except FileNotFoundError:
         pass
-    except Exception:
-        pass  # 壊れたファイルでも既定値で起動できるようにする
+    except Exception as e:
+        # 壊れたファイルでも既定値で起動できるようにする。ただし
+        # <b>黙って既定値に戻してはいけない</b>。次の保存で本番の設定
+        # （保存先のK:ドライブ・BASICの場所・FTPのパスワード等）が
+        # 上書きで消える。壊れたファイルは名前を変えて残し、
+        # 画面に知らせるための印を付ける。
+        try:
+            broken = p.with_name(p.name + ".broken-"
+                                 + time.strftime("%Y%m%d%H%M%S"))
+            p.replace(broken)
+            settings["_load_error"] = f"設定ファイルを読めませんでした（{e}）。" \
+                                      f"壊れたファイルは {broken.name} に残しました。" \
+                                      "設定を確認してください"
+        except OSError:
+            settings["_load_error"] = f"設定ファイルを読めませんでした（{e}）。" \
+                                      "設定を確認してください"
 
     # プロファイルの補完（欠けたキーは既定値で埋める）
     profiles = settings.get("profiles") or {}
@@ -280,10 +295,22 @@ def _migrate_fanuc(settings: dict, raw: dict):
 
 
 def save_settings(settings: dict, path=None):
+    """設定を保存する。書きかけで壊さないよう、別名に書いてから置き換える。
+
+    直前の内容は .bak に1世代残す。settings.json は .gitignore なので
+    壊れると Git からも戻せない（保存先・BASICの場所・パスワード等が入っている）。
+    """
     p = Path(path) if path else settings_path()
-    p.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    data = {k: v for k, v in settings.items() if not str(k).startswith("_")}
+    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if p.exists():
+        try:
+            p.replace(p.with_name(p.name + ".bak"))   # 直前の1世代を残す
+        except OSError:
+            pass
+    tmp.replace(p)
 
 
 def resolve_save_root(settings: dict) -> Path:

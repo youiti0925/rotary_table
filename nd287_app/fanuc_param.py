@@ -235,9 +235,10 @@ def normalize_number(value, current=None, allow_decimal=True) -> str:
         return sign + whole            # 整数・ビット列（先頭の0も残す）はそのまま
     if not allow_decimal:
         # 旧書式(8台)のファイルには小数が1つも無い＝値は最小設定単位の整数。
-        # ここで小数を落とすと 1000倍ずれる恐れがあるので、勝手に直さず
-        # そのまま返す（validate_prm が「小数を使わない書式」として指摘する）。
-        return s
+        # ここで小数を落とすと 1000倍ずれる恐れがあるので、桁はそのまま残す。
+        # ただし ＋符号だけは落とす（実機が出すファイルに + は1つも無い。
+        # 整数値では落としているのに小数だけ残るのは辻褄が合わない）。
+        return f"{sign}{whole}.{frac}"
     frac = frac.rstrip("0")
     if frac:
         return f"{sign}{whole}.{frac}"
@@ -362,8 +363,8 @@ def _split_common_key(key) -> tuple:
 
     キーは (番号, ラベル) でも 番号 だけでもよい。後者はラベル不明として扱う。
     """
-    if isinstance(key, tuple):
-        return key[0], (key[1] if len(key) > 1 else None)
+    if isinstance(key, tuple):      # 空タプルでも落ちないようにする（保険）
+        return (key[0] if key else None), (key[1] if len(key) > 1 else None)
     return key, None
 
 

@@ -161,7 +161,31 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
     下のボタンが押せなくなる事故が繰り返し起きた。最小サイズで判定する。
     """
 
-    TARGET_W, TARGET_H = 1366, 730     # 1366x768 からタスクバーぶんを引く
+    # ノートPC(1366x768)と、小さい画面(1024x768)の両方で見る。
+    # タスクバーぶんを引いた実効の高さで判定する。
+    SCREENS = ((1366, 730), (1024, 730))
+
+    @classmethod
+    def setUpClass(cls):
+        """本番の settings.json を絶対に触らせない。
+
+        画面を閉じると _persist() が走って save_settings が呼ばれる。
+        パス未指定だとリポジトリ／exe と同じ場所の本番ファイルを
+        素の既定値で書き潰す（実際に起きていた）。
+        """
+        import tempfile
+        from pathlib import Path
+        from nd287_app import settings as S
+        cls._tmp = tempfile.mkdtemp()
+        cls._orig_path = S.settings_path
+        S.settings_path = lambda: Path(cls._tmp) / "settings.json"
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        from nd287_app import settings as S
+        S.settings_path = cls._orig_path
+        shutil.rmtree(cls._tmp, ignore_errors=True)
 
     def setUp(self):
         import os
@@ -182,8 +206,10 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
             for _ in range(5):
                 self.app.processEvents()
             m = dlg.minimumSizeHint()
-            if m.width() > self.TARGET_W or m.height() > self.TARGET_H:
-                bad.append(f"{pt}pt {m.width()}x{m.height()}")
+            for (w, h) in self.SCREENS:
+                if m.width() > w or m.height() > h:
+                    bad.append(f"{pt}pt {m.width()}x{m.height()} > {w}x{h}")
+                    break
             dlg.close()
             dlg.deleteLater()
             self.app.processEvents()
@@ -205,6 +231,21 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
     def test_basic_origin_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.BasicOriginDialog(None, [], "x", None)), [])
+
+    def test_param_db_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(
+            lambda s: G.ParamDBDialog(G.ParamDialog(None, s))), [])
+
+    def test_settings_dialog(self):
+        # ここで文字サイズを変えるので、この画面が入りきらないと
+        # 大きくした本人が元に戻せなくなる
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.SettingsDialog(None, s)), [])
+
+    def test_ftp_server_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.FtpServerDialog(None, s)), [])
 
     def test_help_dialog(self):
         import nd287_app.gui as G

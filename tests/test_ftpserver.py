@@ -199,6 +199,58 @@ class TestActiveMode(_Base):
         self.assertEqual(got.getvalue(), MACHINE_BYTES)
 
 
+class TestReceivedCheck(_Base):
+    """機械から受け取ったバックアップをその場で点検する。
+
+    壊れたバックアップは取った直後に見ないと気づけない（実データの F35BASIC は
+    途中の % で258行が読まれない状態のまま置かれていた）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        self.srv._on_stored = self.seen.append
+
+    def test_calls_the_check_after_receiving(self):
+        self.ftp.storbinary("STOR F23BASIC.DAT", io.BytesIO(MACHINE_BYTES))
+        self.assertEqual([p.name for p in self.seen], ["F23BASIC.DAT"])
+
+    def test_a_broken_backup_is_reported(self):
+        from nd287_app import param_build as B
+        broken = ("%\n" + "\n".join(f"N{i:05d}Q1A1P0" for i in range(5))
+                  + "\n%1P00000000\nN27124Q1A1P0\n%\n")   # 途中の % （F35と同じ形）
+        self.ftp.storbinary("STOR F35BASIC.DAT",
+                            io.BytesIO(broken.encode("cp932")))
+        note, problems = B.check_received(self.dir / "F35BASIC.DAT")
+        self.assertIn("F35BASIC.DAT", note)
+        self.assertTrue(any("途中に %" in p for p in problems))
+
+    def test_a_good_backup_has_no_complaint(self):
+        from nd287_app import param_build as B
+        good = "%\n" + "\n".join(f"N{i:05d}Q1A1P0" for i in range(5)) + "\n%\n"
+        self.ftp.storbinary("STOR F23BASIC.DAT", io.BytesIO(good.encode("cp932")))
+        note, problems = B.check_received(self.dir / "F23BASIC.DAT")
+        self.assertEqual(problems, [])
+        self.assertIn("番号 5個", note)
+
+    def test_check_failure_does_not_break_the_transfer(self):
+        def boom(_p):
+            raise RuntimeError("わざと失敗")
+        self.srv._on_stored = boom
+        self.ftp.storbinary("STOR X.DAT", io.BytesIO(MACHINE_BYTES))
+        self.assertEqual((self.dir / "X.DAT").read_bytes(), MACHINE_BYTES)
+        self.assertTrue(any("点検できません" in l for l in self.srv.lines))
+
+    def test_empty_and_missing_files(self):
+        from nd287_app import param_build as B
+        (self.dir / "empty.DAT").write_bytes(b"")
+        self.assertEqual(B.check_received(self.dir / "empty.DAT")[1],
+                         ["中身が空です"])
+        note, problems = B.check_received(self.dir / "ない.DAT")
+        self.assertEqual(note, "")
+        self.assertTrue(problems)
+
+
 class TestListLine(unittest.TestCase):
     def test_unix_line_has_name_and_size(self):
         d = Path(tempfile.mkdtemp())

@@ -292,6 +292,36 @@ def folder_status(out_dir, need: int = 0, *, file_warn: int = CARD_FILE_WARN,
     return note, warn
 
 
+def check_received(path, reference: str = "") -> tuple:
+    """機械から受け取ったファイルをその場で点検する。戻り値 (説明, 問題リスト)。
+
+    バックアップは<b>取った直後に見ないと壊れていても気づけない</b>。
+    実データの F35BASIC は途中に % があって258行が読まれない状態だったが、
+    誰も気づかないまま置かれていた。FTPで受け取った瞬間にここで知らせる。
+    """
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        return "", [f"読めません: {e}"]
+    if not data.strip():
+        return "", ["中身が空です"]
+    info = param_origin.classify(data)
+    text = data.decode("cp932", errors="replace")
+    kind = info.get("kind") or ""
+    note = (f"{p.name}｜{info.get('label', '')}"
+            f"｜区切り {info.get('eob', '?')}｜{len(data):,}バイト")
+    if kind == "パラメータ" or fanuc_param.looks_like_fanuc_prm(text):
+        problems = fanuc_param.validate_prm(text, reference)
+        nums = fanuc_param.numbers_in(text)
+        if nums:
+            note += f"｜番号 {len(nums)}個"
+    else:
+        from . import fanuc
+        problems = fanuc.validate(text)
+    return note, problems
+
+
 def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
                 seiban: str, ext: str = ".DAT", eob: str = None,
                 zero_params=None, soft_limit=None, soft_params=None,

@@ -1600,6 +1600,20 @@ class FtpServerDialog(QtWidgets.QDialog):
             self.log, "appendPlainText", QtCore.Qt.QueuedConnection,
             QtCore.Q_ARG(str, line))
 
+    def _check_received(self, path):
+        """機械から受け取ったファイルをその場で点検する（バックアップの取りこぼし防止）。
+
+        壊れたバックアップは、取った直後に見ないと気づけない。実データの
+        F35BASIC は途中の % で258行が読まれない状態のまま置かれていた。
+        """
+        note, problems = param_build.check_received(path)
+        if note:
+            self._append_log("　点検 " + note)
+        for p in problems:
+            self._append_log("　⚠ " + p)
+        if not problems and note:
+            self._append_log("　点検OK")
+
     def start(self):
         root = self.e_root.text().strip()
         if not root or not Path(root).is_dir():
@@ -1612,7 +1626,7 @@ class FtpServerDialog(QtWidgets.QDialog):
                 user=self.e_user.text().strip(),
                 password=self.e_pass.text(),
                 list_style=self.cmb_style.currentData(),
-                log_func=self._append_log)
+                log_func=self._append_log, on_stored=self._check_received)
             self.server.start()
         except OSError as e:
             self.server = None

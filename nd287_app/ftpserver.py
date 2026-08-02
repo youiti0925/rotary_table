@@ -372,6 +372,7 @@ class _Session(threading.Thread):
         finally:
             sock.close()
         self.server.log(f"受け取った {real.name}")
+        self.server.stored(real)          # 受け取った中身をその場で点検する
         self._send("226 Transfer complete")
 
 
@@ -383,12 +384,16 @@ class FtpServer:
 
     def __init__(self, root, *, host="0.0.0.0", port=DEFAULT_PORT,
                  user=DEFAULT_USER, password=DEFAULT_PASSWORD,
-                 list_style="unix", log_func=None, max_log=200):
+                 list_style="unix", log_func=None, max_log=200,
+                 on_stored=None):
         self.root = Path(root).resolve()
         self.host, self.port = host, int(port)
         self.user, self.password = user or "", password or ""
         self.list_style = list_style if list_style in LIST_STYLES else "unix"
         self._log_func = log_func
+        # 機械から受け取った直後に呼ばれる（受け取ったファイルの点検に使う）。
+        # 壊れたバックアップ（F35 のような途中の %）をその場で見つけるため。
+        self._on_stored = on_stored
         self.lines = []
         self.max_log = max_log
         self.stopping = False
@@ -413,6 +418,18 @@ class FtpServer:
                 self._log_func(f"{stamp} {line}")
             except Exception:
                 pass
+
+    def stored(self, path):
+        """機械から受け取ったファイルを、登録された点検にかける。
+
+        点検で落ちてもファイル受信は成功扱いにする（受け取ること自体は済んでいる）。
+        """
+        if not self._on_stored:
+            return
+        try:
+            self._on_stored(Path(path))
+        except Exception as e:
+            self.log(f"点検できません: {e}")
 
     # ---- 開始/終了 ----
     def start(self):

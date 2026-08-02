@@ -117,6 +117,7 @@ from . import prm_format
 from . import fanuc_param
 from . import fanuc_pcorr
 from . import param_build
+from . import ftpserver
 from . import controllers
 from . import seiban_flow
 from . import batch_build
@@ -1464,6 +1465,201 @@ class ParamPreviewDialog(QtWidgets.QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+
+
+class FtpServerDialog(QtWidgets.QDialog):
+    """このPCをFTPサーバーにして、制御装置に直接ファイルを取りに来させる。
+
+    FANUCの組込みイーサネットの「FTP転送」は、制御装置がPCへ<b>取りに行く</b>
+    作りなので、PC側にサーバーが要る。別のソフトを入れなくて済むよう、
+    アプリの中で動かす。開いている間だけ動き、閉じると止まる（止め忘れ防止）。
+    """
+
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.settings = settings
+        self.server = None
+        self.setWindowTitle("FTPサーバー（カード無しで機械へ渡す）")
+        fit_to_screen(self, 620, 560)
+        v = QtWidgets.QVBoxLayout(self)
+
+        lead = QtWidgets.QLabel(
+            "このPCを<b>FTPサーバー</b>にします。制御装置の「FTP転送→接続先1」に"
+            "下の値を入れると、機械が<b>このフォルダのファイルを直接読めます</b>"
+            "（メモリカードを持ち歩かなくてよくなります）。<br>"
+            "社内LAN・機械と1対1の配線での利用を想定しています"
+            "（FTPは中身を暗号化しません）。")
+        lead.setWordWrap(True)
+        lead.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(lead)
+
+        box = QtWidgets.QGroupBox("設定")
+        f = QtWidgets.QFormLayout(box)
+        self.e_root = QtWidgets.QLineEdit(str(
+            settings.get("ftp_root") or settings.get("param_out_folder")
+            or settings.get("nc_send_folder") or ""))
+        self.e_root.setPlaceholderText("機械に見せるフォルダ（ここに .NC / .DAT を出す）")
+        f.addRow("公開フォルダ", self._browse_row(self.e_root))
+        self.e_user = QtWidgets.QLineEdit(str(settings.get("ftp_user",
+                                                           ftpserver.DEFAULT_USER)))
+        self.e_pass = QtWidgets.QLineEdit(str(settings.get("ftp_password",
+                                                          ftpserver.DEFAULT_PASSWORD)))
+        row = QtWidgets.QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.e_user, 1)
+        row.addWidget(QtWidgets.QLabel("パスワード"))
+        row.addWidget(self.e_pass, 1)
+        f.addRow("ユーザー名", row)
+        self.sp_port = QtWidgets.QSpinBox()
+        self.sp_port.setRange(1, 65535)
+        self.sp_port.setValue(int(settings.get("ftp_port", ftpserver.DEFAULT_PORT)))
+        self.sp_port.setToolTip("FTPの決まりの番号は21。制御装置にも同じ番号を入れる")
+        self.cmb_style = QtWidgets.QComboBox()
+        self.cmb_style.addItem("UNIX形式（ふつうはこちら）", "unix")
+        self.cmb_style.addItem("MS-DOS形式（一覧が出ないとき）", "dos")
+        j = self.cmb_style.findData(settings.get("ftp_list_style", "unix"))
+        if j >= 0:
+            self.cmb_style.setCurrentIndex(j)
+        prow = QtWidgets.QHBoxLayout(); prow.setContentsMargins(0, 0, 0, 0)
+        prow.addWidget(self.sp_port)
+        prow.addWidget(QtWidgets.QLabel("一覧の形"))
+        prow.addWidget(self.cmb_style, 1)
+        f.addRow("ポート番号", prow)
+        v.addWidget(box)
+
+        btns = QtWidgets.QHBoxLayout()
+        self.b_start = QtWidgets.QPushButton("開始")
+        self.b_start.setObjectName("primary")
+        self.b_start.clicked.connect(self.start)
+        self.b_stop = QtWidgets.QPushButton("停止")
+        self.b_stop.clicked.connect(self.stop)
+        self.b_stop.setEnabled(False)
+        self.lbl_state = QtWidgets.QLabel("停止中")
+        btns.addWidget(self.b_start); btns.addWidget(self.b_stop)
+        btns.addWidget(self.lbl_state, 1)
+        v.addLayout(btns)
+
+        self.tbl = QtWidgets.QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["制御装置の項目", "入れる値"])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.setMinimumHeight(150)
+        v.addWidget(QtWidgets.QLabel(
+            "制御装置の <b>FTP転送 → 接続先1</b>（必ず <b>[内蔵ポート]</b> の画面）に入れる値"))
+        v.addWidget(self.tbl)
+
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(400)
+        self.log.setPlaceholderText("機械がつないでくると、ここに出ます")
+        v.addWidget(self.log, 1)
+
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton("閉じる", QtWidgets.QDialogButtonBox.RejectRole)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        wrap_long_labels(self)
+        self._refresh_table()
+
+    def _browse_row(self, line):
+        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(line, 1)
+        b = QtWidgets.QPushButton("参照…")
+        b.clicked.connect(self._browse)
+        h.addWidget(b)
+        return w
+
+    def _browse(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "機械に見せるフォルダ", self.e_root.text())
+        if p:
+            self.e_root.setText(p)
+            self._refresh_table()
+
+    def _refresh_table(self):
+        port = self.server.port if self.server else self.sp_port.value()
+        rows = [("ホスト名(IPアドレス)",
+                 "／".join(ftpserver.local_ip_addresses()) or "（PCのIPが取れません）"),
+                ("ポート番号", str(port)),
+                ("ユーザー名", self.e_user.text() or "（空欄）"),
+                ("パスワード", self.e_pass.text() or "（空欄）"),
+                ("ログインフォルダ", "（空欄のまま）")]
+        self.tbl.setRowCount(len(rows))
+        for i, (k, val) in enumerate(rows):
+            self.tbl.setItem(i, 0, QtWidgets.QTableWidgetItem(k))
+            it = QtWidgets.QTableWidgetItem(val)
+            it.setFont(QtGui.QFont("monospace"))
+            self.tbl.setItem(i, 1, it)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+
+    def _append_log(self, line):
+        # 通信スレッドから呼ばれるので、GUIへは必ずキューで渡す
+        QtCore.QMetaObject.invokeMethod(
+            self.log, "appendPlainText", QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(str, line))
+
+    def start(self):
+        root = self.e_root.text().strip()
+        if not root or not Path(root).is_dir():
+            QtWidgets.QMessageBox.warning(
+                self, "FTPサーバー", "公開フォルダ（存在するフォルダ）を指定してください")
+            return
+        try:
+            self.server = ftpserver.FtpServer(
+                root, port=self.sp_port.value(),
+                user=self.e_user.text().strip(),
+                password=self.e_pass.text(),
+                list_style=self.cmb_style.currentData(),
+                log_func=self._append_log)
+            self.server.start()
+        except OSError as e:
+            self.server = None
+            QtWidgets.QMessageBox.warning(
+                self, "FTPサーバー",
+                f"開始できません:\n{e}\n\n"
+                "・同じ番号を他のソフトが使っていないか\n"
+                "・Windowsのファイアウォールで許可したか\n"
+                "を確認してください（21番が使えなければ 2121 などでも動きます。"
+                "その場合は制御装置側の『ポート番号』も同じ値にしてください）")
+            return
+        self.lbl_state.setText(f"動作中  {self.server.address()}")
+        self.lbl_state.setStyleSheet("color:#166534; font-weight:bold;")
+        self.b_start.setEnabled(False); self.b_stop.setEnabled(True)
+        for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
+            w.setEnabled(False)
+        self._refresh_table()
+        self._persist()
+
+    def stop(self):
+        if self.server:
+            self.server.stop()
+            self.server = None
+        self.lbl_state.setText("停止中")
+        self.lbl_state.setStyleSheet("")
+        self.b_start.setEnabled(True); self.b_stop.setEnabled(False)
+        for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
+            w.setEnabled(True)
+
+    def _persist(self):
+        self.settings["ftp_root"] = self.e_root.text().strip()
+        self.settings["ftp_user"] = self.e_user.text().strip()
+        self.settings["ftp_password"] = self.e_pass.text()
+        self.settings["ftp_port"] = self.sp_port.value()
+        self.settings["ftp_list_style"] = self.cmb_style.currentData()
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.stop()                     # 閉じたら必ず止める（止め忘れ防止）
+        super().closeEvent(event)
+
+    def reject(self):
+        self.stop()
+        super().reject()
 
 
 class ControllerEditDialog(QtWidgets.QDialog):
@@ -7307,6 +7503,8 @@ class MainWindow(QtWidgets.QMainWindow):
              "（フォルダ分け／カード向けの平置きを選べる）"),
             ("アラーム…", self.show_alarm_help,
              "FANUCのアラーム番号・メッセージから意味と対処の目安を調べる"),
+            ("FTPサーバー…", self.show_ftp_server,
+             "このPCをFTPサーバーにして、カード無しで制御装置にファイルを取りに来させる"),
         ):
             act = tools_menu.addAction(text)
             act.setToolTip(tip)
@@ -8592,6 +8790,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_alarm_help(self):
         """FANUCアラームの番号/メッセージから意味・対処を調べる。"""
         AlarmHelpDialog(self, self.settings).exec()
+
+    def show_ftp_server(self):
+        """このPCをFTPサーバーにして、制御装置に直接ファイルを取りに来させる。"""
+        FtpServerDialog(self, self.settings).exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)

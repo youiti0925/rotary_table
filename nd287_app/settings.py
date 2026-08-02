@@ -152,6 +152,14 @@ DEFAULTS = dict(
     param_log_csv=r"マスタ/パラメータ作成ログ.csv",
     # FANUCアラーム検索: 内蔵辞書に追加で読むユーザー/メーカー固有CSV（任意）
     fanuc_alarm_csv=r"マスタ/FANUCアラーム.csv",
+    # アプリ内FTPサーバー（カード無しで制御装置にファイルを取りに来させる）。
+    # FANUCの組込みイーサネットの「FTP転送」は制御装置がPCへ取りに行く作りなので、
+    # PC側にサーバーが要る。ダイアログを開いている間だけ動く（閉じると止まる）。
+    ftp_root="",                 # 機械に見せるフォルダ（空なら出力先を初期値に使う）
+    ftp_user="cnc",
+    ftp_password="cnc",
+    ftp_port=21,
+    ftp_list_style="unix",       # 一覧の形。出ないときは "dos"
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

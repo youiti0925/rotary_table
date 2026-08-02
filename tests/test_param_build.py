@@ -798,6 +798,60 @@ class TestMachineNumberStyle(unittest.TestCase):
         self.assertEqual(F_PRM.validate_prm(self.RAW), [])
 
 
+class TestFolderStatus(unittest.TestCase):
+    """出力先（メモリカード）の空きとファイル数を作る前に見せる。
+
+    実機で、カードに入っていたファイルを全部消して1本だけにしたら、そこで
+    初めて制御装置の画面にファイルが出てきた。書けたかどうかと、制御装置に
+    見えるかどうかは別。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make(self, n):
+        for i in range(n):
+            Path(self.tmp, f"F{i:04d}.DAT").write_text("x")
+
+    def test_reports_count_and_free_space(self):
+        self._make(3)
+        note, warn = B.folder_status(self.tmp)
+        self.assertIn("ファイル 3個", note)
+        self.assertIn("空き", note)
+        self.assertEqual(warn, [])
+
+    def test_warns_when_many_files(self):
+        self._make(12)
+        _note, warn = B.folder_status(self.tmp, file_warn=10)
+        self.assertTrue(any("12個" in w for w in warn))
+        self.assertTrue(any("制御装置の画面に出てこない" in w for w in warn))
+
+    def test_no_warning_just_under_the_line(self):
+        self._make(9)
+        _note, warn = B.folder_status(self.tmp, file_warn=10)
+        self.assertEqual(warn, [])
+
+    def test_warns_when_not_enough_space(self):
+        _note, warn = B.folder_status(self.tmp, need=10 ** 15)
+        self.assertTrue(any("空き容量が足りません" in w for w in warn))
+
+    def test_counts_files_only_not_folders(self):
+        self._make(2)
+        Path(self.tmp, "サブ").mkdir()
+        note, _warn = B.folder_status(self.tmp)
+        self.assertIn("ファイル 2個", note)
+
+    def test_missing_folder_is_quiet(self):
+        self.assertEqual(B.folder_status(str(Path(self.tmp, "ない"))), ("", []))
+        self.assertEqual(B.folder_status(""), ("", []))
+        self.assertEqual(B.folder_status(None), ("", []))
+
+
 class TestOutputFilename(unittest.TestCase):
     """出力名に 型式・軸・傾斜/回転 を入れる（フォルダにまとめて作っても中身が分かる）"""
 

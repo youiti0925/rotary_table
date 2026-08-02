@@ -1183,13 +1183,24 @@ class ProgramDialog(QtWidgets.QDialog):
         # 機械が読める形（ISOコードの文字だけ・EOBは改行）にしてから書く。
         # 以前は errors="replace" で日本語が "?" になり、";" もそのまま書いていた
         # ため、制御装置が読み込めなかった。
+        data = fanuc.nc_bytes(text, self._eob())
+        # 保存先（カード）の空き・ファイル数。書けても制御装置の画面に出てこない
+        # ことがある（実機で、全部消して1本だけにしたら出てきた）
+        card, warns = param_build.folder_status(Path(path).parent, len(data))
+        if warns and QtWidgets.QMessageBox.question(
+                self, "保存先の確認",
+                "⚠ " + "\n⚠ ".join(warns) + "\n\nこのまま保存しますか？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
         with open(path, "wb") as f:
-            f.write(fanuc.nc_bytes(text, self._eob()))
+            f.write(data)
         self._persist({"nc_eob": self._eob()})  # 次回も同じ設定で作れるよう記憶
         problems = self._check()
         note = ("\n\n※点検で気になる点があります:\n・" + "\n・".join(problems[:4])
                 if problems else "")
-        QtWidgets.QMessageBox.information(self, "保存", f"保存しました:\n{path}{note}")
+        QtWidgets.QMessageBox.information(
+            self, "保存", f"保存しました:\n{path}\n{card}{note}")
 
     def _build_send_group(self):
         """「機械へ送信」の送信先設定（方式で共有フォルダ/FTPを切替）。"""
@@ -1403,11 +1414,20 @@ class ParamPreviewDialog(QtWidgets.QDialog):
     旧値と新値が違う行を強調する。
     """
 
-    def __init__(self, parent, rows, subtitle=""):
+    def __init__(self, parent, rows, subtitle="", out_dir="", need=0):
         super().__init__(parent)
         self.setWindowTitle("作成前プレビュー（旧値→新値）")
         fit_to_screen(self, 560, 460)
         v = QtWidgets.QVBoxLayout(self)
+        # 出力先（カード）の空きとファイル数。書けても制御装置の画面に出てこない
+        # ことがあるので、作る前にここで見せる
+        note, warns = param_build.folder_status(out_dir, need) if out_dir else ("", [])
+        if warns:
+            w = QtWidgets.QLabel("⚠ " + "\n⚠ ".join(warns))
+            w.setWordWrap(True)
+            w.setStyleSheet("background:#fef2f2; color:#b91c1c; padding:6px; "
+                            "border:1px solid #fecaca; border-radius:4px;")
+            v.addWidget(w)
         # rows は (番号, 旧, 新) か (番号, 軸, 旧, 新)。軸つき=2軸テーブルの両軸表示
         has_axis = bool(rows) and len(rows[0]) == 4
         norm = [(r[0], r[1], r[2], r[3]) if has_axis else (r[0], "", r[1], r[2])
@@ -1416,7 +1436,8 @@ class ParamPreviewDialog(QtWidgets.QDialog):
         head = QtWidgets.QLabel(
             (subtitle + "\n" if subtitle else "")
             + f"全 {len(norm)} 件中 {changed} 件が BASIC と異なります。"
-              "内容を確認して『作成』を押してください。")
+              "内容を確認して『作成』を押してください。"
+            + ("\n" + note if note else ""))
         head.setWordWrap(True)
         v.addWidget(head)
         cols = ["番号", "軸", "旧値(BASIC)", "新値"] if has_axis else ["番号", "旧値(BASIC)", "新値"]
@@ -2861,7 +2882,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                      soft, sparams)]
         sub = ("＋".join(f["kind"] for f in sel)
                + f" → {fname}（{ctl.label()}）")
-        if not ParamPreviewDialog(self, rows, subtitle=sub).exec():
+        if not ParamPreviewDialog(self, rows, subtitle=sub,
+                                  out_dir=out, need=len(raw)).exec():
             return
         try:
             out_path, missing, fmt = param_build.create_file_multi(
@@ -3807,7 +3829,8 @@ class ParamDialog(QtWidgets.QDialog):
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{self.e_model.text().strip() or '—'} → {fname}"
-                         f"（{nc_param.axis_name(axis)} 軸）").exec():
+                         f"（{nc_param.axis_name(axis)} 軸）",
+                out_dir=str(d), need=len(raw)).exec():
             return
         try:
             newtext, missing, fmt = param_build.build_text(
@@ -3910,7 +3933,8 @@ class ParamDialog(QtWidgets.QDialog):
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
-                         f"{self.e_model.text().strip() or '—'} → {fname}").exec():
+                         f"{self.e_model.text().strip() or '—'} → {fname}",
+                out_dir=str(out_dir), need=len(raw)).exec():
             return
         try:
             text_multi, missing, fmt = param_build.build_text_multi(
@@ -4995,7 +5019,8 @@ class ParamDBDialog(QtWidgets.QDialog):
                                axes=[(nc_param.axis_name(axis), kind)])
         if not ParamPreviewDialog(
                 self, rows,
-                subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）").exec():
+                subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）",
+                out_dir=out, need=len(raw)).exec():
             return
         try:
             out_path, missing, fmt = param_build.create_file(
@@ -5086,7 +5111,8 @@ class ParamDBDialog(QtWidgets.QDialog):
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
-                         f"{e.model} ＋ {partner.model} → {fname}").exec():
+                         f"{e.model} ＋ {partner.model} → {fname}",
+                out_dir=out, need=len(raw)).exec():
             return
         try:
             out_path, missing, fmt = param_build.create_file_multi(

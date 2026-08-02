@@ -238,6 +238,60 @@ def filename(prefix: str, seiban: str, ext: str = ".DAT", *, model: str = "",
     return f"{stem}{ext}"
 
 
+# 出力先（メモリカード）の目安。制御装置の画面にファイルが出ないことがあるため。
+#   実例: カードに入っていたファイルを全部消して1本だけにしたら、そこで初めて
+#   制御装置の画面に出てきた（長い名前でも出た）。空き容量そのものだけでなく、
+#   ファイルの数（FATのディレクトリ枠）も効くので、両方を作る前に見せる。
+CARD_FILE_WARN = 100          # このフォルダにこれ以上あったら知らせる
+CARD_FREE_WARN = 2 * 1024 * 1024   # 空きがこれ未満なら知らせる
+
+
+def _fmt_size(n) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
+        n /= 1024
+
+
+def folder_status(out_dir, need: int = 0, *, file_warn: int = CARD_FILE_WARN,
+                  free_warn: int = CARD_FREE_WARN) -> tuple:
+    """出力先の空き容量とファイル数を調べる。戻り値 (説明文, 警告リスト)。
+
+    メモリカードが一杯だったり、ファイルが多すぎたりすると、書けてはいても
+    <b>制御装置の画面にファイルが出てこない</b>（実機で確認）。作る前に知らせる。
+    """
+    import shutil
+    p = Path(out_dir) if out_dir else None
+    if not p or not p.is_dir():
+        return "", []
+    try:
+        files = [f for f in p.iterdir() if f.is_file()]
+    except OSError as e:
+        return "", [f"出力先を読めません: {e}"]
+    try:
+        usage = shutil.disk_usage(str(p))
+        free, total = usage.free, usage.total
+    except OSError:
+        free = total = None
+    note = f"出力先: ファイル {len(files)}個"
+    if free is not None:
+        note += f" / 空き {_fmt_size(free)}（全体 {_fmt_size(total)}）"
+    warn = []
+    if free is not None and need and free < need:
+        warn.append(f"空き容量が足りません（必要 {_fmt_size(need)} / 空き "
+                    f"{_fmt_size(free)}）。カードのファイルを減らしてください")
+    elif free is not None and free < free_warn:
+        warn.append(f"空き容量が少ないです（{_fmt_size(free)}）。"
+                    "書けても制御装置の画面に出てこないことがあります")
+    if len(files) >= file_warn:
+        warn.append(f"このフォルダにファイルが {len(files)}個 あります。"
+                    "多いと制御装置の画面に出てこないことがあります"
+                    "（実機で、全部消して1本だけにしたら出てきた例があります）。"
+                    "使わないファイルは減らすか、フォルダに分けてください")
+    return note, warn
+
+
 def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
                 seiban: str, ext: str = ".DAT", eob: str = None,
                 zero_params=None, soft_limit=None, soft_params=None,

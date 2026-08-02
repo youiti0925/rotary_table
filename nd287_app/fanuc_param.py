@@ -149,6 +149,29 @@ def validate_prm(text: str, reference: str = "") -> list:
             "そこから先が読み込まれません")
     if ";" in text:
         problems.append('";" は文字として書けません（EOBは改行）')
+    # 製品データ(表示用 .prm)の書き方がそのまま残っていないか。実機が出した31本には
+    # + 付きの値が1つも無く、小数はすべて1桁だった（8万値）。表示用の "+108.000" を
+    # そのまま書いた出力が実機で読めなかったため、書く前にここで気づけるようにする。
+    plus = re.findall(r"[PM]\s*\+\d", text)
+    if plus:
+        problems.append(
+            f"値に + が付いています（{len(plus)}個）。実機が出すファイルには + が"
+            "1つもありません（製品データの表示用の書き方が残っています）")
+    # 旧書式（Q1なし・8台）は小数を1つも使わない世代。そこに小数が混ざっていたら、
+    # 単位（最小設定単位の整数 か mm/deg）が食い違っている恐れがある。
+    if not re.search(r"N\d+Q\d", str(text)[:3000]):
+        dec = re.findall(r"[PM]\s*[-+]?\d+\.\d", text)
+        if dec:
+            problems.append(
+                f"この書式（Q1なしの旧世代）のファイルに小数の値が {len(dec)}個 "
+                "あります。この世代の実機は小数を1つも使いません（値は最小設定単位の"
+                "整数）。単位が食い違っている可能性があるので、実機の値と見比べてください")
+    long_dec = re.findall(r"[PM]\s*[-+]?\d+\.\d{2,}", text)
+    if long_dec:
+        problems.append(
+            f"小数が2桁以上の値が {len(long_dec)}個 あります"
+            f"（例 {long_dec[0].lstrip('PM').strip()}）。実機が出すファイルは"
+            "すべて1桁でした（値は同じでも書き方が違うと読まないことがあります）")
     bad = sorted({c for c in text if ord(c) > 127})
     if bad:
         problems.append(f"ASCIIでない文字が入っています {''.join(bad)[:8]!r}")
@@ -184,6 +207,44 @@ _LINE = re.compile(r"^(\s*)(N(\d+)(?:Q\d+)?)(.*)$")
 # 旧書式の空白（"A1 P 3000" の2か所）も捕まえて、書き戻すときにそのまま復元する。
 _SEG = re.compile(r"([LASTlast]\d+)?(\s*)([PM])(\s*)([-+]?\d+(?:\.\d+)?)")
 _VALUE = r"[-+]?\d+(?:\.\d+)?"
+
+
+_NUMBER = re.compile(r"([-+]?)(\d+)(?:\.(\d*))?$")
+
+
+def normalize_number(value, current=None, allow_decimal=True) -> str:
+    """製品データの表示用の書き方を、実機が出す書き方へそろえる。値そのものは変えない。
+
+    製品の .prm（ヘッダ＋CSV形式）は人が読む用なので "+108.000" のように
+    <b>＋符号と3桁の小数</b>で書かれている。これをそのまま実機ネイティブの
+    ファイルへ書くと、実機が出すファイルには存在しない書き方になる。
+    実データ: BASIC 31本の 80,185個の値は<b>すべて小数1桁</b>で、＋符号は1つも無い。
+    （この形のまま出力した TR50014175.DAT が制御装置で読めなかった）
+
+    やること（どれも値は変わらない）:
+      "+108.000" → "108.0" ／ "-1.000" → "-1.0" ／ "108.125" → "108.125"
+      書き込む先(current)が整数で書かれていて小数部が0だけなら "3000.000" → "3000"
+    """
+    s = str(value).strip()
+    m = _NUMBER.match(s)
+    if not m:
+        return s                       # 数値以外（ビット列以外の文字など）は触らない
+    sign, whole, frac = m.group(1), m.group(2), m.group(3)
+    sign = "-" if sign == "-" else ""
+    if frac is None:
+        return sign + whole            # 整数・ビット列（先頭の0も残す）はそのまま
+    if not allow_decimal:
+        # 旧書式(8台)のファイルには小数が1つも無い＝値は最小設定単位の整数。
+        # ここで小数を落とすと 1000倍ずれる恐れがあるので、勝手に直さず
+        # そのまま返す（validate_prm が「小数を使わない書式」として指摘する）。
+        return s
+    frac = frac.rstrip("0")
+    if frac:
+        return f"{sign}{whole}.{frac}"
+    # 小数部が0だけ。書き込む先が整数書式ならそちらに合わせる
+    if current is not None and "." not in str(current):
+        return sign + whole
+    return f"{sign}{whole}.0"
 
 
 def segments(line: str):

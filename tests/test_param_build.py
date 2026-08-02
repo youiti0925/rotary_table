@@ -722,6 +722,82 @@ class TestSoftLimit(unittest.TestCase):
         self.assertEqual(B.soft_limit_rows(raw, [4]), [])   # A4 が無い＝対象外
 
 
+class TestMachineNumberStyle(unittest.TestCase):
+    """製品データの表示用の書き方を、実機が出す書き方へそろえる。
+
+    実データ: 実機BASIC 31本の 80,185個の値は<b>すべて小数1桁</b>で、
+    ＋符号は1つも無かった。表示用の "+108.000" をそのまま書いた
+    TR50014175.DAT が制御装置で読めなかった。値そのものは変えない。
+    """
+
+    RAW = ("%\nN01260Q1A1P360.0A2P360.0\n"
+           "N01320Q1A1P-1.0A2P-1.0\n"
+           "N01821Q1A1P2000A2P2000\n%\n")
+
+    def test_strips_plus_sign(self):
+        self.assertEqual(F_PRM.normalize_number("+108.000"), "108.0")
+        self.assertEqual(F_PRM.normalize_number("+3000"), "3000")
+
+    def test_strips_trailing_zeros_but_keeps_one(self):
+        self.assertEqual(F_PRM.normalize_number("360.000"), "360.0")
+        self.assertEqual(F_PRM.normalize_number("-1.000"), "-1.0")
+        self.assertEqual(F_PRM.normalize_number("15000.000"), "15000.0")
+
+    def test_does_not_lose_real_decimals(self):
+        self.assertEqual(F_PRM.normalize_number("108.125"), "108.125")
+        self.assertEqual(F_PRM.normalize_number("-0.001"), "-0.001")
+        self.assertEqual(F_PRM.normalize_number("1.010"), "1.01")
+
+    def test_integer_slot_stays_integer(self):
+        self.assertEqual(F_PRM.normalize_number("3000.000", current="2000"), "3000")
+        self.assertEqual(F_PRM.normalize_number("3000.000", current="2000.0"), "3000.0")
+
+    def test_bit_values_untouched(self):
+        self.assertEqual(F_PRM.normalize_number("00100000"), "00100000")
+        self.assertEqual(F_PRM.normalize_number("0000001*"), "0000001*")
+
+    def test_non_numbers_untouched(self):
+        for v in ("", "ON", "あ", None):
+            self.assertEqual(F_PRM.normalize_number(v), str(v).strip())
+
+    def test_applied_when_building(self):
+        new, _m, _f = B.build_text(
+            self.RAW, {"01260": "+360.000", "01320": "-1.000",
+                       "01821": "3000.000"}, 1)
+        self.assertIn("N01260Q1A1P360.0A2P360.0", new)
+        self.assertIn("N01320Q1A1P-1.0A2P-1.0", new)
+        self.assertIn("N01821Q1A1P3000A2P2000", new)   # 整数の所は整数のまま
+        self.assertNotIn("+", new)
+
+    def test_preview_shows_what_is_written(self):
+        rows = B.preview_rows(self.RAW, {"01260": "+360.000"}, 1)
+        self.assertEqual(rows, [("01260", "360.0", "360.0")])
+
+    def test_old_format_values_are_not_silently_converted(self):
+        """旧書式(8台)は小数を1つも使わない。勝手に落とすと1000倍ずれる。
+
+        直さずそのまま書き、書く前の点検で「単位が食い違うかも」と知らせる。
+        """
+        old = ("%\nN01260 A1 P 360 A2 P 360\nN01320 A1 P-1 A2 P-1\n"
+               "N01821 A1 P 2000\n%\n")
+        new, _m, _f = B.build_text(old, {"01320": "-100.000"}, 1)
+        self.assertIn("-100.000", new)          # 値を変えない
+        self.assertTrue(any("旧世代" in p for p in F_PRM.validate_prm(new)))
+
+    def test_old_format_integers_pass_through(self):
+        old = ("%\nN01260 A1 P 360\nN01320 A1 P-1\nN01821 A1 P 2000\n%\n")
+        new, _m, _f = B.build_text(old, {"01821": "3000"}, 1)
+        self.assertIn("N01821 A1 P 3000", new)  # 空白の形もそのまま
+        self.assertEqual(F_PRM.validate_prm(new), [])
+
+    def test_validate_catches_display_format(self):
+        bad = "%\nN01320Q1A1P+108.000A2P-1.0\nN01821Q1A1P2000\nN01825Q1A1P3000\n%\n"
+        problems = " ".join(F_PRM.validate_prm(bad))
+        self.assertIn("+", problems)
+        self.assertIn("小数が2桁以上", problems)
+        self.assertEqual(F_PRM.validate_prm(self.RAW), [])
+
+
 class TestOutputFilename(unittest.TestCase):
     """出力名に 型式・軸・傾斜/回転 を入れる（フォルダにまとめて作っても中身が分かる）"""
 

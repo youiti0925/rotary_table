@@ -81,10 +81,15 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
 
     - 先頭の ' (表示用クォート)を除去。
     - ビット値の '*'(不問) は BASIC の当該軸(無ければ共通)の現在ビットを残す（マージ）。
-    BASIC がネイティブでない、または値に '/'* が無ければそのまま返す（実害なし）。
+    - 数値は実機が出す書き方へそろえる（"+108.000" → "108.0"。値は変えない）。
+    BASIC がネイティブでない場合はそのまま返す（実害なし）。
     """
     if not fanuc_param.looks_like_fanuc_prm(basic_text):
         return dict(values)
+    # 旧書式(8台)のファイルは小数を1つも使わない＝値は最小設定単位の整数。
+    # そこへ小数を書くと書式違反になるが、勝手に落とすと1000倍ずれる恐れがある。
+    # その世代では数値に触らず、書く前の点検で気づかせる。
+    allow_decimal = _is_new_format(basic_text)
     out = {}
     for key, val in values.items():
         # キーは 番号 でも (番号, ラベル) でもよい。共通値はラベル付きで来る
@@ -92,14 +97,16 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
         v = str(val).strip()
         if v.startswith("'"):
             v = v[1:].strip()
+        if label:
+            cur = fanuc_param.get_value(basic_text, num, label)
+        else:                          # 実際に書き込むスロットの現在値を基準にする
+            cur = fanuc_param.value_on_axis(basic_text, num, axis) if axis else None
+            if cur is None:
+                cur = fanuc_param.get_value(basic_text, num)
         if "*" in v:
-            if label:
-                cur = fanuc_param.get_value(basic_text, num, label)
-            else:
-                cur = fanuc_param.get_value(basic_text, num, f"A{axis}") if axis else None
-                if cur is None:
-                    cur = fanuc_param.get_value(basic_text, num)
             v = _merge_bits(v, cur or "")
+        else:
+            v = fanuc_param.normalize_number(v, cur, allow_decimal)
         out[key] = v
     return out
 

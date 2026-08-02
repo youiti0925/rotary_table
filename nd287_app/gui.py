@@ -805,7 +805,7 @@ def make_soft_limit_combo(settings):
     cmb = QtWidgets.QComboBox()
     cmb.addItem(f"客先どおり入れる（{nums}）", "apply")
     cmb.addItem("入れない（BASICのまま）", "skip")
-    cmb.addItem("無効化する（＋側 -1 / −側 +1）", "disable")
+    cmb.addItem("無効化する（＋側 -1 / −側 1）", "disable")
     cmb.setToolTip(
         f"客先パラメータのソフトリミット（{nums}）をどうするか。\n"
         "・入れない … 客先値を書かず、BASICの値をそのまま残す（検査で範囲が邪魔なとき）\n"
@@ -1402,10 +1402,16 @@ class ProgramDialog(QtWidgets.QDialog):
 
 
 def _log_param_creation(settings, **f):
-    """パラメータ作成のたびに作成ログ(追記式)へ1行残す。失敗は無視（作成は成功扱い）。"""
+    """パラメータ作成のたびに作成ログ(追記式)へ1行残す。
+
+    戻り値は失敗した理由（成功なら ""）。<b>黙って捨てない</b>。
+    Excelでログを開いたまま作成すると書けないが、画面は「作成しました」と
+    出ていた。ヘルプもDB画面もこれを「厳密な履歴」と言っているので、
+    書けなかったことは必ず知らせる。
+    """
     path = settings.get("param_log_csv", "")
     if not path:
-        return
+        return ""
     p = Path(path)
     if not p.is_absolute():
         from .settings import app_dir
@@ -1418,9 +1424,12 @@ def _log_param_creation(settings, **f):
             "制御": f.get("controller", ""), "軸": f.get("axis", ""),
             "Seiban": f.get("seiban", ""), "使用BASIC": f.get("basic", ""),
             "出力ファイル": f.get("out", ""), "反映": f.get("applied", ""),
-            "件数": f.get("total", "")})
-    except Exception:
-        pass
+            "件数": f.get("total", ""),
+            # 同じ入力から中身の違う2本を作れるので、選択も残す
+            "ソフトリミット": f.get("soft", ""), "0化": f.get("zeroed", "")})
+        return ""
+    except Exception as e:
+        return f"作成ログに記録できませんでした（{e}）"
 
 
 class ParamLogDialog(QtWidgets.QDialog):
@@ -1856,8 +1865,16 @@ class FtpServerDialog(QtWidgets.QDialog):
         note, problems = param_build.check_received(path)
         if note:
             self._append_log("　点検 " + note)
-        for p in problems:
+        # ⚠は全部出す（F35の「途中に %」のような本命を消さないため）が、
+        # 行単位の細かい指摘は丸める。ログは400行で流れてしまう
+        heavy = [p for p in problems if not p.startswith("行")]
+        light = [p for p in problems if p.startswith("行")]
+        for p in heavy[:12]:
             self._append_log("　⚠ " + p)
+        if len(heavy) > 12:
+            self._append_log(f"　⚠ ほか {len(heavy) - 12} 件")
+        if light:
+            self._append_log(f"　⚠ 行ごとの指摘が {len(light)} 件（先頭: {light[0][:40]}）")
         if not problems and note:
             self._append_log("　点検OK")
 
@@ -3390,12 +3407,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 bit=int(self.settings.get("closed_loop_bit", 1)),
                 full_when=int(self.settings.get("closed_loop_full", 1)))
             n_miss = sum(1 for (_m, a) in missing if a == axnum)
-            _log_param_creation(
+            _log_ng = _log_param_creation(
                 self.settings, model=meta.get("model", ""), kind=f["kind"], mode=mode,
                 motor=meta.get("motor", ""), controller=controller,
                 axis=nc_param.axis_name(axnum), seiban=seiban,
                 basic=Path(master).name, out=fname,
-                applied=len(vals) - n_miss, total=len(vals))
+                applied=len(vals) - n_miss, total=len(vals),
+                soft=self._soft_limit(),
+                zeroed="あり" if self._zero_params() else "なし")
             if csv_path:
                 entry = nc_param.ParamEntry(
                     model=meta.get("model", ""), kind=f["kind"], mode=mode,
@@ -3430,6 +3449,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if reg:
             msg += "\nデータベース履歴:\n" + "\n".join(reg)
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        if _log_ng:
+            msg += "\n⚠ " + _log_ng
+
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
 
@@ -4318,13 +4340,15 @@ class ParamDialog(QtWidgets.QDialog):
                 if fmt == "fanuc" else f"{Path(master_path).name} を元に差替え")
         mode, eff = self._detect_mode(raw, values, axis)
         self._persist()
-        _log_param_creation(
+        _log_ng = _log_param_creation(
             self.settings, model=self.e_model.text().strip(),
             kind=nc_param.kind_from_prefix(prefix), mode=mode,
             controller=nc_param.controller_from_basic(master_path),
             axis=nc_param.axis_name(axis), seiban=seiban,
             basic=Path(master_path).name, out=fname,
-            applied=plan["applied"], total=plan["total"])
+            applied=plan["applied"], total=plan["total"],
+            soft=self._soft_limit(),
+            zeroed="あり" if self._zero_params() else "なし")
         # 製品データ（完成済み.prm）から抽出した「変更点」だけをデータベースへ登録し、
         # 次回は同じ型式を製品データ無しでも作れるようにする（source=="diff" のときだけ）。
         reg_msg = ""
@@ -4353,6 +4377,9 @@ class ParamDialog(QtWidgets.QDialog):
                 msg += f" 他{len(missing) - 12}件"
         msg += reg_msg
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        if _log_ng:
+            msg += "\n⚠ " + _log_ng
+
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     def _product_axis_split(self, raw):
@@ -4423,11 +4450,13 @@ class ParamDialog(QtWidgets.QDialog):
         for ax in axes:
             mode, _eff = self._detect_mode(raw, per_axis[ax], ax)
             n_miss = sum(1 for (_m, a) in missing if a == ax)
-            _log_param_creation(
+            _log_ng = _log_param_creation(
                 self.settings, model=model, mode=mode,
                 controller=controller, axis=nc_param.axis_name(ax),
                 seiban=seiban, basic=Path(master_path).name, out=fname,
-                applied=len(per_axis[ax]) - n_miss, total=len(per_axis[ax]))
+                applied=len(per_axis[ax]) - n_miss, total=len(per_axis[ax]),
+                soft=self._soft_limit(),
+                zeroed="あり" if self._zero_params() else "なし")
             csv_path = self.e_csv.text().strip()
             if model and csv_path:
                 entry = nc_param.ParamEntry(
@@ -4458,6 +4487,9 @@ class ParamDialog(QtWidgets.QDialog):
                 "運用名が違う場合は出力後にリネームしてください。"
                 "\n機械側での入力は人が実施（PWE/電源再投入に注意）。")
         self.reload()
+        if _log_ng:
+            msg += "\n⚠ " + _log_ng
+
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     def _detect_mode(self, raw, values, axis):
@@ -5405,12 +5437,14 @@ class ParamDBDialog(QtWidgets.QDialog):
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return
-        _log_param_creation(
+        _log_ng = _log_param_creation(
             self.settings, model=e.model, kind=nc_param.kind_from_prefix(prefix),
             mode=e.mode, motor=e.motor,
             controller=nc_param.controller_from_basic(master),
             axis=nc_param.axis_name(axis), seiban=seiban, basic=Path(master).name,
-            out=out_path.name, applied=plan["applied"], total=plan["total"])
+            out=out_path.name, applied=plan["applied"], total=plan["total"],
+            soft=self._soft_limit(),
+            zeroed="あり" if self._zero_params() else "なし")
         # 作成＝履歴登録（制御/軸/Seibanが変われば別エントリとして残る）
         reg = ""
         if self._csv_path():
@@ -5433,6 +5467,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         if missing:
             msg += f"\n⚠ BASICに無い番号（未反映）: {', '.join(missing[:12])}"
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        if _log_ng:
+            msg += "\n⚠ " + _log_ng
+
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     def make_two_axis(self):
@@ -5504,7 +5541,7 @@ class ParamDBDialog(QtWidgets.QDialog):
         reg = []
         for ent, ax in ((e, a1), (partner, a2)):
             n_miss = sum(1 for (_m, a) in missing if a == ax)
-            _log_param_creation(
+            _log_ng = _log_param_creation(
                 self.settings, model=ent.model, kind=ent.kind, mode=ent.mode,
                 motor=ent.motor, controller=controller,
                 axis=nc_param.axis_name(ax), seiban=seiban, basic=Path(master).name,
@@ -5535,6 +5572,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         if reg:
             msg += "\nデータベース履歴:\n" + "\n".join(reg)
         msg += "\n\n機械側での入力は人が実施（PWE/電源再投入に注意）。"
+        if _log_ng:
+            msg += "\n⚠ " + _log_ng
+
         QtWidgets.QMessageBox.information(self, "作成しました", msg)
 
     # ----- 吸い出し→差分登録 -----
@@ -6882,10 +6922,15 @@ class BatchProgramDialog(QtWidgets.QDialog):
         if not entries:
             QtWidgets.QMessageBox.information(self, "一括作成", "対象の型式がありません")
             return
+        # いちばん数を作る画面なので、カードの空き・ファイル数をここでも見る
+        # （書けても制御装置の画面に出てこないことがある）
+        note, warns = param_build.folder_status(out, need=len(entries) * 8 * 1024)
+        head = (f"{len(entries)}型式ぶんの測定プログラムを作ります。\n出力先: {out}\n"
+                + (note + "\n" if note else "")
+                + ("\n⚠ " + "\n⚠ ".join(warns) + "\n" if warns else "")
+                + "よろしいですか？")
         if QtWidgets.QMessageBox.question(
-                self, "一括作成",
-                f"{len(entries)}型式ぶんの測定プログラムを作ります。\n出力先: {out}\n"
-                "よろしいですか？",
+                self, "一括作成", head,
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
             return
@@ -7962,6 +8007,12 @@ class MainWindow(QtWidgets.QMainWindow):
             msg = f"型式マスタの読み込みに失敗: {ex}"
             self.masters = None
             QtCore.QTimer.singleShot(0, lambda: self.statusBar().showMessage(msg))
+        # 設定ファイルが壊れていて既定値で起動した場合は必ず知らせる。
+        # 黙っていると、次に設定を保存した時点で本番の設定が消える。
+        err = self.settings.get("_load_error")
+        if err:
+            QtCore.QTimer.singleShot(0, lambda: QtWidgets.QMessageBox.warning(
+                self, "設定ファイル", err))
         # 起動後にマスタの欠落を確認して、見つからなければ画面が出てから警告する
         QtCore.QTimer.singleShot(300, self.warn_missing_masters)
         self.e_model.editingFinished.connect(self.on_model_entered)

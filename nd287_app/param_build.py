@@ -229,13 +229,16 @@ def filename(prefix: str, seiban: str, ext: str = ".DAT", *, model: str = "",
     ext = str(ext or ".DAT")
     if not ext.startswith("."):
         ext = "." + ext
-    stem = f"{prefix}{seiban}"
+    # 全角で入れた Seiban（５００１３０７８）や / を含む値がそのまま
+    # ファイル名になっていた（Linux では作成に失敗し、原因の分からない
+    # エラーが出る）。型式と同じ扱いにそろえる。
+    stem = f"{name_tag(prefix)}{name_tag(seiban)}"
     if detail:
         parts = [name_tag(model)]
         for a in (axes or ()):
             parts.append(axis_tag(*a) if isinstance(a, (tuple, list)) else axis_tag(a))
         stem = str(sep or "_").join([stem] + [p for p in parts if p])
-    return f"{stem}{ext}"
+    return f"{stem or 'NONAME'}{ext}"
 
 
 # 出力先（メモリカード）の目安。制御装置の画面にファイルが出ないことがあるため。
@@ -459,9 +462,11 @@ def _decimal_style(raw: str, number, label: str) -> bool:
     return _is_new_format(raw)
 
 
-def soft_limit_off_value(raw: str, number, label: str) -> str:
+def soft_limit_off_value(raw: str, number, label: str, extra=None) -> str:
     """その番号の「制限なし」値（-1 / -1.0）。小数点の有無はファイルに合わせる。"""
-    base = SOFT_LIMIT_OFF.get(str(fanuc_param._norm_num(number)).lstrip("0"))
+    off = dict(SOFT_LIMIT_OFF)
+    off.update({str(k).lstrip("0"): str(v) for k, v in (extra or {}).items()})
+    base = off.get(str(fanuc_param._norm_num(number)).lstrip("0"))
     if base is None:
         return None
     return base + ".0" if _decimal_style(raw, number, label) else base
@@ -490,7 +495,12 @@ def soft_limit_rows(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> list:
             if cur is None:
                 continue                       # その軸のスロットが無い
             new = soft_limit_off_value(raw, num, label)
-            if new is None or _same_number(cur, new):
+            if new is None:
+                # 設定で番号を足したが、無効化の値が分からない場合。
+                # 黙って飛ばすと「無効化を選んだのに何も起きない」になる
+                out.append((str(num), label, str(cur), "（無効化の値が不明）"))
+                continue
+            if _same_number(cur, new):
                 continue                       # 既に「制限なし」
             out.append((str(num), label, str(cur), new))
     return out
@@ -501,6 +511,8 @@ def disable_soft_limit(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> tuple:
     rows = soft_limit_rows(raw, axes, params)
     text = raw
     for num, label, _old, new in rows:
+        if new.startswith("（"):          # 値が分からない番号は書かない（知らせるだけ）
+            continue
         text, _ok = fanuc_param.set_value(text, num, new, label)
     return text, rows
 

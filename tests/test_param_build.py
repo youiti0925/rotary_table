@@ -717,3 +717,33 @@ class TestMultiPathLabels(unittest.TestCase):
         rows = B.preview_rows_multi(self.BASIC, per_axis, common)
         self.assertTrue(any(r[0] == "03202(L2)" and r[2] == "00000000"
                             and r[3] == "10001111" for r in rows), rows)
+
+
+class TestMidFilePercent(unittest.TestCase):
+    """途中の % は「読取終わり」。そこから先が丸ごと無視される。
+
+    実データ F35BASIC に1箇所あった（'%1P00000000'。本来は
+    'N?????Q1P00000000' で、先頭7文字が % に化けている）。
+    そのため N27124〜N27609 の258行が制御装置に読まれない。
+    """
+
+    def test_detects_mid_file_percent(self):
+        text = "%\nN01825Q1A1P3000\n%1P00000000\nN02020Q1A1P255\n%\n"
+        probs = F_PRM.validate_prm(text)
+        self.assertTrue(any("途中に %" in p for p in probs), probs)
+        self.assertTrue(any("読み込まれません" in p for p in probs))
+
+    def test_reports_where(self):
+        text = "%\nN01825Q1A1P3000\n%1P0\n%\n"
+        p = [x for x in F_PRM.validate_prm(text) if "途中に %" in x][0]
+        self.assertIn("3行目", p)
+        self.assertIn("%1P0", p)
+
+    def test_normal_file_is_clean(self):
+        text = "%\nN01825Q1A1P3000\nN02020Q1A1P255\n%\n"
+        self.assertFalse(any("途中に %" in p for p in F_PRM.validate_prm(text)))
+
+    def test_cnc_id_header_is_not_flagged(self):
+        # 先頭の "%(CNCID=…)" は正規のヘッダなので途中扱いしない
+        text = "%(CNCID=3C7B5D01)\nN01825Q1A1P3000\n%\n"
+        self.assertFalse(any("途中に %" in p for p in F_PRM.validate_prm(text)))

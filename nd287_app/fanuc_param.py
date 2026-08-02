@@ -140,6 +140,13 @@ def validate_prm(text: str, reference: str = "") -> list:
     # % の後ろに制御装置IDのコメントを付けて出すことがある（F24/F80 で確認）。
     if not lines[0].strip().startswith("%") or not lines[-1].strip().startswith("%"):
         problems.append("先頭と末尾が % になっていません（FANUCの読取開始/終了記号）")
+    # 途中の % は「読取終わり」。そこから先が丸ごと無視される（実データで発見）。
+    mid = [i for i, l in enumerate(lines[1:-1], start=2) if l.strip().startswith("%")]
+    if mid:
+        problems.append(
+            f"途中に % があります（{len(mid)}箇所・最初は{mid[0]}行目 "
+            f"{lines[mid[0] - 1].strip()[:24]!r}）。% は読取終わりの記号なので、"
+            "そこから先が読み込まれません")
     if ";" in text:
         problems.append('";" は文字として書けません（EOBは改行）')
     bad = sorted({c for c in text if ord(c) > 127})

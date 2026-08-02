@@ -737,6 +737,63 @@ def zero_params_for(settings, checkbox=None):
                               param_build.ZERO_INDIVIDUAL_PARAMS))
 
 
+def soft_params_for(settings):
+    """ソフトリミットの番号（既定 1320 ＋側 / 1321 −側）。"""
+    return tuple((settings or {}).get("soft_limit_params",
+                                      param_build.SOFT_LIMIT_PARAMS))
+
+
+def soft_limit_for(settings, combo=None):
+    """客先のソフトリミットをどう扱うか 'apply'/'skip'/'disable'。
+
+    combo（画面の選択）があればそちら、無ければ設定の初期値。
+    """
+    if combo is not None:
+        return param_build.soft_mode(combo.currentData())
+    return param_build.soft_mode((settings or {}).get("soft_limit_mode", "apply"))
+
+
+def make_soft_limit_combo(settings):
+    """ソフトリミットの選び方コンボ（作成画面で共通の文言・既定にする）。"""
+    nums = "/".join(str(x) for x in soft_params_for(settings))
+    cmb = QtWidgets.QComboBox()
+    cmb.addItem(f"客先どおり入れる（{nums}）", "apply")
+    cmb.addItem("入れない（BASICのまま）", "skip")
+    cmb.addItem("無効化する（＋側 -1 / −側 +1）", "disable")
+    cmb.setToolTip(
+        f"客先パラメータのソフトリミット（{nums}）をどうするか。\n"
+        "・入れない … 客先値を書かず、BASICの値をそのまま残す（検査で範囲が邪魔なとき）\n"
+        "・無効化 … 作る軸だけ BASIC の出荷時の値（＋側 -1 / −側 +1）を書く\n"
+        "   ※手元のBASIC 31本すべてがこの値だった。完成品を元にするときに使う\n"
+        "変わる所は作成前プレビューに出る")
+    j = cmb.findData(soft_limit_for(settings))
+    if j >= 0:
+        cmb.setCurrentIndex(j)
+    return cmb
+
+
+def _merged_values(axis_values, common=None):
+    """軸ごとの値をまとめて1つの dict にする（プレビューの判定用。書き込みには使わない）。"""
+    out = dict(common or {})
+    for vals in (axis_values or {}).values():
+        out.update(vals or {})
+    return out
+
+
+def _label_axis_name(label):
+    """'A4' → 'A'（軸名）。軸ラベルでなければそのまま返す。"""
+    n = fanuc_param.axis_of_label(label)
+    return nc_param.axis_name(n) if n else str(label or "")
+
+
+def out_param_name(settings, prefix, seiban, ext=None, model="", axes=()):
+    """出力ファイル名。設定 param_name_detail が真なら 型式・軸・傾斜/回転 も付ける。"""
+    return param_build.filename(
+        prefix, seiban, ext if ext is not None else param_out_ext(settings),
+        model=model, axes=axes,
+        detail=bool((settings or {}).get("param_name_detail", True)))
+
+
 def fit_to_screen(dialog, want_w, want_h, margin=60):
     """ダイアログを「その画面に収まる大きさ」で開く。
 
@@ -2209,6 +2266,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "作る軸だけでなく全軸を0にする（他軸に値が残ったまま出荷されるのを防ぐ）。\n"
             "0にする箇所は作成前プレビューに出る")
         f3.addRow("", self.chk_zero_indiv)
+        self.cmb_soft = make_soft_limit_combo(settings)
+        f3.addRow("ソフトリミット", self.cmb_soft)
         col_right.addWidget(box3)
         col_right.addStretch(1)             # 右カラムは上詰め
 
@@ -2333,6 +2392,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     def _zero_params(self):
         return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
+
+    def _soft_limit(self):
+        """客先ソフトリミットの扱い（画面の選択 → 無ければ設定の既定）。"""
+        return soft_limit_for(self.settings, getattr(self, "cmb_soft", None))
+
+    def _soft_params(self):
+        return soft_params_for(self.settings)
 
     def _browse_basic(self):
         start = self.e_basic.text() or self._abs_dir("param_basic_dir")
@@ -2776,7 +2842,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
                       else "TR")
         else:
             prefix = seiban_flow.KIND_PREFIX.get(sel[0]["kind"], "T")
-        fname = param_build.filename(prefix, seiban)
+        # ファイル名に 型式・軸・傾斜/回転 を入れる（選択順＝T→R の順で並べる）
+        name_axes = [(nc_param.axis_name(seiban_flow_axis(a)), f["kind"])
+                     for f, a in zip(sel, asg)]
+        fname = out_param_name(self.settings, prefix, seiban,
+                               model=self.e_model.text().strip(), axes=name_axes)
         axis_label = "＋".join(f"{nc_param.axis_name(ax)}" for ax in sorted(axis_values))
         # プレビュー（軸つき）
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
@@ -2784,6 +2854,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         zparams = self._zero_params()
         rows += [(num, "全軸", old, new)
                  for (num, old, new) in param_build.preview_zero_rows(raw, zparams)]
+        soft, sparams = self._soft_limit(), self._soft_params()
+        rows += [(num, _label_axis_name(lab), old, new)
+                 for (num, lab, old, new) in param_build.soft_limit_preview(
+                     raw, _merged_values(axis_values), sorted(axis_values),
+                     soft, sparams)]
         sub = ("＋".join(f["kind"] for f in sel)
                + f" → {fname}（{ctl.label()}）")
         if not ParamPreviewDialog(self, rows, subtitle=sub).exec():
@@ -2791,8 +2866,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         try:
             out_path, missing, fmt = param_build.create_file_multi(
                 master, out, axis_values, prefix=prefix, seiban=seiban,
-                ext=self.settings.get("param_out_ext", ".DAT"),
-                eob=self.settings.get("nc_eob"), zero_params=zparams)
+                ext=param_out_ext(self.settings), name=fname,
+                eob=self.settings.get("nc_eob"), zero_params=zparams,
+                soft_limit=soft, soft_params=sparams)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(e))
             return
@@ -3207,6 +3283,8 @@ class ParamDialog(QtWidgets.QDialog):
         self.cmb_prefix.addItem("R（回転）", "R")
         axis_row.addWidget(self.cmb_prefix)
         form_job.addRow("対象軸", axis_row)
+        self.cmb_soft = make_soft_limit_combo(settings)
+        form_job.addRow("ソフトリミット", self.cmb_soft)
 
         self.e_out = QtWidgets.QLineEdit(str(settings.get("param_out_folder", "")
                                              or settings.get("nc_send_folder", "")))
@@ -3715,11 +3793,17 @@ class ParamDialog(QtWidgets.QDialog):
             return
         prefix = self.cmb_prefix.currentData() or "T"
         axis = int(self.cmb_axis.currentData() or 4)
+        kind = nc_param.kind_from_prefix(prefix)
+        soft, sparams = self._soft_limit(), self._soft_params()
         # 作成前プレビュー（旧値→新値）。中止なら書き込まない
         rows = param_build.preview_rows(raw, values, axis)
         rows += [(num, old, new) for (num, old, new)
                  in param_build.preview_zero_rows(raw, self._zero_params())]
-        fname = param_build.filename(prefix, seiban, self._param_ext())
+        rows += [(f"{num}({lab})" if lab else num, old, new) for (num, lab, old, new)
+                 in param_build.soft_limit_preview(raw, values, [axis], soft, sparams)]
+        fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
+                               model=self.e_model.text().strip(),
+                               axes=[(nc_param.axis_name(axis), kind)])
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{self.e_model.text().strip() or '—'} → {fname}"
@@ -3727,7 +3811,7 @@ class ParamDialog(QtWidgets.QDialog):
             return
         try:
             newtext, missing, fmt = param_build.build_text(
-                raw, values, axis, seiban, self._zero_params())
+                raw, values, axis, seiban, self._zero_params(), soft, sparams)
             self._dropped_numbers = []
             newtext = self._confirm_prm(newtext, fmt, fname)
             if newtext is None:
@@ -3808,13 +3892,21 @@ class ParamDialog(QtWidgets.QDialog):
         axes = sorted(per_axis)
         # 出力名は両軸を1ファイルにするので「TR」(傾斜+回転)を既定の頭文字にする
         prefix = "TR"
-        fname = param_build.filename(prefix, seiban, self._param_ext())
+        # 種別は完成品の差分からは決められない（どちらの軸が傾斜かが書かれていない）ので
+        # ファイル名には軸名だけを入れる。頭文字 TR が傾斜+回転を表す。
+        fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
+                               model=self.e_model.text().strip(),
+                               axes=[(nc_param.axis_name(a), "") for a in axes])
         axis_label = "＋".join(nc_param.axis_name(a) for a in axes)
+        soft, sparams = self._soft_limit(), self._soft_params()
         # 作成前プレビュー（軸つき）。中止なら書き込まない
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
                 for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis, common)]
         rows += [(num, "全軸", old, new) for (num, old, new)
                  in param_build.preview_zero_rows(raw, self._zero_params())]
+        rows += [(num, _label_axis_name(lab), old, new)
+                 for (num, lab, old, new) in param_build.soft_limit_preview(
+                     raw, _merged_values(per_axis, common), axes, soft, sparams)]
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
@@ -3822,7 +3914,7 @@ class ParamDialog(QtWidgets.QDialog):
             return
         try:
             text_multi, missing, fmt = param_build.build_text_multi(
-                raw, per_axis, common, seiban, self._zero_params())
+                raw, per_axis, common, seiban, self._zero_params(), soft, sparams)
             self._dropped_numbers = []
             text_multi = self._confirm_prm(text_multi, fmt, fname)
             if text_multi is None:
@@ -3976,6 +4068,13 @@ class ParamDialog(QtWidgets.QDialog):
 
     def _zero_params(self):
         return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
+
+    def _soft_limit(self):
+        """客先ソフトリミットの扱い（画面の選択 → 無ければ設定の既定）。"""
+        return soft_limit_for(self.settings, getattr(self, "cmb_soft", None))
+
+    def _soft_params(self):
+        return soft_params_for(self.settings)
 
     def _param_ext(self):
         return param_out_ext(self.settings)
@@ -4460,6 +4559,13 @@ class ParamDBDialog(QtWidgets.QDialog):
     def _zero_params(self):
         return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
 
+    def _soft_limit(self):
+        """客先ソフトリミットの扱い（画面の選択 → 無ければ設定の既定）。"""
+        return soft_limit_for(self.settings, getattr(self, "cmb_soft", None))
+
+    def _soft_params(self):
+        return soft_params_for(self.settings)
+
     def __init__(self, owner: "ParamDialog"):
         super().__init__(owner)
         self.owner = owner
@@ -4555,6 +4661,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         self.cmb_prefix.setCurrentIndex(owner.cmb_prefix.currentIndex())
         axr.addWidget(self.cmb_prefix)
         f.addRow("対象軸", axr)
+        self.cmb_soft = make_soft_limit_combo(self.settings)
+        self.cmb_soft.setCurrentIndex(owner.cmb_soft.currentIndex())   # 親画面の選択を引き継ぐ
+        f.addRow("ソフトリミット", self.cmb_soft)
         self.e_seiban = QtWidgets.QLineEdit()
         self.e_seiban.setPlaceholderText("新しい受注伝票番号（出力名 <頭文字><Seiban>.prm）")
         f.addRow("Seiban", self.e_seiban)
@@ -4876,8 +4985,14 @@ class ParamDBDialog(QtWidgets.QDialog):
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{ex}")
             return
+        soft, sparams = self._soft_limit(), self._soft_params()
         rows = param_build.preview_rows(raw, values, axis)
-        fname = param_build.filename(prefix, seiban, self._param_ext())
+        rows += [(num, old, new) for (num, _lab, old, new)
+                 in param_build.soft_limit_preview(raw, values, [axis], soft, sparams)]
+        kind = nc_param.kind_from_prefix(prefix) or e.kind
+        fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
+                               model=e.model,
+                               axes=[(nc_param.axis_name(axis), kind)])
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"{e.model} → {fname}（{nc_param.axis_name(axis)} 軸）").exec():
@@ -4885,8 +5000,9 @@ class ParamDBDialog(QtWidgets.QDialog):
         try:
             out_path, missing, fmt = param_build.create_file(
                 master, out, values, axis=axis, prefix=prefix, seiban=seiban,
-                ext=self._param_ext(), eob=self._param_eob(),
-                zero_params=self._zero_params())
+                ext=self._param_ext(), eob=self._param_eob(), name=fname,
+                zero_params=self._zero_params(),
+                soft_limit=soft, soft_params=sparams)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return
@@ -4956,10 +5072,17 @@ class ParamDBDialog(QtWidgets.QDialog):
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "2軸作成", f"BASIC を読めません:\n{ex}")
             return
-        fname = param_build.filename(prefix, seiban)
+        fname = out_param_name(self.settings, prefix, seiban, self._param_ext(),
+                               model=e.model,
+                               axes=[(nc_param.axis_name(a1), e.kind),
+                                     (nc_param.axis_name(a2), partner.kind)])
         axis_label = f"{nc_param.axis_name(a1)}＋{nc_param.axis_name(a2)}"
+        soft, sparams = self._soft_limit(), self._soft_params()
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
                 for (num, ax, old, new) in param_build.preview_rows_multi(raw, per_axis)]
+        rows += [(num, _label_axis_name(lab), old, new)
+                 for (num, lab, old, new) in param_build.soft_limit_preview(
+                     raw, _merged_values(per_axis), [a1, a2], soft, sparams)]
         if not ParamPreviewDialog(
                 self, rows,
                 subtitle=f"2軸テーブル（{axis_label} 軸を1ファイルへ）  "
@@ -4968,9 +5091,10 @@ class ParamDBDialog(QtWidgets.QDialog):
         try:
             out_path, missing, fmt = param_build.create_file_multi(
                 master, out, per_axis, prefix=prefix, seiban=seiban,
-                ext=self.settings.get("param_out_ext", ".DAT"),
+                ext=self._param_ext(), name=fname,
                 eob=self.settings.get("nc_eob"),
-                zero_params=self._zero_params())
+                zero_params=self._zero_params(),
+                soft_limit=soft, soft_params=sparams)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "作成に失敗", str(ex))
             return

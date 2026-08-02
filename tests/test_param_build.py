@@ -630,6 +630,139 @@ class TestZeroIndividual(unittest.TestCase):
         self.assertTrue(B.preview_zero_rows(self.RAW))
 
 
+class TestSoftLimit(unittest.TestCase):
+    """客先パラメータのソフトリミット(1320/1321)を入れるか選べる。
+
+    検査では可動範囲が邪魔になることがあるので、入れない／無効化を選べる。
+    実データ: 手元のBASIC 31本すべてが 1320=-1 / 1321=+1（未使用軸 0.0）だった。
+    """
+
+    RAW = ("%\nN01320Q1A1P-1.0A2P-1.0A3P-1.0A4P-1.0\n"
+           "N01321Q1A1P1.0A2P1.0A3P1.0A4P1.0\n"
+           "N01825Q1A1P3000A2P3000A3P3000A4P3000\n%\n")
+    OLD = ("%\nN01320 A1 P-1 A2 P-1 A3 P-1 A4 P-1\n"
+           "N01321 A1 P 1 A2 P 1 A3 P 1 A4 P 1\n"
+           "N01825 A1 P 3000\n%\n")
+    CUST = {"01320": "-100.0", "01321": "50.0", "01825": "2500"}
+
+    def test_apply_is_the_default(self):
+        new, _m, _f = B.build_text(self.RAW, dict(self.CUST), 4)
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-100.0")
+        self.assertEqual(F_PRM.get_value(new, "1321", "A4"), "50.0")
+
+    def test_skip_keeps_basic_values(self):
+        new, _m, _f = B.build_text(self.RAW, dict(self.CUST), 4, soft_limit="skip")
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-1.0")
+        self.assertEqual(F_PRM.get_value(new, "1321", "A4"), "1.0")
+        self.assertEqual(F_PRM.get_value(new, "1825", "A4"), "2500")  # 他は入る
+
+    def test_disable_restores_no_limit_on_target_axis_only(self):
+        done, _m, _f = B.build_text(self.RAW, dict(self.CUST), 4)   # 客先値入り
+        new, _m, _f = B.build_text(done, {"01825": "2500"}, 4, soft_limit="disable")
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-1.0")
+        self.assertEqual(F_PRM.get_value(new, "1321", "A4"), "1.0")
+
+    def test_disable_does_not_touch_other_axes(self):
+        # 2軸テーブルの相手軸に客先ソフトリミットが入っていても消さない
+        done, _m, _f = B.build_text(self.RAW, {"01320": "-77.0"}, 3)
+        new, _r = B.disable_soft_limit(done, [4])
+        self.assertEqual(F_PRM.get_value(new, "1320", "A3"), "-77.0")
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-1.0")
+
+    def test_disable_is_idempotent(self):
+        new, rows = B.disable_soft_limit(self.RAW, [4])
+        self.assertEqual(rows, [])            # 既に「制限なし」なら何もしない
+        self.assertEqual(new, self.RAW)
+
+    def test_old_format_keeps_integer_style(self):
+        """旧書式に -1.0 を書かない（元が整数書式のファイルを壊さない）。"""
+        done, _m, _f = B.build_text(self.OLD, {"01320": "-100.0"}, 4)
+        new, rows = B.disable_soft_limit(done, [4])
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-1")
+        self.assertIn("N01320 A1 P-1 A2 P-1 A3 P-1 A4 P-1", new)   # 空白もそのまま
+
+    def test_multi_axis_skip_and_disable(self):
+        new, _m, _f = B.build_text_multi(
+            self.RAW, {3: dict(self.CUST), 4: dict(self.CUST)}, None, "",
+            None, "skip")
+        self.assertEqual(F_PRM.get_value(new, "1320", "A3"), "-1.0")
+        self.assertEqual(F_PRM.get_value(new, "1320", "A4"), "-1.0")
+        self.assertEqual(F_PRM.get_value(new, "1825", "A4"), "2500")
+
+    def test_preview_shows_what_will_happen(self):
+        rows = B.soft_limit_preview(self.RAW, dict(self.CUST), [4], "skip")
+        self.assertIn(("01320", "A4", "-1.0", "そのまま（入れない）"), rows)
+        done, _m, _f = B.build_text(self.RAW, dict(self.CUST), 4)
+        rows = B.soft_limit_preview(done, {}, [4], "disable")
+        self.assertIn(("1320", "A4", "-100.0", "-1.0"), rows)
+
+    def test_preview_empty_when_applying(self):
+        self.assertEqual(B.soft_limit_preview(self.RAW, dict(self.CUST), [4],
+                                              "apply"), [])
+
+    def test_mode_normalised(self):
+        for bad in (None, "", "はい", 0, "APPLY"):
+            self.assertEqual(B.soft_mode(bad), "apply")   # 不明なら客先どおり
+        self.assertEqual(B.soft_mode("Skip"), "skip")
+        self.assertEqual(B.soft_mode("disable"), "disable")
+
+    def test_headercsv_skip_drops_values_too(self):
+        # ヘッダ＋CSV形式は6列（値は5列目）。実物と同じ形で確かめる
+        csv_like = ('Seiban=50013078\r\n'
+                    '"1320","---","","","-1","ストロークリミット＋"\r\n'
+                    '"1825","---","","","3000","位置ループゲイン"\r\n')
+        new, _m, fmt = B.build_text(csv_like, {"1320": "-100", "1825": "2500"}, 0,
+                                    "", None, "skip")
+        self.assertEqual(fmt, "headercsv")
+        self.assertNotIn("-100", new)          # 客先ソフトリミットは入れない
+        self.assertIn("2500", new)             # 他の変更値は入る
+
+    def test_missing_axis_slot_is_not_invented(self):
+        raw = "%\nN01320Q1A1P-1.0\nN01321Q1A1P1.0\nN01825Q1A1P3000\n%\n"
+        self.assertEqual(B.soft_limit_rows(raw, [4]), [])   # A4 が無い＝対象外
+
+
+class TestOutputFilename(unittest.TestCase):
+    """出力名に 型式・軸・傾斜/回転 を入れる（フォルダにまとめて作っても中身が分かる）"""
+
+    def test_plain(self):
+        self.assertEqual(B.filename("T", "50013078"), "T50013078.DAT")
+
+    def test_with_model_and_axis(self):
+        self.assertEqual(
+            B.filename("T", "50013078", ".DAT", model="RTT-135",
+                       axes=[("Z", "傾斜")]),
+            "T50013078_RTT-135_Z-TILT.DAT")
+
+    def test_two_axis(self):
+        self.assertEqual(
+            B.filename("TR", "50013078", ".DAT", model="MZF-50010",
+                       axes=[("Z", "傾斜"), ("A", "回転")]),
+            "TR50013078_MZF-50010_Z-TILT_A-ROT.DAT")
+
+    def test_detail_off_returns_old_name(self):
+        self.assertEqual(
+            B.filename("T", "50013078", ".DAT", model="RTT-135",
+                       axes=[("Z", "傾斜")], detail=False),
+            "T50013078.DAT")
+
+    def test_full_width_model_is_converted(self):
+        # 全角で入力された型式も半角へ。制御装置に見せる名前なので英数字だけにする
+        self.assertEqual(
+            B.filename("T", "1", ".DAT", model="ＲＴＴ－１３５（特注）"),
+            "T1_RTT-135.DAT")
+
+    def test_unusable_model_is_dropped_not_garbled(self):
+        self.assertEqual(B.filename("T", "1", ".DAT", model="日本語のみ"), "T1.DAT")
+
+    def test_axis_without_kind(self):
+        self.assertEqual(B.filename("TR", "1", ".DAT", axes=[("Z", ""), ("A", "")]),
+                         "TR1_Z_A.DAT")
+
+    def test_extension_dot_optional(self):
+        self.assertEqual(B.filename("T", "1", "prm"), "T1.prm")
+
+
 class TestDropNumbersRobustness(unittest.TestCase):
     """番号リストに変な要素が混ざっても落ちない（呼び側のリストをそのまま渡せる）"""
 

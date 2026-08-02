@@ -104,18 +104,14 @@ def resolve_product_values(basic_text: str, values: dict, axis) -> dict:
     return out
 
 
-def drop_zero_params(values: dict, zero_params) -> tuple:
-    """製品値から「0にする番号」を取り除く。戻り値 (残った値, 取り除いた {番号:値})。
+def drop_params(values: dict, params) -> tuple:
+    """製品値から指定番号を取り除く。戻り値 (残った値, 取り除いた {キー:値})。
 
-    製品データは、別の号機の完成品と BASIC の差分から作られる。つまり
-    その号機の 1850(グリッドシフト)・1851/1852(バックラッシ補正) が
-    そのまま混ざってくる。0にしてから製品値を入れると、0にした直後に
-    別の機械の実測値で上書きされてしまう（しかも軸も別のところへ入る）。
-    出荷ファイルではこれらは0にするので、製品値の側から先に外す。
+    キーは 番号 でも (番号, ラベル) でもよい（軸ラベル付きの共通値も落とす）。
     """
-    if not zero_params:
+    if not params:
         return dict(values or {}), {}
-    want = {fanuc_param._norm_num(x) for x in zero_params}
+    want = {fanuc_param._norm_num(x) for x in params}
     keep, dropped = {}, {}
     for key, v in (values or {}).items():
         num, _label = fanuc_param._split_common_key(key)
@@ -126,15 +122,32 @@ def drop_zero_params(values: dict, zero_params) -> tuple:
     return keep, dropped
 
 
+def drop_zero_params(values: dict, zero_params) -> tuple:
+    """製品値から「0にする番号」を取り除く。戻り値 (残った値, 取り除いた {番号:値})。
+
+    製品データは、別の号機の完成品と BASIC の差分から作られる。つまり
+    その号機の 1850(グリッドシフト)・1851/1852(バックラッシ補正) が
+    そのまま混ざってくる。0にしてから製品値を入れると、0にした直後に
+    別の機械の実測値で上書きされてしまう（しかも軸も別のところへ入る）。
+    出荷ファイルではこれらは0にするので、製品値の側から先に外す。
+    """
+    return drop_params(values, zero_params)
+
+
 def build_text(raw: str, values: dict, axis: int, seiban: str = "",
-               zero_params=None) -> tuple:
+               zero_params=None, soft_limit=None, soft_params=None) -> tuple:
     """BASIC テキスト raw に values({番号:値}) を入れた新テキストを返す。
 
     戻り値: (新テキスト, 反映できなかった番号リスト, 形式 'fanuc'/'headercsv')。
     N形式は指定軸だけ差替え（他軸・他バイトは不変）。ヘッダ＋CSV形式は Seiban も差替え。
     zero_params を渡すと、その番号（既定はグリッドシフト・バックラッシ補正）を
     全軸0にする。出荷するファイルに前の機械の実測値を残さないため。
+    soft_limit は 'apply'(既定・客先どおり) / 'skip'(入れない) / 'disable'(無効化)。
     """
+    soft_params = soft_params or SOFT_LIMIT_PARAMS
+    if soft_mode(soft_limit) != "apply":
+        # 客先パラメータのソフトリミットを入れない（検査中は邪魔になることがある）
+        values, _s = drop_params(values, soft_params)
     if fanuc_param.looks_like_fanuc_prm(raw):
         values = resolve_product_values(raw, values, axis)   # '除去・*マージ（元のBASICを見る）
         # 製品データが持ち込む個体データ（別の号機の実測値）を先に外してから0にする
@@ -142,6 +155,8 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
         text = raw
         if zero_params:
             text, _z = zero_individual(text, zero_params)
+        if soft_mode(soft_limit) == "disable":
+            text, _r = disable_soft_limit(text, [axis], soft_params)
         newtext, missing = fanuc_param.apply_product_values(text, values, axis)
         return newtext, missing, "fanuc"
     doc = prm_format.parse_prm(raw)
@@ -169,28 +184,66 @@ def write_text(path, newtext: str, fmt: str = None, eob: str = None):
         f.write(newtext)
 
 
-def filename(prefix: str, seiban: str, ext: str = ".DAT") -> str:
-    """出力ファイル名 <頭文字><Seiban><拡張子>（例 T50013078.DAT）。
+# ファイル名に入れる種別の記号（制御装置側で化けないよう半角英数にする）
+KIND_TAG = {"傾斜": "TILT", "回転": "ROT", "TILT": "TILT", "ROT": "ROT"}
+_NAME_OK = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
+
+def name_tag(text) -> str:
+    """ファイル名に入れられる形（半角大文字・英数と-）にする。使えない字は落とす。
+
+    メモリカード経由で制御装置に見せるので、全角や記号は入れない。
+    """
+    import unicodedata
+    # 全角で入力された型式（ＲＴＴ－１３５）も半角へ直してから使う
+    s = unicodedata.normalize("NFKC", str(text or "")).strip().upper()
+    return "".join(c if c in _NAME_OK else ("-" if c in " _/." else "")
+                   for c in s).strip("-")
+
+
+def axis_tag(axis, kind: str = "") -> str:
+    """軸と種別をファイル名用の記号にする（('Z','傾斜') → 'Z-TILT'）。"""
+    ax = name_tag(axis)
+    k = KIND_TAG.get(str(kind or "").strip(), name_tag(kind))
+    return "-".join(x for x in (ax, k) if x)
+
+
+def filename(prefix: str, seiban: str, ext: str = ".DAT", *, model: str = "",
+             axes=(), detail: bool = True, sep: str = "_") -> str:
+    """出力ファイル名 <頭文字><Seiban>[_型式][_軸-種別...]<拡張子>。
+
+    例: filename("T", "50013078", model="RTT-135", axes=[("Z", "傾斜")])
+        → 'T50013078_RTT-135_Z-TILT.DAT'
+    型式・軸・種別を入れておくと、フォルダにまとめて作ったときに中身が分かる。
+    detail=False（設定 param_name_detail=false）で従来の <頭文字><Seiban> に戻せる。
     拡張子の既定が .DAT なのは、実機が自分で出力するのが .DAT で、そちらは
     読み込めることが確認できているため（.prm は読めなかった）。設定で変えられる。
     """
     ext = str(ext or ".DAT")
     if not ext.startswith("."):
         ext = "." + ext
-    return f"{prefix}{seiban}{ext}"
+    stem = f"{prefix}{seiban}"
+    if detail:
+        parts = [name_tag(model)]
+        for a in (axes or ()):
+            parts.append(axis_tag(*a) if isinstance(a, (tuple, list)) else axis_tag(a))
+        stem = str(sep or "_").join([stem] + [p for p in parts if p])
+    return f"{stem}{ext}"
 
 
 def create_file(master_path, out_dir, values: dict, *, axis: int, prefix: str,
                 seiban: str, ext: str = ".DAT", eob: str = None,
-                zero_params=None) -> tuple:
+                zero_params=None, soft_limit=None, soft_params=None,
+                name: str = "") -> tuple:
     """BASIC を元に <頭文字><Seiban><拡張子> を out_dir に作成する。
 
+    name を渡すとそのファイル名で作る（画面のプレビューに出した名前と必ず一致させる）。
     戻り値: (出力Path, 反映できなかった番号リスト, 形式)。
     """
     raw = read_master(master_path)
-    newtext, missing, fmt = build_text(raw, values, axis, seiban, zero_params)
-    out = Path(out_dir) / filename(prefix, seiban, ext)
+    newtext, missing, fmt = build_text(raw, values, axis, seiban, zero_params,
+                                       soft_limit, soft_params)
+    out = Path(out_dir) / (name or filename(prefix, seiban, ext))
     write_text(out, newtext, fmt, eob)
     return out, missing, fmt
 
@@ -251,6 +304,117 @@ def zero_individual(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> tuple:
     for num, label, _old in rows:
         text, _ok = fanuc_param.set_value(text, num, "0", label or None)
     return text, rows
+
+
+# --- ソフトリミット（記憶式ストロークリミット1）------------------------------
+#   1320 … 各軸のストロークリミット＋側 / 1321 … −側
+# 客先パラメータには機械の可動範囲が入っているが、社内の検査では入れたくないことが
+# ある（検査の割出しが範囲外になって動かせない）。そこで作成時に選べるようにした。
+#   apply   … 客先指定どおり入れる（既定）
+#   skip    … 入れない。BASICの値をそのまま残す
+#   disable … 無効化する。BASICが持っている値（＋側 -1 / −側 +1）を書く
+# 実データの裏づけ: 手元のBASIC 31本すべてが 1320=-1 / 1321=+1（未使用軸は 0.0）で、
+# それ以外の値は1つも無かった。つまり BASIC の出荷時状態＝この値。
+SOFT_LIMIT_PARAMS = ("1320", "1321")
+SOFT_LIMIT_OFF = {"1320": "-1", "1321": "1"}
+SOFT_LIMIT_MODES = ("apply", "skip", "disable")
+
+
+def soft_mode(mode) -> str:
+    """ソフトリミットの指定を 'apply'/'skip'/'disable' に正規化する（不明は apply）。"""
+    m = str(mode or "").strip().lower()
+    return m if m in SOFT_LIMIT_MODES else "apply"
+
+
+def _decimal_style(raw: str, number, label: str) -> bool:
+    """その行が小数付きで書かれているか（-1.0 か -1 か）。
+
+    書き込む所の今の値では判断しない。そこには客先値（-100.0 など）が入っている
+    ことがあり、元が整数書式のファイルに -1.0 を書いてしまう。同じ行の他の軸に
+    合わせ、決められなければ書式世代（新＝小数付き / 旧＝整数）で決める。
+    実データ: 旧書式8本は "A1 P-1"、新書式は "A1P-1.0" で、混ざった例は無かった。
+    """
+    num = fanuc_param._norm_num(number)
+    for line in str(raw).replace("\r", "\n").split("\n"):
+        if fanuc_param._norm_num(fanuc_param.param_number(line)) != num:
+            continue
+        others = [v for (g, _t, v) in (fanuc_param.segments(line) or [])
+                  if g.upper() != str(label or "").upper()]
+        dec = sum(1 for v in others if "." in v)
+        if others and dec * 2 != len(others):
+            return dec * 2 > len(others)
+        break
+    return _is_new_format(raw)
+
+
+def soft_limit_off_value(raw: str, number, label: str) -> str:
+    """その番号の「制限なし」値（-1 / -1.0）。小数点の有無はファイルに合わせる。"""
+    base = SOFT_LIMIT_OFF.get(str(fanuc_param._norm_num(number)).lstrip("0"))
+    if base is None:
+        return None
+    return base + ".0" if _decimal_style(raw, number, label) else base
+
+
+def _same_number(a, b) -> bool:
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return str(a) == str(b)
+
+
+def soft_limit_rows(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> list:
+    """無効化で書き換わる所を [(番号, ラベル, 旧値, 新値)] で返す（既に無効なら出ない）。
+
+    対象は作成する軸だけ。全軸へ書くと、同じファイルに入っている別軸（2軸テーブルの
+    相手軸など）の設定まで消してしまうため。軸が無い番号は対象外。
+    """
+    if not axes or not fanuc_param.looks_like_fanuc_prm(raw):
+        return []
+    out = []
+    for num in (params or SOFT_LIMIT_PARAMS):
+        for ax in axes:
+            label = f"A{ax}"
+            cur = fanuc_param.get_value(raw, num, label)
+            if cur is None:
+                continue                       # その軸のスロットが無い
+            new = soft_limit_off_value(raw, num, label)
+            if new is None or _same_number(cur, new):
+                continue                       # 既に「制限なし」
+            out.append((str(num), label, str(cur), new))
+    return out
+
+
+def disable_soft_limit(raw: str, axes, params=SOFT_LIMIT_PARAMS) -> tuple:
+    """指定軸のソフトリミットを「制限なし」にする。戻り値 (新テキスト, 変更行)。"""
+    rows = soft_limit_rows(raw, axes, params)
+    text = raw
+    for num, label, _old, new in rows:
+        text, _ok = fanuc_param.set_value(text, num, new, label)
+    return text, rows
+
+
+def soft_limit_preview(raw: str, values: dict, axes, mode,
+                       params=SOFT_LIMIT_PARAMS) -> list:
+    """作成前プレビューに足す行 [(番号, ラベル, 旧値, 新値)]。
+
+    skip  … 客先値を入れないので「そのまま」と出す（黙って落とさない）
+    disable … 実際に書く値を出す
+    """
+    mode = soft_mode(mode)
+    if mode == "apply":
+        return []
+    if mode == "disable":
+        return soft_limit_rows(raw, axes, params)
+    _keep, dropped = drop_params(values, params or SOFT_LIMIT_PARAMS)
+    rows = []
+    for key in sorted(dropped, key=str):
+        num, label = fanuc_param._split_common_key(key)
+        for ax in (axes or [None]):
+            lab = label or (f"A{ax}" if ax else None)
+            cur = fanuc_param.get_value(raw, num, lab) if lab else None
+            rows.append((str(num), lab or "", "" if cur is None else str(cur),
+                         "そのまま（入れない）"))
+    return rows
 
 
 def with_servo_options(raw: str, axis, values: dict, *, zero_motor=False,
@@ -322,7 +486,8 @@ def product_change_values(basic_text: str, product_text: str) -> dict:
 
 
 def build_text_multi(raw: str, axis_values: dict, common: dict = None,
-                     seiban: str = "", zero_params=None) -> tuple:
+                     seiban: str = "", zero_params=None,
+                     soft_limit=None, soft_params=None) -> tuple:
     """BASIC raw に「複数軸ぶんの値」を入れた新テキストを返す（2軸テーブル用）。
 
     axis_values={軸番号: {番号:値}} を各軸へ、common={番号:値} を共通スロットへ適用。
@@ -333,24 +498,33 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
     """
     axis_values = axis_values or {}
     common = common or {}
+    soft_params = soft_params or SOFT_LIMIT_PARAMS
+    skip_soft = soft_mode(soft_limit) != "apply"
     if not fanuc_param.looks_like_fanuc_prm(raw):
         # ヘッダ＋CSV形式は軸が無い。全値を束ねて従来処理（軸=0）にフォールバック
         merged = dict(common)
         for vals in axis_values.values():
             merged.update(vals)
-        newtext, missing, fmt = build_text(raw, merged, 0, seiban)
+        newtext, missing, fmt = build_text(raw, merged, 0, seiban, None,
+                                           soft_limit, soft_params)
         return newtext, [(m, "") for m in missing], fmt
     text = raw
     if zero_params:
         text, _z = zero_individual(text, zero_params)
+    if soft_mode(soft_limit) == "disable":
+        text, _r = disable_soft_limit(text, sorted(axis_values), soft_params)
     missing = []
     for ax in sorted(axis_values):
         vals = resolve_product_values(raw, axis_values[ax], ax)   # '除去・*マージ
         vals, _d = drop_zero_params(vals, zero_params)   # 個体データは持ち込まない
+        if skip_soft:
+            vals, _s = drop_params(vals, soft_params)    # 客先ソフトリミットを入れない
         text, miss = fanuc_param.apply_product_values(text, vals, ax)
         missing += [(m, ax) for m in miss]
     cvals = resolve_product_values(raw, common, None)
     cvals, _d = drop_zero_params(cvals, zero_params)
+    if skip_soft:
+        cvals, _s = drop_params(cvals, soft_params)
     text, miss = fanuc_param.apply_common_values(text, cvals)
     missing += [(m, "") for m in miss]
     return text, missing, "fanuc"
@@ -358,15 +532,17 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
 
 def create_file_multi(master_path, out_dir, axis_values: dict, common: dict = None,
                       *, prefix: str, seiban: str, ext: str = ".DAT",
-                      eob: str = None, zero_params=None) -> tuple:
+                      eob: str = None, zero_params=None, soft_limit=None,
+                      soft_params=None, name: str = "") -> tuple:
     """BASIC を元に、複数軸ぶんを入れた <頭文字><Seiban><拡張子> を作成する（2軸用）。
 
+    name を渡すとそのファイル名で作る（画面のプレビューに出した名前と必ず一致させる）。
     戻り値: (出力Path, 反映できなかった [(番号, 軸), ...], 形式)。
     """
     raw = read_master(master_path)
     newtext, missing, fmt = build_text_multi(
-        raw, axis_values, common, seiban, zero_params)
-    out = Path(out_dir) / filename(prefix, seiban, ext)
+        raw, axis_values, common, seiban, zero_params, soft_limit, soft_params)
+    out = Path(out_dir) / (name or filename(prefix, seiban, ext))
     write_text(out, newtext, fmt, eob)
     return out, missing, fmt
 

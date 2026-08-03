@@ -758,6 +758,26 @@ def wrap_scrollable(dialog, keep_bottom=0):
     return scroll
 
 
+_AXES_CACHE = {}
+
+
+def _axes_from_basics(settings):
+    """BASICの場所にある制御装置が実際に持っている軸名（パラメータ1020から）。
+
+    「うちの軸は X/Y/Z/A/B/C」を、人の記憶ではなく制御装置のデータで示すため。
+    1セッションに1回だけ読む（フォルダごとに覚えておく）。
+    """
+    folder = str((settings or {}).get("param_basic_dir") or "").strip()
+    if not folder:
+        return []
+    if folder not in _AXES_CACHE:
+        try:
+            _AXES_CACHE[folder] = controllers.axis_names_in_folder(folder)
+        except Exception:
+            _AXES_CACHE[folder] = []
+    return _AXES_CACHE[folder]
+
+
 def param_out_ext(settings):
     """機械へ渡すパラメータファイルの拡張子（既定 .DAT＝実機が出力する形）。"""
     return str((settings or {}).get("param_out_ext") or ".DAT")
@@ -874,12 +894,20 @@ class ProgramDialog(QtWidgets.QDialog):
         # 機械ごとに変わるので選べるようにする（打ち込みも可）
         self.e_axis = QtWidgets.QComboBox()
         self.e_axis.setEditable(True)
-        self.e_axis.addItems(["Z", "A", "B", "C", "Y", "U", "V", "W"])
+        # この機械の軸は X/Y/Z/A/B/C（号機マスタの容量欄も この6つ）。
+        # 制御装置側はパラメータ 1020（軸名のASCIIコード）で決まる。
+        self.e_axis.addItems(nc_param.AXIS_NAMES + ["U", "V", "W"])
         self.e_axis.setCurrentText(str(settings.get("fanuc_axis", "Z")))
         self.e_axis.setMaximumWidth(80)
-        self.e_axis.setToolTip(
-            "割出軸のアドレス。機械ごとに違うので、実機のプログラムに合わせる。\n"
-            "X はドゥエル G04 X… と同じ文字なので避ける")
+        tip = ("割出軸のアドレス。機械ごとに違うので、実機のプログラムに合わせる。\n"
+               "うちの軸は X/Y/Z/A/B/C（制御装置側はパラメータ1020で決まる）。\n"
+               "X も正規の軸名で、G04 X…（ドゥエル）と同じ文字でも問題ない\n"
+               "（FANUCは G04 のブロック内の X を時間として読む。実物のサブプロも同じ形）")
+        # 「うちの軸は何か」を記憶ではなく制御装置のデータで示す（パラメータ1020）
+        found = _axes_from_basics(settings)
+        if found:
+            tip += "\n\nBASICの場所にある制御装置が持っている軸: " + "/".join(found)
+        self.e_axis.setToolTip(tip)
         self.e_pre = QtWidgets.QDoubleSpinBox()
         self.e_pre.setRange(0.0, 360.0)
         self.e_pre.setDecimals(3)

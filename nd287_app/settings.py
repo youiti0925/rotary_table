@@ -72,7 +72,10 @@ DEFAULTS = dict(
     # 生データ編集（管理者モード）のパスワード
     admin_password="0925",
     # FANUC測定プログラム生成
-    fanuc_axis="Z",         # 割出軸のアドレス（現在の実機はZ。X はG04 X…と同じ文字で不可）
+    # 割出軸のアドレス。うちの軸は X/Y/Z/A/B/C（制御装置側はパラメータ1020で決まる）。
+    # 現在の実機はZ。Xも正規の軸名で、G04 X…（ドゥエル）と同じ文字でも問題ない
+    # （FANUCは G04 のブロック内の X を時間として読む。現場の実物サブプロも同じ形）。
+    fanuc_axis="Z",
     fanuc_preswing=10.0,        # 測定点の前振り量[°]（バックラッシュ消し）
     fanuc_reset_swing=10.0,     # カウンターリセットの振り量[°]（前振りとは別に設定可）
     fanuc_swing_dwell_sec=1.0,  # 振り後のドゥエル[秒]（バックラッシュ消し後・測定無関係＝小さめ）
@@ -276,16 +279,17 @@ def load_settings(path=None) -> dict:
 def _migrate_fanuc(settings: dict, raw: dict):
     """古い設定に残っている、機械が受け付けない値を1度だけ直す。
 
-    ・fanuc_axis="X": 旧既定値。実機のプログラムは割出軸が Z で、X はドゥエル
-      G04 X… と同じ文字。以前の出力が読めなかった件に絡むので Z へ寄せる。
     ・fanuc_rep_sub_number が O8000〜O9999: 保護プログラム領域（パラメータ3202の
       NE8/NE9）で、書込禁止だと転送そのものが弾かれる。
-    どちらも1度だけ（fanuc_migrated を立てて、以後の手動設定は尊重する）。
+    1度だけ（fanuc_migrated を立てて、以後の手動設定は尊重する）。
+
+    ※以前ここで fanuc_axis の "X" を "Z" へ書き換えていたが<b>取りやめた</b>。
+      この機械の軸は X/Y/Z/A/B/C で、<b>X も正規の軸名</b>。現場の実物サブプロも
+      割出軸 X と `G04 X…`（ドゥエル）を同じプログラムで使っている
+      （tests/test_fanuc.py の実物照合がその形）。選んだ軸を勝手に変えない。
     """
     if not raw or settings.get("fanuc_migrated"):
         return  # 新規（既定値のまま）は直すものが無い
-    if str(raw.get("fanuc_axis", "")).upper() == "X":
-        settings["fanuc_axis"] = "Z"
     try:
         if 8000 <= int(raw.get("fanuc_rep_sub_number", 0)) <= 9999:
             settings["fanuc_rep_sub_number"] = 1000

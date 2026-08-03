@@ -354,8 +354,10 @@ class TestValidate(unittest.TestCase):
         self.assertTrue(self._has(validate("%\nO9001\nM30\n%"), "保護プログラム"))
 
     def test_flags_axis_x(self):
-        self.assertTrue(self._has(validate("%\nO1\nM30\n%", FanucConfig(axis="X")),
-                                  "割出軸が X"))
+        # X も正規の軸名なので警告しない（うちの軸は X/Y/Z/A/B/C で、
+        # 現場の実物サブプロも割出軸 X と G04 X… を同じプログラムで使っている）
+        self.assertFalse(self._has(validate("%\nO1\nM30\n%", FanucConfig(axis="X")),
+                                   "割出軸が X"))
 
     def test_flags_missing_percent(self):
         self.assertTrue(self._has(validate("O1\nM30"), "%"))

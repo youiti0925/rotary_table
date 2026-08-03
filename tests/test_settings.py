@@ -147,18 +147,23 @@ class TestFanucMigration(unittest.TestCase):
             p.write_text(json.dumps(stored), encoding="utf-8")
             return load_settings(p)
 
-    def test_axis_x_becomes_machine_axis(self):
+    def test_axis_choice_is_respected(self):
+        """選んだ軸を勝手に変えない。
+
+        以前 X を Z へ書き換えていたが取りやめた。うちの軸は X/Y/Z/A/B/C で
+        X も正規の軸名（現場の実物サブプロも割出軸 X で書かれている）。
+        """
         s = self._load({"fanuc_axis": "X"})
-        self.assertEqual(s["fanuc_axis"], "Z")
+        self.assertEqual(s["fanuc_axis"], "X")
 
     def test_protected_sub_number_moved(self):
         s = self._load({"fanuc_rep_sub_number": 9001})
         self.assertEqual(s["fanuc_rep_sub_number"], 1000)
 
     def test_runs_only_once(self):
-        # 1度移行した後で自分でXに戻したなら、その選択を尊重する
-        s = self._load({"fanuc_axis": "X", "fanuc_migrated": True})
-        self.assertEqual(s["fanuc_axis"], "X")
+        # 1度移行したあとは、O番号も手動設定を尊重する
+        s = self._load({"fanuc_rep_sub_number": 9001, "fanuc_migrated": True})
+        self.assertEqual(s["fanuc_rep_sub_number"], 9001)
 
     def test_other_axis_kept(self):
         s = self._load({"fanuc_axis": "B"})

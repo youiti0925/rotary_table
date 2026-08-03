@@ -347,6 +347,38 @@ def axes_in_basic(text) -> list:
     return out
 
 
+def axis_names_in_folder(folder, limit_bytes: int = 65536) -> list:
+    """BASICフォルダにある制御装置が実際に持っている軸名を集める（X/Y/Z/A/B/C…）。
+
+    「うちの軸は何か」を人の記憶ではなく<b>制御装置のデータ</b>で答えるため。
+    軸名はパラメータ1020（軸名のASCIIコード）で決まり、これは各ファイルの
+    先頭付近にあるので、頭だけ読めば足りる（31本×200KB を全部読まない）。
+    戻り値は X→Y→Z→A→B→C の順。読めなければ空リスト。
+    """
+    from pathlib import Path
+    base = Path(folder) if folder else None
+    if not base or not base.is_dir():
+        return []
+    found = set()
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return []
+    for p in entries:
+        if not p.is_file():
+            continue
+        try:
+            with open(p, "rb") as f:
+                head = f.read(limit_bytes)
+        except OSError:
+            continue
+        text = head.decode("cp932", errors="replace").replace("\r", "\n")
+        found.update(axes_in_basic(text))
+    order = {a: i for i, a in enumerate(("X", "Y", "Z", "A", "B", "C",
+                                        "U", "V", "W"))}
+    return sorted(found, key=lambda a: order.get(a, 99))
+
+
 def _label_of_axis(text, axis):
     """軸名(X/Y/…)が入っているスロットのラベル(A1..)を返す。無ければ ""。"""
     from . import fanuc_param

@@ -560,3 +560,39 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual(C.axes_in_basic(self.MACHINE_2AX.decode("cp932")),
                          ["X", "Y"])
         self.assertEqual(C.axes_in_basic("%\nN01825Q1A1P3000\n%\n"), [])
+
+
+class TestAxisNamesInFolder(unittest.TestCase):
+    """「うちの軸は何か」を制御装置のデータ（パラメータ1020）で答える。"""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.d = Path(tempfile.mkdtemp())
+        # 1020 は軸名のASCIIコード（88=X 89=Y 90=Z 65=A 66=B 67=C）
+        (self.d / "F01BASIC.DAT").write_bytes(
+            ("%\nN01020Q1A1P88A2P89A3P90A4P65\nN01825Q1A1P3000\n%\n")
+            .encode("cp932"))
+        (self.d / "F02BASIC.DAT").write_bytes(
+            ("%\nN01020Q1A1P88A2P89A3P90A4P65A5P66A6P67\nN01825Q1A1P3000\n%\n")
+            .encode("cp932"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_collects_axis_names_in_machine_order(self):
+        from nd287_app import controllers as C
+        self.assertEqual(C.axis_names_in_folder(self.d),
+                         ["X", "Y", "Z", "A", "B", "C"])
+
+    def test_missing_folder_is_quiet(self):
+        from nd287_app import controllers as C
+        self.assertEqual(C.axis_names_in_folder(""), [])
+        self.assertEqual(C.axis_names_in_folder(self.d / "ない"), [])
+
+    def test_reads_only_the_head_of_each_file(self):
+        # 1020 はファイル先頭付近にあるので、頭だけ読めば足りる
+        from nd287_app import controllers as C
+        self.assertEqual(C.axis_names_in_folder(self.d, limit_bytes=4096),
+                         ["X", "Y", "Z", "A", "B", "C"])

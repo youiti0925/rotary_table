@@ -1818,9 +1818,15 @@ class FtpServerDialog(QtWidgets.QDialog):
             "このPCが自分のFTPサーバーにつないで、ファイルを渡せるか確かめます。\n"
             "※ここでOKでも「機械から届くか」は別（配線・IP・ファイアウォール）")
         self.b_test.clicked.connect(self.self_test)
+        self.b_why = QtWidgets.QPushButton("いまどこで止まっている？")
+        self.b_why.setEnabled(False)
+        self.b_why.setToolTip(
+            "機械とのやり取りの記録から、どこまで進んでいるかを調べて、\n"
+            "次に見るところを出します")
+        self.b_why.clicked.connect(self.show_diagnosis)
         self.lbl_state = QtWidgets.QLabel("停止中")
         btns.addWidget(self.b_start); btns.addWidget(self.b_stop)
-        btns.addWidget(self.b_test)
+        btns.addWidget(self.b_test); btns.addWidget(self.b_why)
         btns.addWidget(self.lbl_state, 1)
         v.addWidget(hscroll_buttons(btns))
 
@@ -1960,6 +1966,19 @@ class FtpServerDialog(QtWidgets.QDialog):
                   "あります。その場合は制御装置側の『ポート番号』も同じ値に"
                   "してください。")
 
+    def show_diagnosis(self):
+        """機械とのやり取りの記録から、どこで止まっているかを言う。"""
+        head, todo = ftpserver.diagnose(self.server)
+        msg = head + ("\n\n次に見るところ:\n・" + "\n・".join(todo) if todo else "")
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("いまどこで止まっている？")
+        box.setTextFormat(QtCore.Qt.RichText)
+        box.setText(msg.replace("\n", "<br>").replace("・", "・"))
+        box.setIcon(QtWidgets.QMessageBox.Information if not todo
+                    else QtWidgets.QMessageBox.Warning)
+        box.exec()
+        self._append_log("　診断 " + head.replace("<b>", "").replace("</b>", ""))
+
     def _check_received(self, path):
         """機械から受け取ったファイルをその場で点検する（バックアップの取りこぼし防止）。
 
@@ -2009,7 +2028,7 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.lbl_state.setText(f"動作中  {self.server.address()}")
         self.lbl_state.setStyleSheet("color:#166534; font-weight:bold;")
         self.b_start.setEnabled(False); self.b_stop.setEnabled(True)
-        self.b_test.setEnabled(True)
+        self.b_test.setEnabled(True); self.b_why.setEnabled(True)
         for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
             w.setEnabled(False)
         self._hits = 0
@@ -2024,7 +2043,7 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.lbl_state.setText("停止中")
         self.lbl_state.setStyleSheet("")
         self.b_start.setEnabled(True); self.b_stop.setEnabled(False)
-        self.b_test.setEnabled(False)
+        self.b_test.setEnabled(False); self.b_why.setEnabled(False)
         self.lbl_wait.setText("")
         for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
             w.setEnabled(True)

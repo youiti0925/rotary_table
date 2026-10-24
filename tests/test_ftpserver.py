@@ -372,3 +372,93 @@ class TestUppercaseLogin(unittest.TestCase):
         self.assertEqual(self.srv.logged_in, 1)
         self.assertEqual(self.srv.login_ng, 1)
         self.assertTrue(any("ログインを断りました" in l for l in self.srv.lines))
+
+
+class TestDiagnose(unittest.TestCase):
+    """「制御装置側に何も見えない」の原因を、ログの中身から言い当てる。
+
+    原因がいくつもあって、どこまで進んだかで見るところが変わる。
+    人がログを読まなくて済むようにする。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.srv = F.FtpServer(self.dir, host="127.0.0.1", port=0,
+                               user="cnc", password="cnc")
+
+    def tearDown(self):
+        self.srv.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_not_started(self):
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("まだ始まっていません", head)
+        self.assertTrue(todo)
+
+    def test_nothing_arrived(self):
+        self.srv.start()
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("1度も届いていません", head)
+        self.assertTrue(any("ファイアウォール" in t for t in todo))
+        self.assertTrue(any("内蔵ポート" in t for t in todo))
+
+    def test_login_refused(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 192.168.1.1")
+        self.srv.login_ng = 1
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("ログインで断られて", head)
+
+    def test_logged_in_but_no_list(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 192.168.1.1")
+        self.srv.logged_in = 1
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("一覧の要求が来ていません", head)
+        self.assertTrue(any("FTP" in t for t in todo))
+
+    def test_folder_is_empty(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 192.168.1.1")
+        self.srv.logged_in, self.srv.listed = 1, 1
+        self.srv.last_list_count = 0
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("フォルダが空", head)
+
+    def test_listed_but_nothing_read_suggests_dos_format(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 192.168.1.1")
+        self.srv.logged_in, self.srv.listed = 1, 2
+        self.srv.last_list_count = 5
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("まだファイルは読まれていません", head)
+        self.assertTrue(any("MS-DOS" in t for t in todo))
+
+    def test_all_good(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 192.168.1.1")
+        self.srv.logged_in, self.srv.listed = 1, 1
+        self.srv.last_list_count, self.srv.sent = 3, 1
+        head, todo = F.diagnose(self.srv)
+        self.assertIn("うまくいっています", head)
+        self.assertEqual(todo, [])
+
+    def test_own_self_test_is_not_counted_as_the_machine(self):
+        self.srv.start()
+        self.srv.lines.append("10:00:00 接続 127.0.0.1")   # 自分で試したぶん
+        head, _todo = F.diagnose(self.srv)
+        self.assertIn("1度も届いていません", head)
+
+
+class TestListLogging(_Base):
+    def test_logs_how_many_were_listed(self):
+        for n in ("T1.DAT", "R2.NC"):
+            (self.dir / n).write_bytes(b"x")
+        self.ftp.nlst()
+        self.assertTrue(any("一覧を渡した（2個" in l for l in self.srv.lines),
+                        self.srv.lines[-5:])
+        self.assertEqual(self.srv.last_list_count, 2)
+
+    def test_empty_folder_is_visible_in_the_log(self):
+        self.ftp.nlst()
+        self.assertTrue(any("一覧を渡した（0個" in l for l in self.srv.lines))

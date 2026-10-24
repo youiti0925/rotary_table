@@ -423,6 +423,11 @@ class _Session(threading.Thread):
             sock.sendall(_encode(body))
         finally:
             sock.close()
+        # 何個渡したかを残す。「制御装置側に何も出ない」とき、フォルダが空なのか
+        # 渡せていないのかを、ログだけで切り分けられるようにするため
+        self.server.log(f"一覧を渡した（{len(items)}個・{self.server.list_style}形式）")
+        self.server.listed += 1
+        self.server.last_list_count = len(items)
         self._send("226 Transfer complete")
 
     def _retr(self, arg: str):
@@ -458,6 +463,7 @@ class _Session(threading.Thread):
             self._send("426 Transfer aborted")
             return
         self.server.log(f"渡した {real.name}")
+        self.server.sent += 1
         self._send("226 Transfer complete")
 
     def _stor(self, arg: str, append: bool = False):
@@ -520,6 +526,9 @@ class FtpServer:
         self.stopping = False
         self.logged_in = 0      # ログインまで通った回数
         self.login_ng = 0       # ログインで断った回数
+        self.listed = 0         # 一覧を渡した回数
+        self.last_list_count = None   # 最後に渡した個数
+        self.sent = 0           # ファイルを渡した回数
         self._sock = None
         self._thread = None
         self._sessions = set()          # 生きている接続（stop() で確実に閉じる）
@@ -701,3 +710,48 @@ def self_test(host: str, port: int, user: str = "", password: str = "",
                 probe.unlink()
             except OSError:
                 pass
+
+
+def diagnose(server) -> tuple:
+    """いまの状態を、ログの中身から<b>ことばで</b>言う。戻り値 (見出し, [次にやること])。
+
+    「制御装置側に何も見えない」は原因がいくつもあって、どこまで進んだかで
+    見るところが変わる。機械とのやり取りはログに全部残っているので、
+    人がログを読まなくても済むようにここで判定する。
+    """
+    if server is None or not server.running:
+        return "まだ始まっていません", ["②の「開始」を押してください"]
+    hits = sum(1 for l in server.lines if "接続 " in l
+               and not l.split()[-1].startswith("127."))
+    if not hits:
+        return "機械から1度も届いていません", [
+            "Windowsのファイアウォールで許可したか",
+            "PCと機械のIPが同じ仲間か（コマンドプロンプトで ping）",
+            "③のポート番号が機械側と同じか（既定 21。0 のままでは繋がりません）",
+            "制御装置の設定が [内蔵ポート] の画面か（[PCMCIA] 側では効きません）",
+        ]
+    if not server.logged_in:
+        return "届いていますが、ログインで断られています", [
+            "ユーザー名とパスワードの<b>文字</b>が合っているか",
+            "（大文字小文字は区別していないので、文字そのものを見てください）",
+        ]
+    if not server.listed:
+        return "ログインは通りましたが、一覧の要求が来ていません", [
+            "制御装置側で、読み込み元が<b>FTP</b>に切り替わっているか",
+            "（メモリカードのままだと、こちらには何も来ません）",
+            "機械の画面でファイル一覧を出す操作をしたか",
+        ]
+    if not server.last_list_count:
+        return "一覧は渡しましたが、<b>フォルダが空</b>です", [
+            "公開フォルダに .NC や .DAT を置いてください",
+            "（作成画面の出力先を、この公開フォルダにすると楽です）",
+        ]
+    if not server.sent:
+        return (f"一覧を{server.listed}回渡しました"
+                f"（最後は{server.last_list_count}個）。まだファイルは読まれていません", [
+            "機械の画面に名前が出ていますか",
+            "出ていなければ、設定の「一覧の形」を<b>MS-DOS形式</b>に変えて、"
+            "もう一度一覧を出してください（機種で読める形が違います）",
+        ])
+    return (f"うまくいっています（一覧 {server.listed}回・"
+            f"ファイル {server.sent}本を渡しました）", [])

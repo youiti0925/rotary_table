@@ -279,3 +279,41 @@ class TestListLine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSelfTest(_Base):
+    """「開始を押したけど合っているのか分からない」を無くす自己診断。"""
+
+    def test_reports_each_step_when_it_works(self):
+        (self.dir / "T1.DAT").write_bytes(MACHINE_BYTES)
+        ok, lines = F.self_test("127.0.0.1", self.srv.port, "cnc", "cnc",
+                                root=self.dir)
+        self.assertTrue(ok, lines)
+        self.assertEqual(len(lines), 4)          # つながる/ログイン/一覧/1本読む
+        self.assertIn("つながった", lines[0])
+        self.assertIn("ログインできた", lines[1])
+        self.assertIn("フォルダが見えた", lines[2])
+        self.assertIn("1バイトも変わっていない", lines[3])
+
+    def test_cleans_up_its_own_test_file(self):
+        before = sorted(p.name for p in self.dir.iterdir())
+        F.self_test("127.0.0.1", self.srv.port, "cnc", "cnc", root=self.dir)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), before)
+
+    def test_wrong_password_stops_at_login(self):
+        ok, lines = F.self_test("127.0.0.1", self.srv.port, "cnc", "chigau",
+                                root=self.dir)
+        self.assertFalse(ok)
+        self.assertIn("つながった", lines[0])      # ①は通る
+        self.assertTrue(lines[-1].startswith("★"))  # どこで止まったか分かる
+
+    def test_nothing_listening_stops_at_the_first_step(self):
+        ok, lines = F.self_test("127.0.0.1", 1, "cnc", "cnc", timeout=1.0)
+        self.assertFalse(ok)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("★"))
+
+    def test_works_without_a_folder_to_read(self):
+        ok, lines = F.self_test("127.0.0.1", self.srv.port, "cnc", "cnc", root=None)
+        self.assertTrue(ok, lines)
+        self.assertEqual(len(lines), 3)          # 1本読む段は飛ばす

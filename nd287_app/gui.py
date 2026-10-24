@@ -1761,16 +1761,16 @@ class FtpServerDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
 
         lead = QtWidgets.QLabel(
-            "このPCを<b>FTPサーバー</b>にします。制御装置の「FTP転送→接続先1」に"
-            "下の値を入れると、機械が<b>このフォルダのファイルを直接読めます</b>"
+            "このPCを<b>ファイルを渡す係</b>にして、<b>機械が取りに来る</b>ようにします"
             "（メモリカードを持ち歩かなくてよくなります）。<br>"
+            "<b>上から順に ① → ② → ③ とやれば終わりです。</b><br>"
             "社内LAN・機械と1対1の配線での利用を想定しています"
             "（FTPは中身を暗号化しません）。")
         lead.setWordWrap(True)
         lead.setTextFormat(QtCore.Qt.RichText)
         v.addWidget(lead)
 
-        box = QtWidgets.QGroupBox("設定")
+        box = QtWidgets.QGroupBox("① このPCの設定（ふつうは公開フォルダを選ぶだけ）")
         f = QtWidgets.QFormLayout(box)
         self.e_root = QtWidgets.QLineEdit(str(
             settings.get("ftp_root") or settings.get("param_out_folder")
@@ -1803,6 +1803,7 @@ class FtpServerDialog(QtWidgets.QDialog):
         f.addRow("ポート番号", prow)
         v.addWidget(box)
 
+        v.addWidget(QtWidgets.QLabel("② ここを押して、渡す係をはじめる"))
         btns = QtWidgets.QHBoxLayout()
         self.b_start = QtWidgets.QPushButton("開始")
         self.b_start.setObjectName("primary")
@@ -1810,10 +1811,18 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.b_stop = QtWidgets.QPushButton("停止")
         self.b_stop.clicked.connect(self.stop)
         self.b_stop.setEnabled(False)
+        # 「押したけど合っているのか分からない」を無くす。自分でつないで確かめる
+        self.b_test = QtWidgets.QPushButton("つながるか試す")
+        self.b_test.setEnabled(False)
+        self.b_test.setToolTip(
+            "このPCが自分のFTPサーバーにつないで、ファイルを渡せるか確かめます。\n"
+            "※ここでOKでも「機械から届くか」は別（配線・IP・ファイアウォール）")
+        self.b_test.clicked.connect(self.self_test)
         self.lbl_state = QtWidgets.QLabel("停止中")
         btns.addWidget(self.b_start); btns.addWidget(self.b_stop)
+        btns.addWidget(self.b_test)
         btns.addWidget(self.lbl_state, 1)
-        v.addLayout(btns)
+        v.addWidget(hscroll_buttons(btns))
 
         self.tbl = QtWidgets.QTableWidget(0, 2)
         self.tbl.setHorizontalHeaderLabels(["制御装置の項目", "入れる値"])
@@ -1821,9 +1830,21 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl.horizontalHeader().setStretchLastSection(True)
         self.tbl.setMinimumHeight(150)
-        v.addWidget(QtWidgets.QLabel(
-            "制御装置の <b>FTP転送 → 接続先1</b>（必ず <b>[内蔵ポート]</b> の画面）に入れる値"))
+        hdr = QtWidgets.QHBoxLayout()
+        lab = QtWidgets.QLabel(
+            "③ 制御装置の <b>FTP転送 → 接続先1</b>"
+            "（必ず <b>[内蔵ポート]</b> の画面）に、この値を入れる")
+        lab.setWordWrap(True)
+        hdr.addWidget(lab, 1)
+        b_copy = QtWidgets.QPushButton("文字でコピー")
+        b_copy.setToolTip("メモ帳などに貼って、機械の前で見ながら入力できます")
+        b_copy.clicked.connect(self._copy_table)
+        hdr.addWidget(b_copy)
+        v.addLayout(hdr)
         v.addWidget(self.tbl)
+        self.lbl_wait = QtWidgets.QLabel("")
+        self.lbl_wait.setWordWrap(True)
+        v.addWidget(self.lbl_wait)
 
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -1878,11 +1899,65 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.tbl.resizeColumnsToContents()
         self.tbl.horizontalHeader().setStretchLastSection(True)
 
+    def _note_hit(self, line):
+        """機械がつないできたことを数える（_append_log から呼ばれる）。"""
+        if not line or "接続 " not in line:
+            return
+        if line.split()[-1].startswith("127."):
+            return                      # 自分で試したぶんは数えない
+        self._hits = getattr(self, "_hits", 0) + 1
+        self._last_hit = line.split()[0]
+        QtCore.QMetaObject.invokeMethod(self, "_show_waiting",
+                                        QtCore.Qt.QueuedConnection)
+
     def _append_log(self, line):
+        self._note_hit(line)
         # 通信スレッドから呼ばれるので、GUIへは必ずキューで渡す
         QtCore.QMetaObject.invokeMethod(
             self.log, "appendPlainText", QtCore.Qt.QueuedConnection,
             QtCore.Q_ARG(str, line))
+
+    def _copy_table(self):
+        """早見表を文字にしてコピーする（機械の前で見ながら入力するため）。"""
+        rows = [f"{self.tbl.item(i, 0).text()}\t{self.tbl.item(i, 1).text()}"
+                for i in range(self.tbl.rowCount())]
+        QtWidgets.QApplication.clipboard().setText(
+            "制御装置の FTP転送 → 接続先1（[内蔵ポート]の画面）\n" + "\n".join(rows))
+        self._append_log("　早見表をコピーしました")
+
+    def self_test(self):
+        """自分のFTPサーバーにつないで、ファイルを渡せるか確かめる。
+
+        「開始を押したけど、これで合っているのか分からない」を無くすため。
+        """
+        if not self.server:
+            return
+        ips = ftpserver.local_ip_addresses()
+        host = ips[0] if ips else "127.0.0.1"
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            ok, lines = ftpserver.self_test(
+                host, self.server.port, self.e_user.text().strip(),
+                self.e_pass.text(), root=self.e_root.text().strip())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        for l in lines:
+            self._append_log("　" + l)
+        if ok:
+            QtWidgets.QMessageBox.information(
+                self, "つながるか試す",
+                "アプリ側は正常です。\n\n" + "\n".join(lines)
+                + "\n\n次は機械側です。③の値を制御装置に入れて、"
+                  "機械の画面でファイル一覧を出してください。\n"
+                  "出てこない場合は ①ファイアウォールの許可 ②IPが同じ町内か"
+                  "（ping）③ポート番号が21か を順に見てください。")
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "つながるか試す",
+                "アプリ側で止まっています。\n\n" + "\n".join(lines)
+                + "\n\nポート番号を変えて（例 2121）もう一度試すと通ることが"
+                  "あります。その場合は制御装置側の『ポート番号』も同じ値に"
+                  "してください。")
 
     def _check_received(self, path):
         """機械から受け取ったファイルをその場で点検する（バックアップの取りこぼし防止）。
@@ -1933,8 +2008,11 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.lbl_state.setText(f"動作中  {self.server.address()}")
         self.lbl_state.setStyleSheet("color:#166534; font-weight:bold;")
         self.b_start.setEnabled(False); self.b_stop.setEnabled(True)
+        self.b_test.setEnabled(True)
         for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
             w.setEnabled(False)
+        self._hits = 0
+        self._show_waiting()
         self._refresh_table()
         self._persist()
 
@@ -1945,8 +2023,31 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.lbl_state.setText("停止中")
         self.lbl_state.setStyleSheet("")
         self.b_start.setEnabled(True); self.b_stop.setEnabled(False)
+        self.b_test.setEnabled(False)
+        self.lbl_wait.setText("")
         for w in (self.e_root, self.e_user, self.e_pass, self.sp_port, self.cmb_style):
             w.setEnabled(True)
+
+    @QtCore.Slot()
+    def _show_waiting(self):
+        """機械から来たかどうかを、ひと目で分かるように出す。"""
+        if not self.server:
+            self.lbl_wait.setText("")
+            return
+        if not getattr(self, "_hits", 0):
+            self.lbl_wait.setText(
+                "まだ機械からつないできていません（③を入れて、機械の画面で"
+                "ファイル一覧を出してください）")
+            self.lbl_wait.setStyleSheet(
+                "background:#fffbeb; color:#b45309; padding:6px;"
+                "border:1px solid #f59e0b; border-radius:4px;")
+        else:
+            self.lbl_wait.setText(
+                f"機械からつないできました（{self._hits}回・最後 "
+                f"{self._last_hit}）。うまくいっています")
+            self.lbl_wait.setStyleSheet(
+                "background:#dcfce7; color:#166534; padding:6px; font-weight:bold;"
+                "border:1px solid #86efac; border-radius:4px;")
 
     def _persist(self):
         self.settings["ftp_root"] = self.e_root.text().strip()

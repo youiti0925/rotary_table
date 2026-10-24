@@ -633,3 +633,51 @@ class FtpServer:
                 ("ユーザー名", self.user or "（空欄）"),
                 ("パスワード", self.password or "（空欄）"),
                 ("ログインフォルダ", "（空欄のまま）")]
+
+
+def self_test(host: str, port: int, user: str = "", password: str = "",
+              root=None, timeout: float = 5.0) -> tuple:
+    """動いているFTPサーバーに自分でつないで、ファイルを渡せるか確かめる。
+
+    「開始を押したけど、これで合っているのか分からない」を無くすため。
+    つなぐ → ログイン → 一覧 → 実際に1本読む、まで通して試す。
+
+    ★これで分かるのは<b>アプリ側が正しく動いているか</b>まで。
+      機械から届くかどうかは別（LANの配線・IPの町内・Windowsの門番）。
+    戻り値: (うまくいったか, [説明の行])
+    """
+    import ftplib
+    import uuid
+    lines = []
+    probe = None
+    try:
+        base = Path(root) if root else None
+        if base and base.is_dir():
+            probe = base / f"_TEST_{uuid.uuid4().hex[:6].upper()}.TXT"
+            probe.write_bytes(b"ND287 FTP TEST\n\r\r")
+        ftp = ftplib.FTP()
+        ftp.connect(host, int(port), timeout=timeout)
+        lines.append(f"① つながった（{host}:{port}）")
+        ftp.login(user or "anonymous", password or "")
+        lines.append(f"② ログインできた（ユーザー名 {user or '（空欄）'}）")
+        names = ftp.nlst()
+        lines.append(f"③ フォルダが見えた（ファイル {len(names)}個）")
+        if probe is not None:
+            got = []
+            ftp.retrbinary(f"RETR {probe.name}", got.append)
+            data = b"".join(got)
+            if data != probe.read_bytes():
+                ftp.quit()
+                return False, lines + ["④ ★中身が変わってしまった（要連絡）"]
+            lines.append("④ ファイルを1本読めた。中身も1バイトも変わっていない")
+        ftp.quit()
+        return True, lines
+    except Exception as e:
+        lines.append(f"★ ここで止まった: {type(e).__name__}: {e}")
+        return False, lines
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink()
+            except OSError:
+                pass

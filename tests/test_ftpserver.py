@@ -415,7 +415,10 @@ class TestDiagnose(unittest.TestCase):
         self.srv.logged_in = 1
         head, todo = F.diagnose(self.srv)
         self.assertIn("一覧の要求が来ていません", head)
-        self.assertTrue(any("FTP" in t for t in todo))
+        # 「どこで切り替えるのか」まで出す（場所が分からないと直せない）
+        self.assertTrue(any("メモリカード" in t for t in todo))
+        self.assertTrue(any("0020" in t for t in todo), todo)
+        self.assertTrue(any("機器選択" in t for t in todo), todo)
 
     def test_folder_is_empty(self):
         self.srv.start()

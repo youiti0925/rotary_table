@@ -1900,13 +1900,14 @@ class FtpServerDialog(QtWidgets.QDialog):
         self.tbl.horizontalHeader().setStretchLastSection(True)
 
     def _note_hit(self, line):
-        """機械がつないできたことを数える（_append_log から呼ばれる）。"""
-        if not line or "接続 " not in line:
+        """機械の動きを数えて、表示を出し直す（_append_log から呼ばれる）。"""
+        if not line:
             return
-        if line.split()[-1].startswith("127."):
-            return                      # 自分で試したぶんは数えない
-        self._hits = getattr(self, "_hits", 0) + 1
-        self._last_hit = line.split()[0]
+        if "接続 " in line and not line.split()[-1].startswith("127."):
+            self._hits = getattr(self, "_hits", 0) + 1
+            self._last_hit = line.split()[0]
+        elif not ("230 Login" in line or "530 Login" in line):
+            return                      # 表示が変わる行だけ出し直す
         QtCore.QMetaObject.invokeMethod(self, "_show_waiting",
                                         QtCore.Qt.QueuedConnection)
 
@@ -2034,20 +2035,38 @@ class FtpServerDialog(QtWidgets.QDialog):
         if not self.server:
             self.lbl_wait.setText("")
             return
-        if not getattr(self, "_hits", 0):
+        amber = ("background:#fffbeb; color:#b45309; padding:6px;"
+                 "border:1px solid #f59e0b; border-radius:4px;")
+        red = ("background:#fef2f2; color:#b91c1c; padding:6px; font-weight:bold;"
+               "border:1px solid #fecaca; border-radius:4px;")
+        green = ("background:#dcfce7; color:#166534; padding:6px; font-weight:bold;"
+                 "border:1px solid #86efac; border-radius:4px;")
+        hits = getattr(self, "_hits", 0)
+        if self.server.logged_in:
+            # 「つないできた」だけでは成功とは言えない。ログインまで通って初めて
+            # ファイルが見える（つないだ直後に断られている例が実機であった）
+            self.lbl_wait.setText(
+                f"機械がログインできました（{self.server.logged_in}回・最後 "
+                f"{getattr(self, '_last_hit', '')}）。うまくいっています")
+            self.lbl_wait.setStyleSheet(green)
+        elif self.server.login_ng:
+            self.lbl_wait.setText(
+                "機械は届いていますが、<b>ログインで断られています</b>。"
+                "ユーザー名とパスワードを確かめてください"
+                "（制御装置は小文字を送れないので、打った文字に関わらず"
+                "大文字で届きます。大文字小文字は区別していないので、"
+                "<b>文字そのもの</b>が合っているか見てください）")
+            self.lbl_wait.setTextFormat(QtCore.Qt.RichText)
+            self.lbl_wait.setStyleSheet(red)
+        elif not hits:
             self.lbl_wait.setText(
                 "まだ機械からつないできていません（③を入れて、機械の画面で"
                 "ファイル一覧を出してください）")
-            self.lbl_wait.setStyleSheet(
-                "background:#fffbeb; color:#b45309; padding:6px;"
-                "border:1px solid #f59e0b; border-radius:4px;")
+            self.lbl_wait.setStyleSheet(amber)
         else:
             self.lbl_wait.setText(
-                f"機械からつないできました（{self._hits}回・最後 "
-                f"{self._last_hit}）。うまくいっています")
-            self.lbl_wait.setStyleSheet(
-                "background:#dcfce7; color:#166534; padding:6px; font-weight:bold;"
-                "border:1px solid #86efac; border-radius:4px;")
+                f"機械からつないできました（{hits}回）。ログインの返事を待っています")
+            self.lbl_wait.setStyleSheet(amber)
 
     def _persist(self):
         self.settings["ftp_root"] = self.e_root.text().strip()

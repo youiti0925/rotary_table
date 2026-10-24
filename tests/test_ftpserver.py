@@ -317,3 +317,58 @@ class TestSelfTest(_Base):
         ok, lines = F.self_test("127.0.0.1", self.srv.port, "cnc", "cnc", root=None)
         self.assertTrue(ok, lines)
         self.assertEqual(len(lines), 3)          # 1本読む段は飛ばす
+
+
+class TestUppercaseLogin(unittest.TestCase):
+    """制御装置は小文字を送れない（FANUCのISOコードに小文字が無い）。
+
+    画面で cnc と打っても回線には USER CNC と大文字で出てくる。実機のログで
+    「← USER CNC → 530 Login incorrect」となり、ファイル一覧が出なかった。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        (self.dir / "T1.DAT").write_bytes(MACHINE_BYTES)
+        self.srv = F.FtpServer(self.dir, host="127.0.0.1", port=0,
+                               user="cnc", password="cnc")
+        self.srv.start()
+
+    def tearDown(self):
+        self.srv.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _login(self, user, password):
+        ftp = ftplib.FTP()
+        ftp.connect("127.0.0.1", self.srv.port, timeout=10)
+        try:
+            ftp.login(user, password)
+            return ftp.nlst()
+        finally:
+            try:
+                ftp.close()
+            except Exception:
+                pass
+
+    def test_uppercase_from_the_machine_is_accepted(self):
+        self.assertEqual(self._login("CNC", "CNC"), ["T1.DAT"])
+
+    def test_lowercase_still_works(self):
+        self.assertEqual(self._login("cnc", "cnc"), ["T1.DAT"])
+
+    def test_mixed_case_works(self):
+        self.assertEqual(self._login("Cnc", "cNC"), ["T1.DAT"])
+
+    def test_a_different_word_is_still_refused(self):
+        with self.assertRaises(ftplib.error_perm):
+            self._login("CNC", "CHIGAU")
+
+    def test_counts_are_kept_for_the_screen(self):
+        """画面が「つないできた」と「ログインできた」を別に出せるように。"""
+        self._login("CNC", "CNC")
+        self.assertEqual(self.srv.logged_in, 1)
+        self.assertEqual(self.srv.login_ng, 0)
+        with self.assertRaises(ftplib.error_perm):
+            self._login("CNC", "CHIGAU")
+        self.assertEqual(self.srv.logged_in, 1)
+        self.assertEqual(self.srv.login_ng, 1)
+        self.assertTrue(any("ログインを断りました" in l for l in self.srv.lines))

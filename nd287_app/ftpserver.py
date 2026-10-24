@@ -61,6 +61,19 @@ def local_ip_addresses() -> list:
     return out
 
 
+def _same_text(sent, expected) -> str:
+    """ユーザー名・パスワードを照合する。<b>大文字小文字は区別しない</b>。
+
+    FANUCのISOコードに小文字が無いため、制御装置の画面で "cnc" と打っても
+    回線には <b>USER CNC</b> と大文字で出てくる（実機のログで確認）。
+    区別すると、正しく入力しても永久にログインできない。
+    空の設定はだれでも可（anonymous 運用）。
+    """
+    if not expected:
+        return True
+    return str(sent or "").strip().upper() == str(expected).strip().upper()
+
+
 def _decode(data: bytes) -> str:
     for enc in ("utf-8", "cp932"):
         try:
@@ -238,7 +251,7 @@ class _Session(threading.Thread):
         self.server.log(f"← {cmd} {'***' if cmd == 'PASS' else arg}")
         if cmd == "USER":
             self.authed = False              # ログイン済みでも送り直しでやり直す
-            self.user_ok = (not self.server.user) or arg == self.server.user
+            self.user_ok = _same_text(arg, self.server.user)
             if not self.server.password:
                 self.authed = self.user_ok
                 self._send("230 Login successful" if self.authed
@@ -247,9 +260,14 @@ class _Session(threading.Thread):
                 self._send("331 Password required")
             return True
         if cmd == "PASS":
-            self.authed = self.user_ok and arg == self.server.password
-            self._send("230 Login successful" if self.authed
-                       else "530 Login incorrect")
+            self.authed = self.user_ok and _same_text(arg, self.server.password)
+            if self.authed:
+                self.server.logged_in += 1   # 画面で「本当に通ったか」を出すため
+                self._send("230 Login successful")
+            else:
+                self.server.login_ng += 1
+                self.server.log("★ ログインを断りました（ユーザー名かパスワードが違います）")
+                self._send("530 Login incorrect")
             return True
         if cmd == "QUIT":
             self._send("221 Goodbye")
@@ -500,6 +518,8 @@ class FtpServer:
         self.lines = []
         self.max_log = max(1, int(max_log or 200))    # 0 だと1行も消えず伸び続ける
         self.stopping = False
+        self.logged_in = 0      # ログインまで通った回数
+        self.login_ng = 0       # ログインで断った回数
         self._sock = None
         self._thread = None
         self._sessions = set()          # 生きている接続（stop() で確実に閉じる）

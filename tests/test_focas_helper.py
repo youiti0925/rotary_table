@@ -21,8 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nd287_app import focas_helper as H          # noqa: E402
 from fake_fwlib import FakeFwlib, FakeMachine    # noqa: E402
 
-# 書込・削除・運転開始・PMC・サーチ系の関数は、一覧に入れない（段4以降も運転系は入れない）
-FORBIDDEN = ("cnc_start", "cnc_search", "cnc_wrmacro", "cnc_wrparam", "cnc_dwnstart4",
+# 書く関数で一覧に入れてよいのは cnc_wrparam（パラメータ1件）だけ。
+# 削除・プログラム書込・運転開始・PMC・マクロ書込・サーチ系は、一覧に入れない
+FORBIDDEN = ("cnc_start", "cnc_search", "cnc_wrmacro", "cnc_dwnstart4",
              "cnc_download4", "cnc_dwnend4", "cnc_pdf_del", "cnc_delete", "cnc_wrpmcrng",
              "pmc_wrpmcrng", "pmc_wrpmcrng2", "cnc_wrtofs", "cnc_pdf_rename",
              "cnc_setpath", "cnc_cyclestart", "cnc_reset", "cnc_wrpitchdata")
@@ -66,8 +67,18 @@ class TestApi(unittest.TestCase):
         for name in H.ALLOWED_FUNCS:
             self.assertIs(getattr(lib, name).restype, ctypes.c_short, name)
 
-    def test_allowed_list_is_only_read_functions(self):
+    def test_allowed_list_is_read_functions_plus_cnc_wrparam_only(self):
+        read_funcs = {
+            "cnc_allclibhndl3", "cnc_freelibhndl", "cnc_sysinfo", "cnc_rdcncid", "cnc_rdaxisname",
+            "cnc_statinfo", "cnc_rdalmmsg", "cnc_rdproginfo", "cnc_rdpdf_subdir",
+            "cnc_rdpdf_alldir", "cnc_upstart4", "cnc_upload4", "cnc_upend4", "cnc_rdparainfo",
+            "cnc_rdparam"}
+        # 許可一覧に足してよい書込系は cnc_wrparam だけ（増やすなら、この試験を直す前に利用者へ聞く）
+        self.assertEqual(set(H.ALLOWED_FUNCS) - read_funcs, {"cnc_wrparam"})
         for bad in FORBIDDEN:
+            self.assertNotIn(bad, H.ALLOWED_FUNCS)
+        for bad in ("cnc_wrparam2", "cnc_wrpmcrng", "cnc_pdf_del", "cnc_download4",
+                    "cnc_wrmacro", "cnc_start", "pmc_wrpmcrng"):
             self.assertNotIn(bad, H.ALLOWED_FUNCS)
         self.assertEqual(sorted(H.ALLOWED_FUNCS), sorted(set(H.ALLOWED_FUNCS)))
         import re
@@ -83,10 +94,12 @@ class TestApi(unittest.TestCase):
     def test_unlisted_function_cannot_be_fetched(self):
         lib = FakeFwlib()
         api = H.Api(lib)
-        for name in ("cnc_start", "cnc_wrparam", "pmc_wrpmcrng", "cnc_search"):
+        for name in ("cnc_start", "pmc_wrpmcrng", "cnc_search", "cnc_wrmacro", "cnc_pdf_del",
+                     "cnc_dwnstart4"):
             with self.assertRaises(AttributeError):
                 getattr(api, name)
-        self.assertEqual(lib.called("cnc_wrparam"), 0)
+        self.assertEqual(lib.called("cnc_start"), 0)
+        self.assertEqual(lib.called("cnc_wrparam"), 0)          # 取り出しただけでは呼ばれない
 
     def test_fake_has_write_functions_that_helper_never_calls(self):
         lib, hp, run = connected()
@@ -95,8 +108,8 @@ class TestApi(unittest.TestCase):
                           ("param_read", {"no": 20}), ("param_dump", {"kind": "param"}),
                           ("prog_read", {"path": "//CNC_MEM/USER/PATH1/O901"})):
             run(cmd, **args)
-        for bad in FORBIDDEN:
-            self.assertEqual(lib.called(bad), 0, bad)
+        for bad in FORBIDDEN + ("cnc_wrparam",):
+            self.assertEqual(lib.called(bad), 0, bad)            # 読む命令は、書く関数を呼ばない
 
     def test_missing_function_in_dll_is_not_fatal_until_used(self):
         lib = FakeFwlib()
@@ -505,8 +518,9 @@ class TestRobustness(unittest.TestCase):
         for msg in ({}, {"cmd": 5}, {"cmd": "なにか"}, {"cmd": "status", "args": [1]}, [1, 2]):
             r = hp.handle(msg, lambda x: None)
             self.assertFalse(r["ok"], msg)
-        # 書込・運転開始の命令名は存在しない
-        for cmd in ("param_write", "prog_write", "prog_delete", "start", "cycle_start"):
+        # 書く命令は param_write だけ。プログラム書込・削除・運転開始の命令名は存在しない
+        for cmd in ("prog_write", "prog_delete", "start", "cycle_start", "macro_write",
+                    "pmc_write", "param_write_file"):
             r = hp.handle({"id": 1, "cmd": cmd}, lambda x: None)
             self.assertEqual(r["error"]["kind"], "bad_args", cmd)
 
@@ -561,7 +575,7 @@ class TestRobustness(unittest.TestCase):
         src = Path(H.__file__).read_text(encoding="utf-8")
         mods = set(re.findall(r"^\s*(?:import|from)\s+([A-Za-z_][\w]*)", src, re.M))
         self.assertEqual(mods - {"base64", "ctypes", "hashlib", "json", "os", "struct",
-                                 "sys", "time", "platform", "traceback"}, set())
+                                 "sys", "time", "platform", "traceback", "re", "decimal"}, set())
         self.assertNotIn("nd287_app", mods)
 
 
@@ -784,3 +798,186 @@ class TestAllowListWatch(unittest.TestCase):
         self.assertGreater(len(names), 10)
         self.assertEqual(names - set(H.ALLOWED_FUNCS), set())
         self.assertEqual(names & set(FORBIDDEN), set())
+
+
+
+VERIFIED = ["byte/none"]
+
+
+class TestParamWrite(unittest.TestCase):
+    """段4: cnc_wrparam の詰め方（設計 §11.2 の 13〜17）。偽物の機械だけ。実機にはつながない。"""
+
+    def write(self, run, no, label, value, verified=VERIFIED):
+        return run("param_write", no=no, label=label, value=value, verified=verified)
+
+    def test_byte_is_packed_like_the_script_that_worked_on_the_machine(self):
+        lib, hp, run = connected()
+        r = self.write(run, 20, "", "4")
+        self.assertTrue(r["ok"], r)
+        # focas_wr0020.py（実機で成功）は struct.pack("<hhB", 20, 0, 値)・長さ 5
+        self.assertEqual(bytes.fromhex(r["result"]["data_hex"]), struct.pack("<hhB", 20, 0, 4))
+        self.assertEqual(r["result"]["length"], 5)
+        self.assertEqual(lib.wr_lengths, [5])
+        self.assertEqual(lib.m.writes, [(20, "", "4")])
+        self.assertEqual(run.ok("param_read", no=20, label="")["value"], "4")
+
+    def test_negative_byte_reads_back_the_same(self):
+        lib, hp, run = connected()
+        self.assertTrue(self.write(run, 20, "", "-49")["ok"])
+        self.assertEqual(run.ok("param_read", no=20, label="")["value"], "-49")
+
+    def test_other_types_are_packed_as_designed_when_verified(self):
+        v = ["byte/none", "bit/A", "dword/A", "word/none", "real/A"]
+        lib, hp, run = connected()
+        r = self.write(run, 1815, "A4", "00100000", v)["result"]            # ビット 8桁 → 1バイト
+        self.assertEqual(bytes.fromhex(r["data_hex"]), struct.pack("<hhB", 1815, 4, 0x20))
+        r = self.write(run, 1821, "A4", "360000", v)["result"]              # 2ワード
+        self.assertEqual(bytes.fromhex(r["data_hex"]), struct.pack("<hhi", 1821, 4, 360000))
+        r = self.write(run, 1420, "A4", "8000.0", v)["result"]              # 実数: 値の整数と桁数
+        self.assertEqual(bytes.fromhex(r["data_hex"]), struct.pack("<hhii", 1420, 4, 80000, 1))
+        self.assertEqual(r["length"], 12)
+        self.assertEqual(run.ok("param_read", no=1420, label="A4")["value"], "8000.0")
+        self.assertEqual(run.ok("param_read", no=1815, label="A4")["value"], "00100000")
+
+    def test_word_is_packed_as_signed_short(self):
+        d = H.encode_param_value("word", "-2")
+        self.assertEqual(d, struct.pack("<h", -2))
+
+    def test_real_does_not_use_floating_point(self):
+        self.assertEqual(H.encode_param_value("real", "0.1", 1), struct.pack("<ii", 1, 1))
+        self.assertEqual(H.encode_param_value("real", "108.125", 3), struct.pack("<ii", 108125, 3))
+        self.assertEqual(H.encode_param_value("real", "-1.0", 1), struct.pack("<ii", -10, 1))
+        self.assertEqual(H.encode_param_value("real", "20000", 1), struct.pack("<ii", 200000, 1))
+
+    def test_real_that_cannot_be_represented_is_refused_not_rounded(self):
+        with self.assertRaises(H.FocasError) as cm:
+            H.encode_param_value("real", "0.0005", 3)
+        self.assertEqual(cm.exception.kind, "refused")
+        self.assertIn("丸めて", cm.exception.detail["message"])
+        lib, hp, run = connected()
+        r = self.write(run, 1420, "A4", "8000.05", ["real/A"])
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "refused")
+        self.assertEqual(lib.m.writes, [])                    # 1回も書いていない
+
+    def test_out_of_range_values_are_refused(self):
+        for kind, text in (("byte", "300"), ("byte", "128"), ("byte", "-129"), ("word", "40000"),
+                           ("dword", "3000000000"), ("bit", "123456789"), ("bit", "0010000"),
+                           ("bit", "0010000x"), ("byte", "1.5"), ("real", "abc")):
+            with self.assertRaises(H.FocasError, msg=(kind, text)):
+                H.encode_param_value(kind, text, 1)
+        lib, hp, run = connected()
+        r = self.write(run, 20, "", "300")
+        self.assertFalse(r["ok"])
+        self.assertEqual(lib.m.writes, [])
+
+    def test_label_to_axis_field(self):
+        self.assertEqual(H.axis_field(""), 0)
+        self.assertEqual(H.axis_field("A4"), 4)
+        self.assertEqual(H.axis_field("S1"), 1)
+        for label in ("L1", "L2", "T1"):
+            with self.assertRaises(H.FocasError) as cm:
+                H.axis_field(label)
+            self.assertEqual(cm.exception.kind, "refused")
+
+    def test_axis_label_is_passed_as_the_axis_number(self):
+        lib, hp, run = connected()
+        r = self.write(run, 1020, "A4", "65", ["byte/A"])["result"]
+        self.assertEqual(bytes.fromhex(r["data_hex"])[:4], struct.pack("<hh", 1020, 4))
+
+    def test_l_and_t_labels_are_not_written(self):
+        lib, hp, run = connected()
+        r = self.write(run, 3202, "L1", "01000000", ["bit/L"])
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["reason"], "unconfirmed_axis")
+        self.assertEqual(lib.m.writes, [])
+
+    def test_unverified_type_is_never_written(self):
+        lib, hp, run = connected()
+        r = self.write(run, 1815, "A4", "00100000")         # bit/A は確認済みの表に無い
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "refused")
+        self.assertEqual(r["error"]["reason"], "unverified_kind")
+        self.assertEqual(r["error"]["key"], "bit/A")
+        self.assertEqual(lib.called("cnc_wrparam"), 0)
+        r = run("param_write", no=20, label="", value="4")   # verified を渡さない → 断る
+        self.assertFalse(r["ok"])
+        self.assertEqual(lib.called("cnc_wrparam"), 0)
+
+    def test_kind_key_combines_basic_type_and_label_kind(self):
+        self.assertEqual(H.kind_key(17, ""), "byte/none")
+        self.assertEqual(H.kind_key(68, "A4"), "bit/A")
+        self.assertEqual(H.kind_key(4103, "A4"), "real/A")
+        self.assertEqual(H.kind_key(260, "S1"), "bit/S")        # 未解読ビット付きでも基本の型で決まる
+        self.assertEqual(H.kind_key(325, "S1"), "byte/S")
+        self.assertEqual(H.kind_key(0, "L1"), "bit/L")
+        self.assertEqual(H.label_kind("T2"), "T")
+
+    def test_nonzero_return_is_an_error_and_ew_prot_is_named(self):
+        lib, hp, run = connected({"force_rc": {"cnc_wrparam": 7}})
+        r = self.write(run, 20, "", "4")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "focas")
+        self.assertEqual(r["error"]["rc"], 7)
+        self.assertEqual(r["error"]["name"], "EW_PROT")
+        self.assertEqual(r["error"]["func"], "cnc_wrparam")
+
+    def test_pwe_off_returns_7_like_the_machine(self):
+        lib, hp, run = connected({"pwe_required": True})
+        r = self.write(run, 20, "", "4")
+        self.assertEqual(r["error"]["rc"], 7)
+        lib2, hp2, run2 = connected({"pwe_required": True,
+                                     "alarms": [[100, 0, 0, "ﾊﾟﾗﾒｰﾀ書き込み可能です"]]})
+        self.assertTrue(self.write(run2, 20, "", "4")["ok"])
+
+    def test_ew_buffer_is_retried_but_ends_by_time_limit(self):
+        lib, hp, run = connected({"write_rc_at": {"1": 10, "2": 10}})
+        r = self.write(run, 20, "", "4")
+        self.assertTrue(r["ok"], r)                     # 10 を2回返されても、待って送り直して通る
+        self.assertEqual(lib.called("cnc_wrparam"), 3)
+        # ずっと 10 を返す機械でも、上限時間で必ず抜ける
+        t = [0.0]
+
+        def clock():
+            t[0] += 0.5
+            return t[0]
+        lib2 = FakeFwlib(scenario={"force_rc": {"cnc_wrparam": 10}})
+        hp2 = H.Helper(lib2, sleep=lambda s: None, clock=clock)
+        run2 = Run(hp2)
+        run2.ok("connect", host="127.0.0.1", port=8193, timeout=1)
+        r = run2("param_write", no=20, label="", value="4", verified=VERIFIED)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "timeout")
+        self.assertLess(lib2.called("cnc_wrparam"), 100)
+
+    def test_ew_busy_is_not_retried(self):
+        lib, hp, run = connected({"force_rc": {"cnc_wrparam": -1}})
+        r = self.write(run, 20, "", "4")
+        self.assertEqual(r["error"]["rc"], -1)
+        self.assertEqual(lib.called("cnc_wrparam"), 1)  # 書込は繰り返さない
+
+    def test_lost_connection_is_lost(self):
+        lib, hp, run = connected({"force_rc": {"cnc_wrparam": -16}})
+        r = self.write(run, 20, "", "4")
+        self.assertEqual(r["error"]["kind"], "lost")
+
+    def test_unsupported_family_cannot_write(self):
+        lib, hp, run = connected({"cnc_type": "0"})
+        r = self.write(run, 20, "", "4")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "unsupported")
+        self.assertEqual(lib.called("cnc_wrparam"), 0)
+
+    def test_param_write_needs_a_connection(self):
+        lib, hp = make()
+        r = Run(hp)("param_write", no=20, label="", value="4", verified=VERIFIED)
+        self.assertEqual(r["error"]["kind"], "not_connected")
+
+    def test_wrparam_is_only_called_by_param_write(self):
+        import re
+        src = Path(H.__file__).read_text(encoding="utf-8")
+        calls = [m.start() for m in re.finditer(r"cnc_wrparam", src)]
+        code_calls = [l for l in src.splitlines()
+                      if "api.cnc_wrparam(" in l and not l.lstrip().startswith("#")]
+        self.assertEqual(len(code_calls), 1)
+        self.assertGreater(len(calls), 1)

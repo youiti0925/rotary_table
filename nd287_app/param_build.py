@@ -142,7 +142,8 @@ def drop_zero_params(values: dict, zero_params) -> tuple:
 
 
 def build_text(raw: str, values: dict, axis: int, seiban: str = "",
-               zero_params=None, soft_limit=None, soft_params=None) -> tuple:
+               zero_params=None, soft_limit=None, soft_params=None,
+               zero_axes=None) -> tuple:
     """BASIC テキスト raw に values({番号:値}) を入れた新テキストを返す。
 
     戻り値: (新テキスト, 反映できなかった番号リスト, 形式 'fanuc'/'headercsv')。
@@ -150,6 +151,7 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
     zero_params を渡すと、その番号（既定はグリッドシフト・バックラッシ補正）を
     全軸0にする。出荷するファイルに前の機械の実測値を残さないため。
     soft_limit は 'apply'(既定・客先どおり) / 'skip'(入れない) / 'disable'(無効化)。
+    zero_axes を渡すと、0にする軸をその軸番号だけにする（None＝全軸。既定）。
     """
     soft_params = _soft_params(soft_params)
     if soft_mode(soft_limit) != "apply":
@@ -161,7 +163,7 @@ def build_text(raw: str, values: dict, axis: int, seiban: str = "",
         values, _dropped = drop_zero_params(values, zero_params)
         text = raw
         if zero_params:
-            text, _z = zero_individual(text, zero_params)
+            text, _z = zero_individual(text, zero_params, zero_axes)
         if soft_mode(soft_limit) == "disable":
             text, _r = disable_soft_limit(text, [axis], soft_params)
         newtext, missing = fanuc_param.apply_product_values(text, values, axis)
@@ -375,11 +377,20 @@ def product_axis_values(basic_text: str, product_text: str) -> tuple:
 ZERO_INDIVIDUAL_PARAMS = ("1850", "1851", "1852")
 
 
-def individual_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
+def _zero_axis_ok(label, axes) -> bool:
+    """axes が None なら全部。渡されたら、その軸番号のラベル（A4 など）だけ。"""
+    if axes is None:
+        return True
+    return fanuc_param.axis_of_label(label) in set(axes)
+
+
+def individual_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS, axes=None) -> list:
     """0にすべき項目のうち、いま0でないものを [(番号, ラベル, 旧値)] で返す。
 
-    軸を限らず、そのファイルに入っている全軸を対象にする。作る軸だけ0にしても、
-    他の軸に前の機械の値が残ったまま出荷されてしまうため。
+    既定（axes=None）は、そのファイルに入っている全軸を対象にする。作る軸だけ0にしても、
+    他の軸に前の機械の値が残ったまま出荷されてしまうため（カードで出荷するファイル）。
+    axes に軸番号の並びを渡すと、その軸だけにする（FOCAS で機械へ直接書くとき: 土台が
+    「いまの機械」なので、製品の軸以外の実測値を0にしない）。
     """
     params = params or ()          # None/空 は「0にしない」（既定へ戻さない）
     if not fanuc_param.looks_like_fanuc_prm(raw):
@@ -391,6 +402,8 @@ def individual_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
                     != fanuc_param._norm_num(num):
                 continue
             for (label, _t, value) in (fanuc_param.segments(line) or []):
+                if not _zero_axis_ok(label, axes):
+                    continue
                 try:
                     if float(value) == 0.0:
                         continue
@@ -401,12 +414,12 @@ def individual_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
     return out
 
 
-def zero_individual(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> tuple:
-    """グリッドシフト・バックラッシ補正を全軸0にする。
+def zero_individual(raw: str, params=ZERO_INDIVIDUAL_PARAMS, axes=None) -> tuple:
+    """グリッドシフト・バックラッシ補正を0にする（既定は全軸。axes を渡すとその軸だけ）。
 
     戻り値: (新テキスト, [(番号, ラベル, 旧値)])。0にした所だけが変わる。
     """
-    rows = individual_zero_rows(raw, params)
+    rows = individual_zero_rows(raw, params, axes)
     text = raw
     for num, label, _old in rows:
         text, _ok = fanuc_param.set_value(text, num, "0", label or None)
@@ -616,7 +629,7 @@ def product_change_values(basic_text: str, product_text: str) -> dict:
 
 def build_text_multi(raw: str, axis_values: dict, common: dict = None,
                      seiban: str = "", zero_params=None,
-                     soft_limit=None, soft_params=None) -> tuple:
+                     soft_limit=None, soft_params=None, zero_axes=None) -> tuple:
     """BASIC raw に「複数軸ぶんの値」を入れた新テキストを返す（2軸テーブル用）。
 
     axis_values={軸番号: {番号:値}} を各軸へ、common={番号:値} を共通スロットへ適用。
@@ -639,7 +652,7 @@ def build_text_multi(raw: str, axis_values: dict, common: dict = None,
         return newtext, [(m, "") for m in missing], fmt
     text = raw
     if zero_params:
-        text, _z = zero_individual(text, zero_params)
+        text, _z = zero_individual(text, zero_params, zero_axes)
     if soft_mode(soft_limit) == "disable":
         text, _r = disable_soft_limit(text, sorted(axis_values), soft_params)
     missing = []
@@ -765,10 +778,10 @@ def preview_rows(raw: str, values: dict, axis: int) -> list:
     return rows
 
 
-def preview_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS) -> list:
+def preview_zero_rows(raw: str, params=ZERO_INDIVIDUAL_PARAMS, axes=None) -> list:
     """0にする項目のプレビュー行 [(番号(軸), 旧値, "0")]。"""
     return [(f"{num}({label})" if label else str(num), old, "0")
-            for num, label, old in individual_zero_rows(raw, params)]
+            for num, label, old in individual_zero_rows(raw, params, axes)]
 
 
 # プレビュー行の区分（画面で色分け・件数の数え方を変えるために使う）
@@ -780,7 +793,8 @@ KIND_MISSING = "BASICに無い"
 
 def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = None,
             common: dict = None, seiban: str = "", zero_params=None,
-            soft_limit=None, soft_params=None, eob=None, reference: str = "") -> dict:
+            soft_limit=None, soft_params=None, eob=None, reference: str = "",
+            zero_scope: str = "all") -> dict:
     """作成の中身を1回だけ決める。<b>プレビューと書き込みで必ず同じものを使う</b>。
 
     これを作った理由: 同じ処理が作成画面5経路にコピーされていて、
@@ -795,6 +809,10 @@ def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = Non
       need     … 出力の実バイト数（カードの空き確認に使う）
       problems … 書く前の点検（validate_prm）
       values / axis_values / common … 実際に書く値（除外・解決済み）
+
+    zero_scope: 個体データを0にする範囲。"all"（既定。今までどおり全軸）／
+    "product"（製品の軸だけ。FOCAS で機械へ直接書くとき。土台が「いまの機械」なので、
+    製品の軸でない軸の実測値まで0にしない）。0にする番号の選び方（zero_params）は変えない。
     """
     single = axis_values is None
     axis_values = dict(axis_values or ({} if values is None else {axis: values}))
@@ -804,6 +822,9 @@ def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = Non
     mode = soft_mode(soft_limit)
     axes = sorted(a for a in axis_values if a)
     is_fanuc = fanuc_param.looks_like_fanuc_prm(raw)
+    if zero_scope not in ("all", "product"):
+        raise ValueError(f"zero_scope は all か product です: {zero_scope!r}")
+    zero_axes = None if zero_scope == "all" else tuple(axes or ([axis] if axis else []))
 
     rows, out_axis, dropped_soft = [], {}, {}
     for ax, vals in axis_values.items():
@@ -831,8 +852,9 @@ def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = Non
         for (num, a, old, new) in preview_rows_multi(raw, out_axis, out_common):
             kind = KIND_MISSING if (is_fanuc and old == "") else KIND_PRODUCT
             rows.append((num, a, old, new, kind, old != new))
-    for (num, old, new) in preview_zero_rows(raw, zero_params):
-        rows.append((num, "全軸", old, new, KIND_ZERO, old != new))
+    for (num, old, new) in preview_zero_rows(raw, zero_params, zero_axes):
+        rows.append((num, "全軸" if zero_axes is None else "製品の軸", old, new,
+                     KIND_ZERO, old != new))
     for (num, lab, old, new, changed) in soft_limit_preview(
             raw, dropped_soft, axes or ([axis] if axis else []), mode, sparams):
         rows.append((f"{num}({lab})" if lab else num, lab, old, new,
@@ -841,12 +863,12 @@ def prepare(raw: str, values: dict = None, *, axis=None, axis_values: dict = Non
     if single:
         ax = next(iter(out_axis), axis)
         newtext, missing, fmt = build_text(raw, out_axis.get(ax, {}), ax, seiban,
-                                           zero_params, mode, sparams)
+                                           zero_params, mode, sparams, zero_axes)
         total = len(out_axis.get(ax, {}))
         miss_n = len(missing)
     else:
         newtext, missing, fmt = build_text_multi(raw, out_axis, out_common, seiban,
-                                                 zero_params, mode, sparams)
+                                                 zero_params, mode, sparams, zero_axes)
         total = sum(len(v) for v in out_axis.values()) + len(out_common)
         miss_n = len(missing)
     need = (len(fanuc_param.prm_bytes(newtext, eob)) if fmt == "fanuc"

@@ -96,6 +96,7 @@ class FakeMachine:
         self.macro = (b"%\nG10L85P500(00000000000000000) \nG10L85P501(00000000000000000) \n"
                       b"SETVN549[] \nM02\n%")
         self.tool = b"%\nG10G90P1R0.000 \nG10G90P2R0.000 \n%"
+        self.writes = []                # cnc_wrparam で受けた (番号, ラベル, 値の文字)
         self.programs = {}
         self.extra_folders = {"//CNC_MEM/USER/PATH2/"}
         base = "//CNC_MEM/USER/PATH1/"
@@ -113,6 +114,23 @@ class FakeMachine:
         # 実機は 62本＋フォルダ10個で 72 だった。ルート（//CNC_MEM/）は数えない
         self.registered = sc.get("registered", len(self.programs) + len(
             self.all_folders() - {"//CNC_MEM/"}))
+
+    def set_param(self, no, lab, text):
+        """値を変える。丸ごと吸い出し（param_dat）の該当行の値も書き換える（行のほかの文字は保つ）。"""
+        self.params[(no, lab)] = text
+        key = f"N{no:05d}Q1"
+        lines = self.param_dat.decode("latin-1").split(chr(10))
+        for i, line in enumerate(lines):
+            if not line.startswith(key):
+                continue
+
+            def rep(m):
+                if (m.group(1) or "") == lab:
+                    return f"{m.group(1) or ''}{m.group(2)}{text}"
+                return m.group(0)
+            lines[i] = key + re.sub(r"([A-Z]+[0-9]*)?([PM])([-+0-9.]+)", rep, line[len(key):])
+            break
+        self.param_dat = chr(10).join(lines).encode("latin-1")
 
     def add_program(self, path, data, comment=""):
         self.programs[path] = (data, comment)
@@ -164,8 +182,9 @@ class FakeFwlib:
              "cnc_rdaxisname", "cnc_statinfo", "cnc_rdalmmsg", "cnc_rdproginfo",
              "cnc_rdpdf_subdir", "cnc_rdpdf_alldir", "cnc_upstart4", "cnc_upload4",
              "cnc_upend4", "cnc_rdparainfo", "cnc_rdparam",
+             "cnc_wrparam",     # 書く関数はこれだけ（ヘルパーが呼べる）
              # 本物の DLL にはあるが、ヘルパーは呼べない（呼ばれたら試験が気づく）
-             "cnc_start", "cnc_wrparam", "cnc_dwnstart4", "cnc_pdf_del", "cnc_wrmacro",
+             "cnc_start", "cnc_dwnstart4", "cnc_pdf_del", "cnc_wrmacro",
              "cnc_search", "pmc_wrpmcrng")
 
     def __init__(self, machine=None, scenario=None, calls_log=None):
@@ -407,4 +426,64 @@ class FakeFwlib:
             dec = len(text.split(".")[1]) if "." in text else 0
             data = struct.pack("<ii", int(text.replace(".", "")), dec)
         _put(buf, struct.pack("<hh", no, axis) + data)
+        return 0
+
+    # --- パラメータの書込（cnc_wrparam。実機で動いた形: 先頭 <hh(番号, 軸) ＋ データ）--------------
+
+    def _cnc_wrparam(self, h, length, buf):
+        """本物と同じバイトの並びで受ける。長さは 4 ＋ データの大きさ（バイト型は 5。実機で成功した形）。
+        scenario:
+          pwe_required   True なら、アラームに SW0100（種類0・番号100）が無いとき戻り値 7
+          write_ignore   [番号…] 戻り値 0 を返すが値は変えない（書けたふりをする機械）
+          write_store    {番号: 値の文字} 書いた値と違う値が入る
+          write_alarms   {番号: [[番号, 種類, 軸, 文言]…]} その番号を書くとアラームが増える（PW0000 など）
+          write_side     {番号: [[番号, ラベル, 値の文字]…]} その番号を書くと別の番号も変わる
+          write_rc_at    {N: 戻り値} N 回目の書込はその戻り値（書き込まない）
+        """
+        sc = self.sc
+        length = _val(length)
+        raw = buf.raw[:length]
+        self.write_n = getattr(self, "write_n", 0) + 1
+        self.wr_lengths = getattr(self, "wr_lengths", [])
+        self.wr_lengths.append(length)
+        rc_at = {int(k): v for k, v in (sc.get("write_rc_at") or {}).items()}
+        if self.write_n in rc_at:
+            return rc_at[self.write_n]
+        if sc.get("pwe_required") and not any(a[0] == 100 and a[1] == 0 for a in self.m.alarms):
+            return 7
+        no, axis = struct.unpack("<hh", raw[:4])
+        ty = self.m.types.get(no)
+        lab = self._label_for(no, axis)
+        if ty is None or lab is None:
+            return 3
+        base = ("bit", "byte", "word", "dword")[ty & 3]
+        kind = "real" if ty & 0x1000 else base
+        size = {"bit": 1, "byte": 1, "word": 2, "dword": 4, "real": 8}[kind]
+        if length != 4 + size:
+            return 2                        # EW_LENGTH
+        d = raw[4:]
+        if kind == "bit":
+            text = format(d[0], "08b")
+        elif kind == "byte":
+            text = str(struct.unpack("<b", d)[0])
+        elif kind == "word":
+            text = str(struct.unpack("<h", d)[0])
+        elif kind == "dword":
+            text = str(struct.unpack("<i", d)[0])
+        else:
+            prm, dec = struct.unpack("<ii", d)
+            n = str(abs(prm)).rjust(dec + 1, "0") if dec else str(abs(prm))
+            text = ("-" if prm < 0 else "") + (f"{n[:-dec]}.{n[-dec:]}" if dec else n)
+        self.m.writes.append((no, lab, text))
+        if no in (sc.get("write_ignore") or []):
+            return 0
+        store = {int(k): v for k, v in (sc.get("write_store") or {}).items()}
+        self.m.set_param(no, lab, store.get(no, text))
+        for k, side in (sc.get("write_side") or {}).items():
+            if int(k) == no:
+                for n2, l2, v2 in side:
+                    self.m.set_param(int(n2), l2, v2)
+        for k, al in (sc.get("write_alarms") or {}).items():
+            if int(k) == no:
+                self.m.alarms += [tuple(a) for a in al]
         return 0

@@ -24,6 +24,11 @@ from pathlib import Path
 
 PROTO = 1
 
+# 2秒ごとの状態の読み直し。成功したときはやり取りの記録（focas_helper.log・画面）に書かない
+# （1日で記録が読み直しだらけになり、必要な行が押し出される）。失敗したときは書く。
+QUIET_OK_CMDS = ("status", "alarms")
+DEFAULT_CONNECT_TIMEOUT = 10    # 設定 focas_timeout が 0 以下・数でないときに使う接続の時間切れ[秒]
+
 # 利用者向けの文では、初めに説明をつけて呼ぶ（「ヘルパー」だけでは何か分からない）
 HELPER_NAME = "機械と話す小さなプログラム（ヘルパー）"
 
@@ -406,26 +411,44 @@ class FocasClient:
             if not self.alive:
                 self.start()                      # 切れていたら起動し直す
             mid = self._new_id()
-            self._note(f"→ {cmd}")
+            quiet = cmd in QUIET_OK_CMDS
+            started = [False]
+
+            def note_start():
+                if not started[0]:
+                    started[0] = True
+                    self._note(f"→ {cmd}")
+
+            def fail(kind, **kw):
+                """失敗は必ず記録に書く（読み直しの命令でも。成功だけ書かない）。"""
+                note_start()
+                self._note(f"× {cmd} kind={kind}" + "".join(f" {k}={v}" for k, v in kw.items()))
+
+            if not quiet:
+                note_start()
             t = timeout if timeout is not None else self.timeouts.get(cmd, self.timeouts["default"])
             try:
                 self._send({"id": mid, "cmd": cmd, "args": args or {}})
             except (OSError, ValueError):
                 self._kill()
+                fail("lost")
                 raise _from_dict({"kind": "lost", "message": f"{HELPER_NAME}に送れませんでした"})
             deadline = time.monotonic() + t
             while True:
                 item = self._get(deadline - time.monotonic())
                 if item is None:
                     self._kill()                   # DLL の中で固まっているかもしれない
+                    fail("timeout", seconds=t)
                     raise _from_dict({"kind": "timeout", "seconds": t, "cmd": cmd})
                 kind, data = item
                 if kind == "eof":
                     self._kill()
+                    fail("lost")
                     raise _from_dict({"kind": "lost",
                                       "message": f"{HELPER_NAME}が突然終わりました。" + self._tail_text()})
                 if kind == "partial":
                     self._kill()
+                    fail("protocol")
                     raise _from_dict({"kind": "protocol", "message": "返事が途中で切れました"})
                 try:
                     msg = json.loads(data.decode("utf-8"))
@@ -433,6 +456,7 @@ class FocasClient:
                         raise ValueError("辞書ではない")
                 except ValueError:
                     self._kill()                   # 同期が取れなくなるので止める
+                    fail("protocol")
                     raise _from_dict({"kind": "protocol",
                                       "message": "読み取れない形の返事を受け取りました"})
                 if "event" in msg:
@@ -442,13 +466,15 @@ class FocasClient:
                 if msg.get("id") != mid:
                     continue                       # 前の命令の古い返事は捨てる
                 if msg.get("ok"):
-                    self._note(f"← {cmd} OK")
+                    if not quiet:
+                        self._note(f"← {cmd} OK")
                     if cmd == "connect":
                         self.connected = True
                     elif cmd == "disconnect":
                         self.connected = False
                     return msg.get("result")
                 err = msg.get("error") or {"kind": "protocol", "message": "error がありません"}
+                note_start()
                 self._note(f"× {cmd} kind={err.get('kind')} func={err.get('func', '')} "
                            f"rc={err.get('rc', '')}".rstrip())
                 if err.get("kind") in ("lost", "connect"):
@@ -465,6 +491,19 @@ class FocasClient:
         return data
 
 
+def connect_timeout(settings):
+    """設定 focas_timeout（接続の時間切れ[秒]）。0 以下・数でないときは既定の 10 秒。
+
+    画面（ヘルパーへ渡す値）とクライアント（返事を待つ時間）で同じ関数を使う。
+    以前は画面が 0 をそのまま DLL へ渡し、クライアントは 1 秒に直していて、ずれていた。
+    """
+    try:
+        t = int(settings.get("focas_timeout", DEFAULT_CONNECT_TIMEOUT))
+    except (TypeError, ValueError):
+        return DEFAULT_CONNECT_TIMEOUT
+    return t if t >= 1 else DEFAULT_CONNECT_TIMEOUT
+
+
 def make_client(settings, log_path=None):
     """設定から FocasClient を作る（起動はしない）。
 
@@ -472,10 +511,7 @@ def make_client(settings, log_path=None):
     （ヘルパーが DLL に渡す時間より短いと、接続の失敗を返事で受け取れず、時間切れ扱いになる）。
     プログラム1本の読みはクライアント 75 秒・ヘルパー 60 秒（クライアントを長くする）。
     """
-    try:
-        t = max(1, int(settings.get("focas_timeout", 10)))
-    except (TypeError, ValueError):
-        t = 10
+    t = connect_timeout(settings)
     return FocasClient(
         resolve_python32(str(settings.get("focas_python32") or "")),
         resolve_helper(str(settings.get("focas_helper_path") or "")),

@@ -414,6 +414,53 @@ class TestHelperLog(Base):
         c = self.client()
         c._append_log("何も起きない")
 
+    def test_successful_status_and_alarm_polls_are_not_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.connected(log_path=log)
+            seen = []
+            c.on_log = seen.append
+            for _ in range(20):                      # 2秒ごとの状態の読み直しを20回
+                c.call("status")
+                c.call("alarms")
+            text = Path(log).read_text(encoding="utf-8")
+            self.assertNotIn("status", text)
+            self.assertNotIn("alarms", text)
+            self.assertEqual(seen, [])               # 画面の「やり取りの記録」にも出さない
+            c.call("param_info")                     # 読み直し以外は今までどおり書く
+            self.assertIn("← param_info OK", Path(log).read_text(encoding="utf-8"))
+            self.assertIn("← param_info OK", seen)
+
+    def test_failed_status_poll_is_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.connected({"force_rc": {"cnc_statinfo": 7}}, log_path=log)
+            seen = []
+            c.on_log = seen.append
+            with self.assertRaises(C.FocasError):
+                c.call("status")
+            text = Path(log).read_text(encoding="utf-8")
+            self.assertIn("→ status", text)
+            self.assertIn("× status kind=focas func=cnc_statinfo rc=7", text)
+            self.assertTrue(any("× status" in x for x in seen))
+
+    def test_timed_out_poll_is_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.connected({"hang_in": "cnc_statinfo"}, log_path=log)
+            with self.assertRaises(C.FocasError) as cm:
+                c.call("status", timeout=0.5)
+            self.assertEqual(cm.exception.kind, "timeout")
+            self.assertIn("× status kind=timeout", Path(log).read_text(encoding="utf-8"))
+
+    def test_lost_poll_is_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.connected({"lost_after": 2}, log_path=log)
+            with self.assertRaises(C.FocasError):
+                c.call("alarms")
+            self.assertIn("× alarms", Path(log).read_text(encoding="utf-8"))
+
 
 class TestTimeouts(unittest.TestCase):
     """B-6: 接続はクライアントの待ち時間を「設定の時間 + 余裕」に。プログラム1本はクライアントを長く。"""
@@ -426,6 +473,35 @@ class TestTimeouts(unittest.TestCase):
         c = C.make_client({"focas_timeout": "abc"})
         self.assertEqual(c.timeouts["connect"], 10 + C.CONNECT_MARGIN)
         self.assertGreater(C.make_client({"focas_timeout": 3}).timeouts["connect"], 3)
+
+    def test_zero_or_negative_timeout_means_the_default_everywhere(self):
+        """画面（ヘルパーへ渡す値）とクライアント（待つ時間）で、同じ関数で決める。"""
+        for bad in (0, -5, "0", "-1", None, "abc", ""):
+            self.assertEqual(C.connect_timeout({"focas_timeout": bad}), C.DEFAULT_CONNECT_TIMEOUT, bad)
+            self.assertEqual(C.make_client({"focas_timeout": bad}).timeouts["connect"],
+                             C.DEFAULT_CONNECT_TIMEOUT + C.CONNECT_MARGIN, bad)
+        self.assertEqual(C.connect_timeout({"focas_timeout": 3}), 3)
+        self.assertEqual(C.connect_timeout({"focas_timeout": "7"}), 7)
+        self.assertEqual(C.connect_timeout({}), C.DEFAULT_CONNECT_TIMEOUT)
+
+    def test_helper_also_treats_zero_timeout_as_the_default(self):
+        from nd287_app import focas_helper as H
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from fake_fwlib import FakeFwlib
+        seen = []
+        lib = FakeFwlib()
+        orig = lib.cnc_allclibhndl3.impl
+
+        def spy(ip, port, timeout, h):
+            seen.append(timeout.value)
+            return orig(ip, port, timeout, h)
+        lib.cnc_allclibhndl3.impl = spy
+        hp = H.Helper(lib, sleep=lambda s: None)
+        for t in (0, -3, 5):
+            r = hp.handle({"id": 1, "cmd": "connect", "args": {"host": "127.0.0.1", "timeout": t}},
+                          lambda e: None)
+            self.assertTrue(r["ok"], r)
+        self.assertEqual(seen, [10, 10, 5])
 
     def test_client_waits_longer_than_helper_for_a_program(self):
         from nd287_app import focas_helper as H

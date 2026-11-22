@@ -2530,7 +2530,7 @@ class FocasDialog(QtWidgets.QDialog):
             return
         self._persist()
         client = self._ensure_client()
-        port, timeout = self.sp_port.value(), int(self.settings.get("focas_timeout", 10))
+        port, timeout = self.sp_port.value(), focas_client.connect_timeout(self.settings)
         families = dict(self.settings.get("focas_families") or {})
         self._set_state("つないでいます…")
 

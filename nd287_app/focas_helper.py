@@ -7,8 +7,9 @@
 - 標準ライブラリだけ。**nd287_app のほかのファイルを import しない**
   （exe にしたとき、32bit Python から nd287_app は見えないため）。
 - import しただけでは DLL を読まない（試験が普通のモジュールとして読み込む）。
-- 段1〜3では **読む命令だけ**。書込・削除・運転開始系の DLL 関数は
-  ALLOWED_FUNCS に入れていない（一覧に無い名前は Api から取り出せない）。
+- 書く DLL 関数は **cnc_wrparam（パラメータ1件の書込）だけ**。削除・プログラム書込・
+  運転開始・PMC・マクロ書込は ALLOWED_FUNCS に入れていない（一覧に無い名前は Api から
+  取り出せない）。cnc_wrparam は「確認済みの型」（verified）の番号にしか使わない。
 - 本番のヘルパーに試験用の抜け道（偽物を読む引数）は無い。偽物を差し込むのは
   tests/fake_focas_helper.py だけで、serve(lib=...) を直接呼ぶ。
 
@@ -21,16 +22,18 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 import time
 import traceback
+from decimal import Decimal
 
 PROTO = 1
 
 # 呼べる DLL 関数の一覧。ここに無い名前は取り出せない。
-# cnc_start・pmc_wrpmcrng・cnc_search・cnc_wrmacro・cnc_wrparam・cnc_dwn*・cnc_pdf_del
-# などは、この段では入れない（試験が見張る）。
+# 書く関数は cnc_wrparam だけ。cnc_start・pmc_wrpmcrng・cnc_search・cnc_wrmacro・
+# cnc_dwn*・cnc_pdf_del などは入れない（試験が見張る）。
 ALLOWED_FUNCS = (
     "cnc_allclibhndl3", "cnc_freelibhndl",
     "cnc_sysinfo", "cnc_rdcncid", "cnc_rdaxisname",
@@ -38,6 +41,7 @@ ALLOWED_FUNCS = (
     "cnc_rdproginfo", "cnc_rdpdf_subdir", "cnc_rdpdf_alldir",
     "cnc_upstart4", "cnc_upload4", "cnc_upend4",
     "cnc_rdparainfo", "cnc_rdparam",
+    "cnc_wrparam",
 )
 
 # 戻り値の名前。実機で見たのは 0・6・10 だけで、残りは仕様の知識（未確認）。
@@ -58,6 +62,7 @@ SUBDIR_END_RC = 0
 DIR_BUSY_TRIES = 5          # 処理中(-1)のとき、短くあけて読み直す回数
 PROG_READ_LIMIT = 60        # プログラム1本を読む時間の上限[秒]（クライアントはこれより長く待つ）
 PARAM_DUMP_LIMIT = 150
+PARAM_WRITE_LIMIT = 5       # 書込が EW_BUFFER（待って再送）を返し続けたとき、この秒数で抜ける
 
 DUMP_KINDS = {"param": 2, "pitch": 3, "macro": 4, "tool": 1, "workofs": 5}
 
@@ -250,6 +255,68 @@ def axis_field(label):
                      message=f"ラベル {label} の軸の指し方はまだ確かめていません")
 
 
+LABEL_KINDS = ("L", "A", "S", "T")
+
+
+def label_kind(label):
+    """ラベル → ラベルの種類。なし→"none"、L1→"L"、A4→"A"、S1→"S"、T1→"T"。それ以外は "?"。"""
+    label = (label or "").strip().upper()
+    if label in ("", "-"):
+        return "none"
+    if label[0] in LABEL_KINDS and label[1:].isdigit():
+        return label[0]
+    return "?"
+
+
+def kind_key(type_code, label):
+    """「確認済みの型」の表で使う名前。基本の型（bit/byte/word/dword/real）＋ "/" ＋ ラベルの種類。
+    例: byte/none（実機で書いたことがあるのはこれだけ【事実】）、real/A、bit/A。"""
+    return f"{decode_type(type_code)['kind']}/{label_kind(label)}"
+
+
+_INT_RE = re.compile(r"[+-]?[0-9]+")
+_REAL_RE = re.compile(r"[+-]?[0-9]+([.][0-9]+)?")
+INT_RANGE = {"byte": (-128, 127), "word": (-32768, 32767), "dword": (-2147483648, 2147483647)}
+
+
+def encode_param_value(kind, text, dec=None):
+    """書く値の文字 → cnc_wrparam のデータ部（番号と軸の4バイトは含まない）。
+
+    浮動小数点を使わない。実数は「整数 = 値 × 10^桁数」にして、割り切れなければ断る
+    （丸めて書かない。調査記録 §14 の 1000 倍ずれの事故と同じ種類の危険）。
+    バイト型は読み戻しが符号つき（-128〜127）なので、その範囲だけ。128 以上の扱いは未確認。
+    """
+    t = str(text).strip()
+    if kind == "bit":
+        if not re.fullmatch(r"[01]{8}", t):
+            raise FocasError("bad_args", message=f"ビット型は 0 と 1 の8桁で指定してください: {t!r}")
+        return struct.pack("<B", int(t, 2))
+    if kind in INT_RANGE:
+        if not _INT_RE.fullmatch(t):
+            raise FocasError("bad_args", message=f"整数で指定してください: {t!r}")
+        v = int(t)
+        lo, hi = INT_RANGE[kind]
+        if not lo <= v <= hi:
+            extra = "（128 以上の扱いは未確認です）" if kind == "byte" else ""
+            raise FocasError("bad_args", message=f"{kind} 型に書ける範囲は {lo}〜{hi} です: {v}{extra}")
+        return struct.pack({"byte": "<b", "word": "<h", "dword": "<i"}[kind], v)
+    if kind == "real":
+        if not _REAL_RE.fullmatch(t):
+            raise FocasError("bad_args", message=f"数で指定してください: {t!r}")
+        if dec is None:
+            raise FocasError("bad_args", message="小数点以下の桁数が分かりません")
+        scaled = Decimal(t) * (Decimal(10) ** int(dec))
+        if scaled != scaled.to_integral_value():
+            raise FocasError(
+                "refused", reason="not_representable",
+                message=f"{t} は小数点以下 {dec} 桁では書けません（丸めて書くことはしません）")
+        n = int(scaled)
+        if not -2147483648 <= n <= 2147483647:
+            raise FocasError("bad_args", message=f"値が大きすぎます: {t}")
+        return struct.pack("<ii", n, int(dec))
+    raise FocasError("bad_args", message=f"知らない型です: {kind}")
+
+
 def _check_path(p):
     if not isinstance(p, str) or not p.startswith("//") or len(p) > 200:
         raise FocasError("bad_args", message="プログラムの場所は //CNC_MEM/... の形で指定してください")
@@ -414,6 +481,45 @@ class Family31i(Family):
         return {"no": no, "label": label or "", "axis": ax, "kind": kind,
                 "value": parse_param_data(kind, buf.raw), "type_code": ty["code"]}
 
+    def param_write(self, hp, no, label, value, verified):
+        """パラメータ1件を cnc_wrparam で書く。書いたかどうかの確かめ（前後の読み）は呼ぶ側がする。
+
+        - 「確認済みの型」（verified）に無い型は書かずに断る（実機で書いたことがあるのは
+          byte/none だけ【事実】）。
+        - 系統型・T 型（L1 T1 など）は軸の指し方が未確認なので断る（axis_field）。
+        - EW_BUFFER（10）は待って同じ分を送り直す【事実】。上限時間で必ず抜ける。
+          EW_BUSY（-1）は書込をやり直さない（書けたかどうかは呼ぶ側が読み戻して決める）。
+        """
+        ty = decode_type(self.type_of(hp, no))
+        kind = ty["kind"]
+        key = f"{kind}/{label_kind(label)}"
+        if key not in verified:
+            raise FocasError(
+                "refused", reason="unverified_kind", key=key,
+                message=f"この型（{key}）は、この機種ではまだ書いたことがありません。"
+                        "先に『同じ値を書く確認』をしてください")
+        ax = axis_field(label)
+        dec = None
+        if kind == "real":                       # 書く前に読んで、機械の小数点以下の桁数を得る
+            buf = ctypes.create_string_buffer(16)
+            rc = hp.read_rc("cnc_rdparam", hp.h, ctypes.c_short(no), ctypes.c_short(ax),
+                            ctypes.c_short(12), buf)
+            hp.check("cnc_rdparam", rc)
+            dec = struct.unpack("<ii", buf.raw[4:12])[1]
+        data = struct.pack("<hh", no, ax) + encode_param_value(kind, value, dec)
+        t0 = hp.clock()
+        while True:
+            rc = hp.api.cnc_wrparam(hp.h, ctypes.c_short(len(data)),
+                                    ctypes.create_string_buffer(data, len(data)))
+            if rc != RC_BUFFER:
+                break
+            if hp.clock() - t0 > PARAM_WRITE_LIMIT:
+                raise FocasError("timeout", func="cnc_wrparam", seconds=PARAM_WRITE_LIMIT)
+            hp.sleep(0.02)                        # 待って同じ分を送り直す【事実】
+        hp.check("cnc_wrparam", rc)
+        return {"no": no, "label": label or "", "axis": ax, "kind": kind, "key": key,
+                "value": str(value), "length": len(data), "data_hex": data.hex(), "rc": rc}
+
     def upload(self, hp, code, path, limit, emit, note):
         """cnc_upstart4 / cnc_upload4 / cnc_upend4 で読み切る。末尾 % で終わる。"""
         rc = hp.api.cnc_upstart4(hp.h, ctypes.c_short(code), path.encode("ascii"))
@@ -542,6 +648,8 @@ class Helper:
             raise FocasError("bad_args", message="機械の IP アドレスが正しくありません")
         port = int(a.get("port", 8193))
         timeout = int(a.get("timeout", 10))
+        if timeout < 1:                 # 0 以下は既定の 10 秒（アプリ側 focas_client.connect_timeout と同じ）
+            timeout = 10
         if a.get("families"):
             self.families = {str(k): str(v) for k, v in a["families"].items()}
         self.close()
@@ -663,6 +771,15 @@ class Helper:
                             "error": e.as_dict()})
         return {"items": out}
 
+    def cmd_param_write(self, a, emit):
+        fam = self.need_family()
+        verified = a.get("verified")
+        if not isinstance(verified, list) or not all(isinstance(x, str) for x in verified):
+            raise FocasError("bad_args", message="verified（確認済みの型の一覧）を渡してください")
+        if not isinstance(a.get("value"), str):
+            raise FocasError("bad_args", message="value は文字で渡してください")
+        return fam.param_write(self, int(a["no"]), a.get("label", ""), a["value"], verified)
+
     def cmd_param_dump(self, a, emit):
         fam = self.need_family()
         kind = a.get("kind")
@@ -683,7 +800,8 @@ class Helper:
         "status": cmd_status, "alarms": cmd_alarms, "prog_info": cmd_prog_info,
         "prog_list": cmd_prog_list, "prog_read": cmd_prog_read,
         "param_info": cmd_param_info, "param_read": cmd_param_read,
-        "param_read_many": cmd_param_read_many, "param_dump": cmd_param_dump,
+        "param_read_many": cmd_param_read_many, "param_write": cmd_param_write,
+        "param_dump": cmd_param_dump,
         "quit": cmd_quit,
     }
 

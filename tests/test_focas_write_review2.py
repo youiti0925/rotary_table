@@ -139,7 +139,8 @@ class TestFindPendingJob(WriteBase):
         self.assertTrue(res.job_time)
         text = O.describe_pending_job(res)
         self.assertIn(res.job_time, text)
-        self.assertIn("今もそのまま", text)
+        self.assertIn("そのあとの機械の値は確かめていません", text)       # 3 機械を読まずに「今もそのまま」と言わない
+        self.assertNotIn("今もそのまま", text)
         self.assertNotIn("書いたままです", text)
         self.assertNotIn("元に戻す", text)
 
@@ -173,7 +174,10 @@ class TestFindPendingJob(WriteBase):
         self.write_job()
         j = self.folder / O.JOB_NAME
         old = time.time() - 10 * 86400
-        os.utime(j, (old, old))
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(old))
+        d = json.loads(j.read_text(encoding="utf-8"))             # 古さは記録の finished_at で決める（6）
+        d["started_at"] = d["finished_at"] = stamp
+        j.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         res = O.find_pending_job(self.folder.parent, CNC_ID)
         self.assertTrue(res.job_old)
         self.assertGreaterEqual(res.job_age_days, 10)
@@ -273,7 +277,8 @@ class TestPreviousJobDialog(WriteDialogBase):
         self.go(d2)
         text = d2.txt_result.toPlainText()
         self.assertIn("前回（", text)
-        self.assertIn("今もそのまま", text)
+        self.assertIn("そのあとの機械の値は確かめていません", text)
+        self.assertNotIn("今もそのまま", text)
         self.assertNotIn("書いたままです", text)
         self.assertTrue(d2.b_undo.isHidden())
         self.assertFalse(d2.b_undo.isEnabled())
@@ -297,7 +302,10 @@ class TestPreviousJobDialog(WriteDialogBase):
         d.close()
         for p in self.jobs():
             old = time.time() - 200 * 86400
-            os.utime(p, (old, old))
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(old))
+            d = json.loads(p.read_text(encoding="utf-8"))
+            d["started_at"] = d["finished_at"] = stamp
+            p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         d2 = self.dialog()
         self.go(d2)
         self.assertIn("書いたまま", d2.txt_result.toPlainText())
@@ -379,7 +387,9 @@ class TestCloseWhileUndoing(WriteDialogBase):
         self.assertEqual(len(d.asked), 2)
         self.assertIn("元に戻せたのは 0 件", d.asked[1])
         self.assertIn("まだ書いたままの番号が 4 件", d.asked[1])
-        self.assertIn("元に戻す（続き）", d.asked[1])
+        self.assertIn("［書いた分を元に戻す］", d.asked[1])              # 7 1件も戻せていないので、ボタンも（続き）ではない
+        self.assertNotIn("元に戻す（続き）", d.asked[1])
+        self.assertIn("書いた分を元に戻す", d.b_undo.text())
         self.assertTrue(d.isVisible())
         self.assertEqual(self.machine_value(23), "1")              # 戻っていない
 

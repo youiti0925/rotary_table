@@ -3626,7 +3626,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         touched = len(res.written()) if res is not None else 0
         completed = res is not None and res.job_kind == "completed"   # 前回の最後まで成功した書込
         self.b_undo.setVisible(not completed)
-        base = "元に戻す（続き）" if self._undo_partial else "書いた分を元に戻す"
+        base = self._undo_name()
         self.b_undo.setText(f"{base}（{touched} 件）" if touched else base)
         have_backup = bool(self._backup)
         self.b_undo.setEnabled(idle and c and have_backup and touched > 0 and not self._undone
@@ -3637,11 +3637,20 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 why = "元に戻すには、機械につないでください。"
             elif not have_backup:
                 why = "元に戻すには、先に［控えを取る］を押してください（この回の控えが要ります）。"
+        vu = self._vfy_undo
+        reread = vu is not None and vu.items[0].get("after") is None
+        if vu is not None:                      # 確認した1件の戻し／読み直しのボタンが押せない理由
+            nm = "つなぎ直して今の値を読む" if reread else "確認した1件を元の値に戻す"
+            sep = "\n" if why else ""
+            if not c:
+                why += sep + (
+                    f"［{nm}］を押すには、機械につないでください（つなぐと、この確認の記録は残ったまま続けられます）。")
+            elif not reread and not have_backup:
+                why += sep + (
+                    f"［{nm}］を押すには、先に［控えを取る］を押してください（この回の控えが要ります）。")
         self.lbl_undo_why.setText(why)
         self.lbl_undo_why.setVisible(bool(why))
-        vu = self._vfy_undo
         self.b_undo_one.setVisible(vu is not None)
-        reread = vu is not None and vu.items[0].get("after") is None
         self.b_undo_one.setText("つなぎ直して今の値を読む" if reread else "確認した1件を元の値に戻す")
         self.b_undo_one.setEnabled(idle and c and vu is not None and (have_backup or reread))
         unknown = bool(res is not None and any(it["status"] == "unknown" for it in res.items))
@@ -3751,10 +3760,20 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     # --- 元に戻す -------------------------------------------------------------------------
 
+    def _undo_name_after(self, back):
+        """止めた直後に、次に押すボタンの名前。1件でも戻せていれば（続き）。"""
+        return "元に戻す（続き）" if (back > 0 or self._undo_partial) else "書いた分を元に戻す"
+
+    def _undo_name(self):
+        """［元に戻す］ボタンの名前（件数を付ける前）。文に出す名前は、ここを使ってボタンと揃える。"""
+        return "元に戻す（続き）" if self._undo_partial else "書いた分を元に戻す"
+
     def start_undo(self):
         res = self._result
         if (self._busy or res is None or not res.written() or self.client is None
                 or not self._connected or not self._backup):
+            return
+        if res.job_kind == "completed":     # 前回の最後まで成功した書込は戻さない（ボタンも隠している）
             return
         if res.job_old and not self._confirm_old_undo(res):
             return
@@ -3992,7 +4011,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
                            "いま元の値に戻している途中です。\n"
                            "閉じると、いま戻している1件が終わったら止めます（残りは戻しません。"
                            "まだ書いたままの番号が機械に残ります）。\n"
-                           "あとで［元に戻す（続き）］で続きを戻せます。\n\n止めますか？")
+                           "あとで［元に戻す（続き）］（まだ1件も戻せていなければ［書いた分を元に戻す］）で"
+                           "続きを戻せます。\n\n止めますか？")
         else:
             title, body = ("書込の途中です",
                            "いま機械へ書いている途中です。\n"
@@ -4048,7 +4068,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 back = sum(1 for it in res.items if it["status"] == "ok")
                 left = len(res.items) - back
                 text = (f"止めました。元に戻せたのは {back} 件、まだ書いたままの番号が {left} 件あります。"
-                        "結果は画面に出しています。［元に戻す（続き）］で続きを戻せます。"
+                        f"結果は画面に出しています。［{self._undo_name_after(back)}］で続きを戻せます。"
                         "\nこのまま閉じてもよいですか？")
             if self._ask_close_after_stop(text):
                 QtCore.QTimer.singleShot(0, self.reject)

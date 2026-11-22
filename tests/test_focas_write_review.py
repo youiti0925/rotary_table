@@ -68,8 +68,9 @@ class TestUndoWithPowerAlarm(WriteBase):
         self.assertEqual(self.machine_value(20), "4")              # 何も戻していない
 
     def test_the_job_file_restores_a_result_that_can_be_undone(self):
-        _p, pl = self.plan({"20": "4", "21": "1"})
+        _p, pl = self.plan({"20": "4", "21": "1", "22": "1"})
         self.client.lib.sc["write_alarms"] = PW_ALARM
+        self.client.lib.sc["write_rc_at"] = {"3": 13}              # 3件目で止まる（途中のジョブ）
         self.run_write(pl["items"], job_path=self.folder / O.JOB_NAME)
         root = self.folder.parent
         res = O.find_pending_job(root, CNC_ID)                     # 画面の結果が無くても探せる

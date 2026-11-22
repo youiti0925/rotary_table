@@ -529,6 +529,7 @@ def _save_job(path, res, ctx):
     d = {"cnc_id": res.cnc_id, "state": res.state, "stop_reason": res.stop_reason,
          "started_at": res.started_at, "finished_at": res.finished_at,
          "power_cycle": res.power_cycle, "context": ctx,
+         "verify": _verify_for_job(res.verify),
          "items": [{k: it.get(k) for k in ("no", "label", "old", "new", "key", "status",
                                            "touched", "before", "after", "rc", "note")}
                    for it in res.items]}
@@ -536,6 +537,18 @@ def _save_job(path, res, ctx):
         Path(path).write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def _verify_for_job(v):
+    """全行照合の結果を、書込ジョブ.json に残す形にする（None = 照合していない）。
+    書いていないのに変わった番号（unexpected）は多いことがあるので、先頭 200 件と総数だけ残す。"""
+    if not isinstance(v, dict):
+        return None
+    out = dict(v)
+    un = list(out.get("unexpected") or [])
+    out["unexpected"] = un[:200]
+    out["unexpected_count"] = len(un)
+    return out
 
 
 def save_plan_file(folder, newtext):
@@ -770,6 +783,11 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
     ctx = dict(ctx or {})
     prog = progress or (lambda d, t, n: None)
     stop = cancel or (lambda: False)
+    # 前回の、最後まで成功した書込（書込ジョブ.json から探した結果）は戻さない。
+    # 今の画面で書いた直後の結果（job_kind が無い）だけ戻せる
+    if getattr(result, "job_kind", None) == "completed":
+        raise WriteRefused(["前回の、最後まで成功した書込は、ここからは戻しません。"
+                            "そのあとに機械の値が変わっているかもしれないので、何も戻していません"])
     # verified_extra: 同じ値を書く確認が通らなかった型を、その1件だけ元に戻すときに渡す
     ver = verified_list(settings, family) + [k for k in verified_extra if k]
     allowed = allowed_codes(settings)
@@ -927,6 +945,8 @@ def load_job(path):
         res.state, res.stop_reason = d.get("state") or "stopped", d.get("stop_reason")
         res.started_at, res.finished_at = d.get("started_at"), d.get("finished_at")
         res.power_cycle = bool(d.get("power_cycle"))
+        v = d.get("verify")
+        res.verify = v if isinstance(v, dict) else None
         res.folder = str(Path(path).parent)
         return res
     except (OSError, ValueError, TypeError, AttributeError):
@@ -943,14 +963,32 @@ def _job_time(res, mtime):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
 
 
+def _job_epoch(res, mtime):
+    """そのジョブの時刻（秒）。記録の finished_at を先に使い、無い・読めないときは started_at、
+    それも読めないときだけファイルの更新時刻。（ファイルの更新時刻は、コピー・同期で新しくなる）"""
+    for t in (res.finished_at, res.started_at):
+        if t:
+            try:
+                return time.mktime(time.strptime(str(t), "%Y-%m-%d %H:%M:%S"))
+            except (ValueError, OverflowError):
+                pass
+    return mtime
+
+
+def _verify_failed(res):
+    v = getattr(res, "verify", None)
+    return isinstance(v, dict) and not v.get("ok")
+
+
 def find_pending_job(root, cnc_id, alarms=None, now=None):
     """控えの置き場（root）の下から、この機械（CNC ID）の一番新しい、機械に書いたジョブを探す。
-    1件も書かなかったジョブ（書く前に止まった）は飛ばして、その前のジョブを探す。
-    機械に書いたものが残っていて、まだ元に戻していなければ WriteResult、無ければ None。
-    CNC ID が空のときは探さない（どの機械か分からない）。
+    1件も書かなかったジョブ（書く前に止まった）と、もう元に戻し済みのジョブは飛ばして、
+    その前のジョブを探す。機械に書いたものが残っていて、まだ元に戻していなければ WriteResult、無ければ None。
+    CNC ID が空のときは探さない（どの機械か分からない）。新しさは記録の時刻（_job_epoch）で決める。
 
     戻した結果には job_kind（completed = 最後まで成功した書込・interrupted = 途中で止まった/不明、
-    または元に戻す途中）・job_time（書いた日時）・job_age_days・job_old を付ける。
+    または元に戻す途中・undo_unreadable = 元に戻した記録があるのに読めない）・job_time（書いた日時）・
+    job_age_days・job_old を付ける。全行照合で不一致だった書込は completed にしない。
     alarms（今の機械のアラーム）を渡すと、PW0000 が今出ていないのに古い記録が power_cycle のときは
     power_cycle を False にする（古い『電源を入れ直して』を出さない）。"""
     if not cnc_id or not root or not Path(root).is_dir():
@@ -958,26 +996,33 @@ def find_pending_job(root, cnc_id, alarms=None, now=None):
     jobs = []
     for p in Path(root).rglob(JOB_NAME):
         try:
-            jobs.append((p.stat().st_mtime, p))
+            mtime = p.stat().st_mtime
         except OSError:
-            pass
-    for mtime, p in sorted(jobs, reverse=True):
+            continue
         res = load_job(p)
         if res is None or res.cnc_id != cnc_id:
             continue
+        jobs.append((_job_epoch(res, mtime), mtime, p, res))
+    jobs.sort(key=lambda t: (t[0], t[1], str(t[2])), reverse=True)
+    for epoch, mtime, p, res in jobs:
         if not res.written():
             continue                  # 1件も書いていない。その前のジョブを探す
-        undo = load_job(p.parent / ("元に戻す_" + JOB_NAME))
+        upath = p.parent / ("元に戻す_" + JOB_NAME)
+        undo = load_job(upath)
         if undo is not None and undo.state == "done":
-            return None
-        completed = (res.state == "done" and undo is None
+            continue                  # 元に戻し済み。その前の途中のジョブを探し続ける
+        unreadable = undo is None and upath.exists()
+        completed = (res.state == "done" and undo is None and not unreadable
+                     and not _verify_failed(res)
                      and all(it["status"] == "ok" for it in res.written()))
-        res.job_kind = "completed" if completed else "interrupted"
+        res.job_kind = ("completed" if completed
+                        else "undo_unreadable" if unreadable else "interrupted")
         res.job_time = _job_time(res, mtime)
-        age = ((now if now is not None else time.time()) - mtime) / 86400.0
+        age = ((now if now is not None else time.time()) - epoch) / 86400.0
         res.job_age_days = max(0, int(age))
         res.job_old = age >= OLD_JOB_DAYS
-        if alarms is not None and res.power_cycle                 and not any(is_power_alarm(a) for a in alarms):
+        if (alarms is not None and res.power_cycle
+                and not any(is_power_alarm(a) for a in alarms)):
             res.power_cycle = False
         return res
     return None
@@ -988,9 +1033,18 @@ def describe_pending_job(res):
     n = len(res.written())
     when = res.job_time or "日時不明"
     if res.job_kind == "completed":
-        return (f"前回（{when}）に {n} 件を書きました。最後まで書けていて、今もそのままです。")
-    text = (f"前回（{when}）の書込のうち {n} 件が、機械に書いたままです（途中で止まったため、元の値には戻っていません）。"
-            "［書いた分を元に戻す］で戻せます。")
+        return (f"前回（{when}）に {n} 件を書きました。最後まで書けています。"
+                "そのあとの機械の値は確かめていません。")
+    if res.job_kind == "undo_unreadable":
+        text = (f"前回（{when}）の書込 {n} 件について、元に戻したかどうかは分かりません"
+                "（元に戻した記録が読めません）。機械の今の値も確かめていません。"
+                "［書いた分を元に戻す］で戻せます（今の値が書いた値でも元の値でもない番号は、止めて戻しません）。")
+    elif _verify_failed(res):
+        text = (f"前回（{when}）の書込 {n} 件は、書いたあとの全行の照合で合わない所がありました"
+                "（最後まで成功とは言えません）。機械に書いたままかもしれません。［書いた分を元に戻す］で戻せます。")
+    else:
+        text = (f"前回（{when}）の書込のうち {n} 件が、機械に書いたままです（途中で止まったため、元の値には戻っていません）。"
+                "［書いた分を元に戻す］で戻せます。")
     if res.job_old:
         text += (f"\n※ {res.job_age_days} 日以上前の記録です。そのあとに機械の値が変わっているかもしれないので、"
                  "元に戻す前に確認を出します。")

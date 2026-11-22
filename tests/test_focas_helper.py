@@ -554,5 +554,59 @@ class TestRobustness(unittest.TestCase):
         self.assertNotIn("nd287_app", mods)
 
 
+class TestMain(unittest.TestCase):
+    """本番の入口 main()。本物の DLL は読まない（WinDLL を偽物に差し替える）。"""
+
+    def _run(self, files, stdin_bytes=b"", search=()):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            for f in files:
+                (Path(d) / f).write_bytes(b"")
+            out = io.BytesIO()
+            fake_stdout = mock.Mock(buffer=out)
+            fake_stdin = mock.Mock(buffer=io.BytesIO(stdin_bytes))
+            lib = FakeFwlib()
+            old_stdout = sys.stdout
+            try:
+                with mock.patch.object(H, "DLL_SEARCH", search),                         mock.patch.object(sys, "stdout", fake_stdout),                         mock.patch.object(sys, "stdin", fake_stdin),                         mock.patch.object(ctypes, "WinDLL", create=True, side_effect=lambda p: lib):
+                    rc = H.main(["--dll-dir", d])
+                    redirected = sys.stdout
+            finally:
+                sys.stdout = old_stdout
+            return rc, [json.loads(l) for l in out.getvalue().decode("ascii").splitlines()],                 redirected, lib
+
+    def test_no_dll_says_so_in_hello_and_ends(self):
+        rc, lines, _, lib = self._run([])
+        self.assertEqual(rc, 3)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual((lines[0]["hello"], lines[0]["proto"]), (1, H.PROTO))
+        self.assertFalse(lines[0]["dll_ok"])
+        self.assertIn("dll_error", lines[0])
+        self.assertIn(lines[0]["bits"], (32, 64))
+
+    def test_hello_then_serve_and_stdout_is_redirected(self):
+        stdin = json.dumps({"id": 1, "cmd": "quit"}).encode() + b'\n'
+        rc, lines, redirected, lib = self._run(["Fwlib32.dll"], stdin)
+        self.assertEqual(rc, 0)
+        self.assertTrue(lines[0]["dll_ok"])
+        self.assertTrue(lines[0]["dll"].endswith("Fwlib32.dll"))
+        self.assertEqual(lines[1]["id"], 1)
+        # print() が JSON の流れに紛れ込まないよう、標準出力は標準エラーへ向け直してある
+        self.assertIs(redirected, sys.stderr)
+
+    def test_find_dll_order(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            (Path(a) / "Fwlib32.dll").write_bytes(b"")
+            (Path(b) / "Fwlib32.dll").write_bytes(b"")
+            with mock.patch.object(H, "DLL_SEARCH", (b,)):
+                self.assertEqual(H.find_dll(a), str(Path(a) / "Fwlib32.dll"))
+                self.assertEqual(H.find_dll(""), str(Path(b) / "Fwlib32.dll"))
+            with mock.patch.object(H, "DLL_SEARCH", ()):
+                self.assertIsNone(H.find_dll(str(Path(a) / "ない")))
+
+
 if __name__ == "__main__":
     unittest.main()

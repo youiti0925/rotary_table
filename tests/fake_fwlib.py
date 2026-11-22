@@ -18,6 +18,7 @@
 偽物の仮定（実機では未確認）: L1・L2 は 軸の欄 0/1→L1、2→L2 で読める。
 """
 
+import base64
 import ctypes
 import os
 import re
@@ -101,6 +102,8 @@ class FakeMachine:
             self.add_program(f"{base}O{n}", f"%\nO{n}(X) \nM99 \n%".encode(), "X")
         if sc.get("long_name"):
             self.add_program(base + "O" + "1" * 35, b"%\nO1(LONG) \n%", "L")
+        for path, b64 in (sc.get("program_bytes") or {}).items():
+            self.add_program(path, base64.b64decode(b64), "BIN")
         self.registered = len(self.programs)
 
     def add_program(self, path, data, comment=""):

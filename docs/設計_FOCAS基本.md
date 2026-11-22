@@ -948,3 +948,19 @@ FTP サーバー画面と同じく「上から順に ① → ② → ③」で�
   本番も試験も同じ形で使う（時間待ちを試験で止めるため）。偽物を読み込む引数は無い。
 - 偽物の機械の仮定（実機で未確認）: 系統型 `L1`・`L2` は軸の欄 0/1 → L1、2 → L2 で読める。
   実機でどう指すかは §12-A2 で確かめる。ヘルパーは `L`・`T` ラベルを**軸の指定なしでは読まない**（`refused`）。
+
+### 段2（focas_client）
+
+- エラーの種類を足した: `no_helper`（focas_helper.py が見つからない）・`helper_old`（hello の proto が合わない）。
+  `describe()` が種類ごとの日本語と「次に見るところ」を返す。`focas`・`connect`・`lost` の文には関数名と戻り値を必ず入れる。
+- 返事が JSON でない・空行・途中で切れた行のときは、`protocol` を出して**ヘルパーを止める**
+  （読み取りの同期が取れなくなるため）。次の命令で起動し直す。設計 §4.5 の「時間切れで止める」と同じ扱い。
+- 別の id の返事（古い返事）は捨てて待ち続ける。時間切れは全体の時間で数える。
+- 32bit かどうかの確認は `FocasClient(expect_bits=32)` が既定。ヘルパー起動の試験だけ、手元の 64bit Python で回すために
+  偽物のヘルパーが `bits: 32` と名乗る（確認自体は本番と同じ。`expect_bits=None` で緩められるのは呼ぶ側の引数）。
+  試験の入口は `tests/fake_focas_helper.py`。振る舞いは環境変数 `FAKE_FOCAS_SCENARIO`（JSON）で決める。
+- `FocasClient(env=…, extra_args=…)` は子プロセスの環境と追加の引数。本番は使わない（試験が偽物の振る舞いを渡すのに使う）。
+- 32bit Python の既定の場所は、利用者名を書かずに `LOCALAPPDATA\Python\pythoncore-*-32\python.exe` などを探す
+  （`resolve_python32`）。設定 `focas_python32` があればそれを使う。
+- `FocasClient.decode_data()` は prog_read・param_dump の中身を取り出すとき、サイズと SHA-256 を確かめる
+  （壊れていたら `protocol`）。

@@ -44,6 +44,7 @@ DEFAULT_TIMEOUTS = {
     "prog_list": 60,
     "param_info": 60,
     "param_read_many": 30,
+    "param_write": 8,       # ヘルパー側の上限（PARAM_WRITE_LIMIT 5 秒）より長く待つ。短いとヘルパーの返事を待たずに止めてしまう
     "quit": 3,
 }
 

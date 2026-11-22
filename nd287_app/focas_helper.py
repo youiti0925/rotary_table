@@ -274,6 +274,47 @@ def kind_key(type_code, label):
     return f"{decode_type(type_code)['kind']}/{label_kind(label)}"
 
 
+KIND_JA = {"bit": "ビット", "byte": "バイト", "word": "ワード", "dword": "2ワード", "real": "実数"}
+LABEL_JA = {"none": "", "A": "軸型", "S": "主軸型", "L": "系統型", "T": "T型"}
+
+
+def kind_label(key):
+    """「確認済みの型」の名前（byte/none など）→ 利用者に見せる日本語。
+    byte/none→「バイト」、dword/A→「2ワード・軸型」、bit/A→「ビット・軸型」、byte/S→「バイト・主軸型」。"""
+    k, _, lab = str(key or "").partition("/")
+    base = KIND_JA.get(k)
+    if base is None:
+        return str(key or "?")
+    extra = LABEL_JA.get(lab, lab)
+    return f"{base}・{extra}" if extra else base
+
+
+def label_type_problem(type_code, label):
+    """型コードの軸ビット（0x4）・主軸ビット（0x100）とラベル（A・S・なし）の食い違い。
+    食い違いなら断る理由の文、合っていれば None。
+    実機の 24,664 行で、A⇔0x4（主軸ビットなし）・S⇔0x104 は例外なく一致している【事実】。
+    ラベルなしは軸ビットが付いていないこと。L・T（系統型）は型コードから判定できないので、
+    ここでは見ない（ラベルを頼りに、軸の指し方が未確認として別に断る）。"""
+    ty = decode_type(type_code)
+    lk = label_kind(label)
+    ax, sp = ty["axis"], ty["spindle"]
+    if lk == "A" and not (ax and not sp):
+        why = "軸型（A）のラベルなのに、型コードは軸型ではありません"
+    elif lk == "S" and not (ax and sp):
+        why = "主軸型（S）のラベルなのに、型コードは主軸型ではありません"
+    elif lk == "none" and ax:
+        why = "ラベルが無いのに、型コードは軸ごとの値（軸型・主軸型）です"
+    else:
+        return None
+    return f"{why}（型コード 0x{ty['code']:X}・ラベル {label or '-'}）。番号とラベルの組が機械の型と食い違うので書きません"
+
+
+def real_decimals(text):
+    """実数の文字の小数点以下の桁数（"8000.000"→3、"8000"→0）。"""
+    t = str(text).strip()
+    return len(t.split(".", 1)[1]) if "." in t else 0
+
+
 _INT_RE = re.compile(r"[+-]?[0-9]+")
 _REAL_RE = re.compile(r"[+-]?[0-9]+([.][0-9]+)?")
 INT_RANGE = {"byte": (-128, 127), "word": (-32768, 32767), "dword": (-2147483648, 2147483647)}
@@ -305,6 +346,9 @@ def encode_param_value(kind, text, dec=None):
             raise FocasError("bad_args", message=f"数で指定してください: {t!r}")
         if dec is None:
             raise FocasError("bad_args", message="小数点以下の桁数が分かりません")
+        if int(dec) < 0:
+            raise FocasError("bad_args", reason="bad_decimals",
+                             message=f"小数点以下の桁数が負です（{dec}）。この番号は書きません")
         scaled = Decimal(t) * (Decimal(10) ** int(dec))
         if scaled != scaled.to_integral_value():
             raise FocasError(
@@ -487,16 +531,20 @@ class Family31i(Family):
         - 「確認済みの型」（verified）に無い型は書かずに断る（実機で書いたことがあるのは
           byte/none だけ【事実】）。
         - 系統型・T 型（L1 T1 など）は軸の指し方が未確認なので断る（axis_field）。
-        - EW_BUFFER（10）は待って同じ分を送り直す【事実】。上限時間で必ず抜ける。
+        - EW_BUFFER（10）は待って同じ分を送り直す【仕様】。cnc_wrparam では実機で確かめていない
+          （未確認）。上限時間で必ず抜ける。
           EW_BUSY（-1）は書込をやり直さない（書けたかどうかは呼ぶ側が読み戻して決める）。
         """
         ty = decode_type(self.type_of(hp, no))
         kind = ty["kind"]
         key = f"{kind}/{label_kind(label)}"
+        mis = label_type_problem(ty["code"], label)
+        if mis:
+            raise FocasError("refused", reason="label_type_mismatch", key=key, message=mis)
         if key not in verified:
             raise FocasError(
                 "refused", reason="unverified_kind", key=key,
-                message=f"この型（{key}）は、この機種ではまだ書いたことがありません。"
+                message=f"この型（{kind_label(key)}）は、この機種ではまだ書いたことがありません。"
                         "先に『同じ値を書く確認』をしてください")
         ax = axis_field(label)
         dec = None
@@ -515,7 +563,7 @@ class Family31i(Family):
                 break
             if hp.clock() - t0 > PARAM_WRITE_LIMIT:
                 raise FocasError("timeout", func="cnc_wrparam", seconds=PARAM_WRITE_LIMIT)
-            hp.sleep(0.02)                        # 待って同じ分を送り直す【事実】
+            hp.sleep(0.02)                        # 待って同じ分を送り直す【仕様。cnc_wrparam では未確認】
         hp.check("cnc_wrparam", rc)
         return {"no": no, "label": label or "", "axis": ax, "kind": kind, "key": key,
                 "value": str(value), "length": len(data), "data_hex": data.hex(), "rc": rc}

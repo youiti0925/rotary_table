@@ -164,7 +164,9 @@ class TestFlow(WriteDialogBase):
         self.assertEqual(d.tbl.columnCount(), 8)
         rows = self.rows(d)
         self.assertEqual([r[0] for r in rows], ["N00020", "N00021"])
-        self.assertEqual(rows[0][1:7], ["-", "製品値", "9", "4", "byte/none", "○"])
+        self.assertEqual(rows[0][1:5], ["-", "製品値", "9", "4"])
+        self.assertTrue(rows[0][5].startswith("バイト"), rows[0][5])      # 利用者には日本語の型名
+        self.assertEqual(rows[0][6], "○")
         self.assertEqual(rows[1][3:5], ["0", "1"])
         # ボタン1回で書ける。件数と機械の名前が出る
         self.assertTrue(d.b_write.isEnabled())
@@ -308,10 +310,12 @@ class TestUnverifiedTypes(WriteDialogBase):
         self.go(d)
         rows = self.rows(d)
         by = {r[0]: r for r in rows}
-        self.assertEqual(by["N01815"][5:7], ["bit/A", "×（書けません）"])
+        self.assertTrue(by["N01815"][5].startswith("ビット・軸型"), by["N01815"][5])
+        self.assertEqual(by["N01815"][6], "×（書けません）")
         self.assertEqual(by["N00020"][6], "○")
         self.assertFalse(d.b_write.isEnabled())
-        self.assertIn("bit/A", d.lbl_why.text())
+        self.assertIn("ビット・軸型", d.lbl_why.text())
+        self.assertNotIn("bit/A", d.lbl_why.text())
         self.assertIn("同じ値を書く確認", d.lbl_why.text())
         self.assertEqual(d.cmb_verify.count(), 1)
         self.assertTrue(d.b_verify.isEnabled())

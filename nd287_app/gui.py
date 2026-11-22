@@ -2864,10 +2864,16 @@ class FocasWriteDialog(QtWidgets.QDialog):
     item_done = QtCore.Signal(int, object)
     COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
 
-    def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None):
+    def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
+                 basic_text=None, product_axes=()):
         super().__init__(parent)
         self.settings = settings
         self.plan_fn = plan_fn
+        self._basic_text = basic_text            # BASIC の中身（前の製品の値が残っていないかの注意用）
+        self._product_axes = tuple(product_axes or ())
+        self._leftover = []
+        self._closing = False                    # 書込・元に戻す の最中に閉じると言われた（1件終わったら止める）
+        self._vfy_undo = None                    # 同じ値を書く確認で値が変わった1件（元に戻す用）
         self.seiban = seiban
         self._client_factory = client_factory
         self.client = None
@@ -2989,6 +2995,20 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.lbl_missing.setWordWrap(True)
         self.lbl_missing.setStyleSheet("color:#b91c1c;")
         cl.addWidget(self.lbl_missing)
+        self.lbl_leftover = QtWidgets.QLabel("")
+        self.lbl_leftover.setWordWrap(True)
+        self.lbl_leftover.setStyleSheet("background:#fffbeb; color:#92400e; padding:6px;"
+                                        "border:1px solid #f59e0b; border-radius:4px;")
+        self.b_leftover = QtWidgets.QPushButton("その一覧を見る")
+        self.b_leftover.clicked.connect(self._show_leftover)
+        lo = QtWidgets.QHBoxLayout()
+        lo.addWidget(self.lbl_leftover, 1)
+        lo.addWidget(self.b_leftover)
+        lo.setContentsMargins(0, 0, 0, 0)
+        self.leftover_box = QtWidgets.QWidget()
+        self.leftover_box.setLayout(lo)
+        self.leftover_box.setVisible(False)
+        cl.addWidget(self.leftover_box)
         self.chk_zero_all = QtWidgets.QCheckBox(
             "個体データ（1850・1851・1852）を全軸 0 にする（既定は製品の軸だけ）")
         self.chk_zero_all.setToolTip(
@@ -3034,6 +3054,16 @@ class FocasWriteDialog(QtWidgets.QDialog):
         # 結果
         rg = QtWidgets.QGroupBox("結果")
         rl = QtWidgets.QVBoxLayout(rg)
+        self.lbl_alert = QtWidgets.QLabel("")
+        self.lbl_alert.setWordWrap(True)
+        self.lbl_alert.setStyleSheet("background:#fef2f2; color:#b91c1c; padding:10px; font-weight:bold;"
+                                     "border:2px solid #ef4444; border-radius:4px;")
+        f2 = self.lbl_alert.font()
+        if f2.pointSizeF() > 0:
+            f2.setPointSizeF(f2.pointSizeF() * 1.3)
+            self.lbl_alert.setFont(f2)
+        self.lbl_alert.setVisible(False)
+        rl.addWidget(self.lbl_alert)
         self.txt_result = QtWidgets.QPlainTextEdit()
         self.txt_result.setReadOnly(True)
         self.txt_result.setMinimumHeight(110)
@@ -3044,7 +3074,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.b_undo.clicked.connect(self.start_undo)
         self.b_resolve = QtWidgets.QPushButton("つなぎ直して、書けたか確かめる")
         self.b_resolve.clicked.connect(self.start_resolve)
+        self.b_undo_one = QtWidgets.QPushButton("確認した1件を元の値に戻す")
+        self.b_undo_one.setToolTip("同じ値を書く確認で値が変わったとき、その1件だけを元の値に戻します")
+        self.b_undo_one.clicked.connect(self.start_undo_one)
         rr.addWidget(self.b_undo)
+        rr.addWidget(self.b_undo_one)
         rr.addWidget(self.b_resolve)
         rr.addStretch(1)
         rl.addWidget(hscroll_buttons(rr))
@@ -3256,6 +3290,10 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.lbl_missing.setText("")
         self._show_target(cands)
         self._show_state(status, alarms)
+        if not ident.get("cnc_id"):
+            self._set_state("つながりました。ただし、機械ごとの番号（CNC ID）が読めないので、この機械には書きません"
+                            "（どの機械か確かめられないため。読むだけはできます）",
+                            "color:#b91c1c; font-weight:bold;")
 
     def disconnect_machine(self):
         client = self.client
@@ -3275,7 +3313,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if not i:
             return ""
         unit = self.cmb_unit.currentData() or ""
-        return (f"機種 {i.get('cnc_type')}i {i.get('mt_type')}　CNC ID {i.get('cnc_id')}"
+        return (f"機種 {i.get('cnc_type')}i {i.get('mt_type')}　機械ごとの番号（CNC ID）{i.get('cnc_id') or '読めません'}"
                 + (f"　号機{unit}" if unit else ""))
 
     def _show_target(self, cands=None):
@@ -3345,8 +3383,24 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.bar.setValue(1)
         self.bar.setFormat("終わりました")
         self._backup = (res.folder, res.info)
-        self._result, self._undone, self._rewrite_blocked = None, False, False
-        self.txt_result.clear()
+        # 控えを取り直しても、前回の書込結果（元に戻すのに要る）は消さない。元に戻したあとだけ捨てる。
+        # 結果が無いときは、書込ジョブ.json から探して戻す（画面を閉じたあとでも元に戻せる）
+        self._rewrite_blocked = False
+        if self._undone:
+            self._result, self._undone = None, False
+        if self._result is None:
+            try:
+                self._result = focas_ops.find_pending_job(self._root(), (self._ident or {}).get("cnc_id"))
+            except Exception:
+                self._result = None
+        if self._result is not None and self._result.written():
+            n = len(self._result.written())
+            self.txt_result.setPlainText(
+                f"前回の書込のうち {n} 件が、機械に書いたままです（元の値には戻っていません）。"
+                "［書いた分を元に戻す］で戻せます。\n\n"
+                + "\n".join(focas_ops.describe_result(self._result)))
+        else:
+            self.txt_result.clear()
         if not res.complete:
             self.lbl_backup.setText("点検の指摘があります（控えは不完全です。この控えでは書けません）:<br>・"
                                     + "<br>・".join(res.problems[:8]))
@@ -3372,6 +3426,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
     # --- 確認（書く一覧）--------------------------------------------------------------
 
     def _zero_scope_changed(self, on):
+        if self._rewrite_blocked:        # 書いたあとは変えない（書いた内容と一覧・予定の控えがずれる）
+            self.chk_zero_all.blockSignals(True)
+            self.chk_zero_all.setChecked(self._zero_all)
+            self.chk_zero_all.blockSignals(False)
+            return
         self._zero_all = bool(on)
         if self._backup is not None and self._raw is not None and not self._busy:
             self._build_plan()
@@ -3422,12 +3481,20 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.tbl.setRowCount(len(items))
         for i, it in enumerate(items):
             ok = bool(it["verified"]) and not it["problems"]
+            kind_txt = focas_ops.kind_label(it["key"]) if it["key"] else "?"
+            if it.get("unknown_bits"):
+                kind_txt += "　※意味が分かっていない印あり"
             cells = (f"N{it['no']:05d}", it["label"] or "-", kinds.get(it["no"], "製品値"), it["old"], it["new"],
-                     it["key"] or "?", "○" if ok else "×（書けません）", "")
+                     kind_txt, "○" if ok else "×（書けません）", "")
             for j, text in enumerate(cells):
                 cell = QtWidgets.QTableWidgetItem(str(text))
                 if j == 6 and not ok:
                     cell.setForeground(QtGui.QBrush(QtGui.QColor("#b91c1c")))
+                if j == 5 and it.get("unknown_bits"):
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor("#92400e")))
+                    cell.setToolTip("型コードに、意味がまだ分かっていない印（"
+                                    + "・".join(f"0x{b:X}" for b in it["unknown_bits"])
+                                    + "）が付いています。書けないという意味ではありません")
                 self.tbl.setItem(i, j, cell)
         self.tbl.resizeColumnsToContents()
         self.tbl.horizontalHeader().setStretchLastSection(True)
@@ -3447,8 +3514,38 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.cmb_verify.clear()
         for key, idx in wp["unverified"].items():
             ex = items[idx[0]]
-            self.cmb_verify.addItem(f"{key}（{len(idx)} 件・例 N{ex['no']:05d} {ex['label'] or '-'}）", key)
+            self.cmb_verify.addItem(
+                f"{focas_ops.kind_label(key)}（{len(idx)} 件・例 N{ex['no']:05d} {ex['label'] or '-'}）", key)
         self.cmb_verify.blockSignals(False)
+        n_unk = sum(1 for it in items if it.get("unknown_bits"))
+        if n_unk:
+            self.lbl_missing.setText(
+                (self.lbl_missing.text() + "\n" if self.lbl_missing.text() else "")
+                + f"型コードに『意味が分かっていない印』が付いている行: {n_unk} 件（表の『型』の欄に出しています。"
+                "書けないという意味ではありません）")
+        self._fill_leftover()
+
+    def _fill_leftover(self):
+        """B-10: 今回は書かない番号のうち、製品の軸で『機械の値と BASIC の値が違う』ものの注意。"""
+        self._leftover = []
+        if self._basic_text and self._product_axes and self._raw is not None and self._plan is not None:
+            try:
+                self._leftover = focas_ops.basic_leftovers(
+                    self._raw, self._basic_text, self._plan, self._types, self._product_axes)
+            except Exception:
+                self._leftover = []
+        n = len(self._leftover)
+        self.leftover_box.setVisible(bool(n))
+        if n:
+            self.lbl_leftover.setText(
+                f"注意: 前の製品の値が残っている可能性があります：{n} 件。製品の軸で、機械の値と BASIC の値が違うのに、"
+                "製品の値が BASIC と同じなので今回は書かない番号です（書く内容は変えません。土台は今の機械です）。")
+
+    def _show_leftover(self):
+        rows = [f"N{no:05d} {lab}　機械 {m}　BASIC {b}" for no, lab, m, b in self._leftover[:200]]
+        if len(self._leftover) > 200:
+            rows.append(f"…ほか {len(self._leftover) - 200} 件")
+        self._info("今回は書かない番号（機械の値と BASIC の値が違う）", "\n".join(rows) or "なし")
 
     # --- 書ける？ ----------------------------------------------------------------------
 
@@ -3494,7 +3591,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.b_backup.setEnabled(idle and c)
         self.b_cancel_backup.setEnabled(self._busy and not self._busy_quiet and self._mode == "backup")
         self.b_stop.setEnabled(self._busy and not self._busy_quiet and self._mode in ("write", "undo"))
-        self.chk_zero_all.setEnabled(idle)
+        self.chk_zero_all.setEnabled(idle and not self._rewrite_blocked)
         ok, reasons = self._writable()
         n = len(self._wplan["items"]) if self._wplan else 0
         self.b_write.setText(f"この {n} 件を機械に書く")
@@ -3516,6 +3613,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         touched = len(res.written()) if res is not None else 0
         self.b_undo.setText(f"書いた分（{touched} 件）を元に戻す" if touched else "書いた分を元に戻す")
         self.b_undo.setEnabled(idle and c and touched > 0 and not self._undone)
+        self.b_undo_one.setVisible(self._vfy_undo is not None)
+        self.b_undo_one.setEnabled(idle and c and self._vfy_undo is not None)
         unknown = bool(res is not None and any(it["status"] == "unknown" for it in res.items))
         self.b_resolve.setVisible(unknown)
         self.b_resolve.setEnabled(idle and unknown)
@@ -3530,6 +3629,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         client = self.client
         folder, info = self._backup
         items = [dict(it) for it in self._wplan["items"]]
+        expected, unwritable = self._wplan["expected"], list(self._wplan["unwritable"])
         plan, types = self._plan, self._types
         cnc_id, family = self._ident.get("cnc_id"), self._family()
         ctx, log = self._ctx(), self._log_path()
@@ -3544,7 +3644,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 client, items, cnc_id=cnc_id, backup_info=info, settings=self.settings, family=family,
                 ctx=ctx, newtext=plan["newtext"], types=types, cancel=lambda: self._cancel,
                 progress=progress, on_item=lambda i, it: self.item_done.emit(i, dict(it)),
-                log_path=log, job_path=str(Path(folder) / focas_ops.JOB_NAME))
+                log_path=log, job_path=str(Path(folder) / focas_ops.JOB_NAME),
+                expected=expected, unwritable=unwritable)
 
         self._run(work, self._write_ok, self._write_failed, mode="write")
 
@@ -3580,6 +3681,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def _write_ok(self, res):
         self._result = res
+        if res.folder is None and self._backup:
+            res.folder = str(self._backup[0])
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.bar.setFormat("終わりました" if res.state == "done" else "止まりました")
@@ -3588,6 +3691,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._show_items(res)
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(res)))
         self._refresh_enabled()
+        self._after_stopped_for_close(res)
 
     def _write_failed(self, err):
         if isinstance(err, focas_ops.WriteRefused):
@@ -3598,6 +3702,23 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 f"途中で止まりました: {err}\n書けたかどうかは、つなぎ直して読み戻さないと分かりません。"
                 "この画面では何も自動でやり直しません。")
         self._refresh_enabled()
+        self._after_stopped_for_close(None, refused=isinstance(err, focas_ops.WriteRefused))
+
+    def _undo_failed(self, err):
+        """元に戻すを断った・止まったときの文。『機械には何も書いていません』は使わない
+        （書いた値は機械に残っている）。"""
+        if isinstance(err, focas_ops.WriteRefused):
+            self.txt_result.setPlainText(
+                "元に戻しませんでした。**機械には、書いた値が残っています**（元の値には戻っていません）。\n"
+                "断った理由:\n・" + "\n・".join(err.reasons)
+                + "\n理由をなくしてから、もう一度［元に戻す］を押してください。")
+            self.txt_result.setPlainText(self.txt_result.toPlainText().replace("**", ""))
+        else:
+            self.txt_result.setPlainText(
+                f"元に戻す途中で止まりました: {err}\n機械には、書いた値のまま残っている番号があるかもしれません。"
+                "つなぎ直して読み戻さないと分かりません。この画面では何も自動でやり直しません。")
+        self._refresh_enabled()
+        self._after_stopped_for_close(None)
 
     # --- 元に戻す -------------------------------------------------------------------------
 
@@ -3611,14 +3732,16 @@ class FocasWriteDialog(QtWidgets.QDialog):
         ctx, log = self._ctx(), self._log_path()
         self._cancel = False
         self.txt_result.setPlainText("元に戻しています…（書いた分を、逆の順で書き戻します）")
+        # 元に戻した記録は、書いたときの控えのフォルダに置く（あとで『もう戻した』と分かるように）
+        jdir = Path(res.folder) if res.folder else Path(folder)
 
         def work(progress):
             return focas_ops.run_undo(
                 client, res, cnc_id=cnc_id, backup_info=info, settings=self.settings, family=family,
                 ctx=ctx, cancel=lambda: self._cancel, progress=progress, log_path=log,
-                job_path=str(Path(folder) / ("元に戻す_" + focas_ops.JOB_NAME)))
+                job_path=str(jdir / ("元に戻す_" + focas_ops.JOB_NAME)))
 
-        self._run(work, self._undo_ok, self._write_failed, mode="undo")
+        self._run(work, self._undo_ok, self._undo_failed, mode="undo")
 
     def _undo_ok(self, out):
         self._show_items(out, undo=True)
@@ -3626,6 +3749,37 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self._undone = True
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(out, undo=True)))
         self._refresh_enabled()
+        self._after_stopped_for_close(out)
+
+    def start_undo_one(self):
+        """同じ値を書く確認で値が変わったとき、その1件だけを確認の前の値に戻す。"""
+        res = self._vfy_undo
+        if self._busy or res is None or self.client is None or not self._connected or not self._backup:
+            return
+        client = self.client
+        folder, info = self._backup
+        cnc_id, family = self._ident.get("cnc_id"), self._family()
+        ctx, log = self._ctx(), self._log_path()
+        keys = [it.get("key") for it in res.items]
+        self._cancel = False
+        self.txt_result.setPlainText("確認した1件を、元の値に戻しています…")
+
+        def work(progress):
+            return focas_ops.run_undo(
+                client, res, cnc_id=cnc_id, backup_info=info, settings=self.settings, family=family,
+                ctx=ctx, cancel=lambda: self._cancel, progress=progress, log_path=log,
+                job_path=str(Path(folder) / ("元に戻す_同じ値の確認_" + focas_ops.JOB_NAME)),
+                verified_extra=keys)
+
+        def ok(out):
+            if out.state == "done":
+                self._vfy_undo = None
+                self.lbl_alert.setVisible(False)
+            self._show_items(out, undo=True)
+            self.txt_result.setPlainText("\n".join(focas_ops.describe_result(out, undo=True)))
+            self._refresh_enabled()
+
+        self._run(work, ok, self._undo_failed, mode="undo")
 
     # --- つなぎ直して確かめる（書けたか不明のとき）---------------------------------------------
 
@@ -3682,8 +3836,10 @@ class FocasWriteDialog(QtWidgets.QDialog):
         info = self._backup[1]
         cnc_id, family = self._ident.get("cnc_id"), self._family()
         ctx, log = self._ctx(), self._log_path()
+        self.lbl_alert.setVisible(False)
+        self._vfy_undo = None
         self.txt_result.setPlainText(
-            f"型 {key} を確かめています: N{it['no']:05d} {it['label'] or '-'} に、今と同じ値を書きます…")
+            f"型 {focas_ops.kind_label(key)} を確かめています: N{it['no']:05d} {it['label'] or '-'} に、今と同じ値を書きます…")
 
         def work(progress):
             return focas_ops.verify_kind(client, it, cnc_id=cnc_id, backup_info=info,
@@ -3700,16 +3856,85 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 self.txt_result.setPlainText(
                     f"同じ値を書く確認が通りました（{out['at']}）。N{out['no']:05d} {out['label'] or '-'} に"
                     f"今と同じ値 {out['value']} を書いて、読み戻せました。アラームも増えていません。\n"
-                    f"型 {out['key']} を、この機種で『確認済み』にしました。")
+                    f"型 {focas_ops.kind_label(out['key'])} を、この機種で『確認済み』にしました。")
+            elif out["result"] == "stale":
+                self.txt_result.setPlainText(
+                    f"同じ値を書く確認を止めました。機械には何も書いていません:\n{out['note']}\n"
+                    f"型 {focas_ops.kind_label(out['key'])} は『確認済み』にしていません。")
             else:
                 self.txt_result.setPlainText(
                     f"同じ値を書く確認が通りませんでした（{out['result']}）: {out['note']}\n"
-                    f"型 {out['key']} は『確認済み』にしていません。")
+                    f"型 {focas_ops.kind_label(out['key'])} は『確認済み』にしていません。")
+                if out.get("touched"):
+                    # 値が変わった（かもしれない）。大きく出して、その1件を戻すボタンを出す
+                    self._vfy_undo = focas_ops.verify_undo_result(out, cnc_id)
+                    name = f"N{out['no']:05d} {out['label'] or '-'}"
+                    if out.get("changed"):
+                        msg = (f"機械の値が変わりました。{name} の元の値は {out['original']}（いまは {out['now']}）です。"
+                               "［確認した1件を元の値に戻す］を押してください。")
+                    else:
+                        msg = (f"機械の値が変わったかもしれません。{name} の元の値は {out['original']} です。"
+                               "［確認した1件を元の値に戻す］を押してください。")
+                    self.lbl_alert.setText(msg)
+                    self.lbl_alert.setVisible(True)
             self._refresh_enabled()
 
         self._run(work, ok, self._write_failed, mode="verify")
 
     # --- 閉じる ------------------------------------------------------------------------------
+
+    def _confirm_close(self):
+        """書込・元に戻すの最中に閉じると言われたときの確認。続けて閉じてよければ True。"""
+        return QtWidgets.QMessageBox.question(
+            self, "書込の途中です",
+            "いま機械へ書いている途中です。\n"
+            "閉じると、いま書いている1件が終わったら止めます（残りは書きません）。\n"
+            "書いた分は元に戻せます。\n\n止めますか？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+
+    def _ask_close_after_stop(self, text):
+        """止まったあと、結果を見せて、閉じてよいか聞く。閉じるなら True（既定は閉じずに結果を見る）。"""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("止めました")
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setText(text)
+        stay = box.addButton("結果を見る（閉じない）", QtWidgets.QMessageBox.RejectRole)
+        box.addButton("このまま閉じる", QtWidgets.QMessageBox.AcceptRole)
+        box.setDefaultButton(stay)
+        box.exec()
+        return box.clickedButton() is not stay
+
+    def _request_close(self):
+        """閉じてよいなら True。書込・元に戻すの最中は、確認を出して、止めるよう頼むだけにする
+        （1件の途中では止めない。止まったら結果と［元に戻す］を見せてから閉じる）。"""
+        if self._busy and not self._busy_quiet and self._mode in ("write", "undo"):
+            if self._closing:
+                self._info("書込の途中です", "いま書いている1件が終わるのを待っています。少しお待ちください")
+                return False
+            if not self._confirm_close():
+                return False
+            self._closing = True
+            self._cancel = True
+            self.txt_result.appendPlainText("\n止めています…（いま書いている1件が終わったら止まります）")
+            self._refresh_enabled()
+            return False
+        return True
+
+    def _after_stopped_for_close(self, res, refused=False):
+        """閉じると言われて止めたあと、結果が出たところで呼ぶ。"""
+        if not self._closing:
+            return
+        self._closing = False
+        n = len(res.written()) if res is not None and hasattr(res, "written") else 0
+        if refused or (res is not None and n == 0 and getattr(res, "state", "") in ("done", "cancelled")):
+            QtCore.QTimer.singleShot(0, self.reject)      # 何も書いていない。そのまま閉じる
+            return
+        text = ("止めました。結果は画面に出しています。"
+                + (f"機械には {n} 件が書かれています（書いた分は［書いた分を元に戻す］で戻せます）。" if n else "")
+                + "\nこのまま閉じてもよいですか？")
+        if self._ask_close_after_stop(text):
+            QtCore.QTimer.singleShot(0, self.reject)
 
     def _shutdown(self):
         """閉じたら必ず切る（握ったままにしない）。書込の途中なら、いま書いている1件が終わってから止める。"""
@@ -3730,10 +3955,15 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._connected = False
 
     def closeEvent(self, event):
+        if not self._request_close():
+            event.ignore()
+            return
         self._shutdown()
         super().closeEvent(event)
 
     def reject(self):
+        if not self._request_close():
+            return
         self._shutdown()
         super().reject()
 
@@ -6225,8 +6455,9 @@ class ParamDialog(QtWidgets.QDialog):
             return self._plan(foc_raw, seiban=seiban, master_path="", focas_base=True,
                               zero_scope=zero_scope, **inputs)
 
+        axes_shown = sorted(per_axis) if (split and len(split[0]) >= 2) else [axis]
         FocasWriteDialog(
-            self, self.settings, plan_fn, seiban=seiban,
+            self, self.settings, plan_fn, seiban=seiban, basic_text=raw, product_axes=axes_shown,
             subtitle=f"{self.e_model.text().strip() or '—'}（{what}）／ BASIC {Path(master_path).name}"
                      " の製品値のうち、機械の今と違う所だけを書きます。").exec()
 

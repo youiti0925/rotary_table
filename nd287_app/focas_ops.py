@@ -21,6 +21,7 @@ from . import focas_client as C
 from . import focas_helper as H
 from . import param_build
 
+kind_label = H.kind_label       # 画面に出す型の名前（byte/none → バイト）
 DEFAULT_ALLOWED_ALARMS = ("SW0100",)
 PWE_ALARM = "SW0100"
 
@@ -35,7 +36,8 @@ def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, bac
 
     - 運転: run==0（リセット）かつ motion==0。非常停止なし。
     - アラーム: 無い、または許したアラーム（既定は SW0100＝PWE が ON のしるし）だけ。
-    - 控え: この回に取った控えが「完全」で、いまつながっている機械（CNC ID）と同じ。
+    - 控え: この回に取った控えが「完全」で、いまつながっている機械（機械ごとの番号 CNC ID）と同じ。
+      CNC ID が取れない機械・控えに CNC ID が無いときは書かない（どの機械か確かめられないため）。
     - PWE: パラメータを書くときは SW0100 が出ていること（アプリは PWE を触らない）。
     モード（MDI・編集など）では止めない（どのモードで書けるかは確かめていないため、
     推測で禁止しない。戻り値 12＝モード違いが出たらそのとき案内する）。
@@ -68,8 +70,12 @@ def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, bac
         reasons.append("この回の控えがありません。先に『控えを取る』を押してください")
     elif not backup_info.get("complete"):
         reasons.append("控えが不完全です（点検の指摘があります）")
-    elif cnc_id and backup_info.get("cnc_id") != cnc_id:
-        reasons.append("控えは別の機械のものです（CNC ID が違います）")
+    elif not cnc_id:
+        reasons.append("機械ごとの番号（CNC ID）が読めていません。どの機械か確かめられないので、この機械には書きません")
+    elif not backup_info.get("cnc_id"):
+        reasons.append("控えに機械ごとの番号（CNC ID）がありません。どの機械の控えか確かめられないので書きません")
+    elif backup_info.get("cnc_id") != cnc_id:
+        reasons.append("控えは別の機械のものです（機械ごとの番号（CNC ID）が違います）")
     return {"ok": not reasons, "reasons": reasons, "pwe": pwe}
 
 
@@ -127,7 +133,7 @@ def self_check(client, backup_folder=None, *, full=False, progress=None):
                      f"機種 {ident['cnc_type']}i {ident['mt_type']}  系列 {ident['series']}  "
                      f"版 {ident['version']}  軸数 {ident['axes']}",
                      f"軸名 {' '.join(ident.get('axis_names') or []) or '読めず'}",
-                     f"CNC ID {ident.get('cnc_id')}",
+                     f"機械ごとの番号（CNC ID）{ident.get('cnc_id')}",
                      f"手順の割り当て: {ident.get('family') or 'なし'}"
                      + ("" if ident.get("supported") else "（この機種はまだ対応していません）")))
     if not ident.get("supported"):
@@ -377,18 +383,25 @@ def plan_writes(raw, plan, types, *, verified):
             continue
         code = (types or {}).get(no)
         it = {"no": no, "label": label, "old": old, "new": new, "type_code": code,
-              "key": None, "kind": None, "verified": False, "problems": []}
+              "key": None, "kind": None, "verified": False, "problems": [], "unknown_bits": []}
         if code is None:
             it["problems"].append("型情報にありません")
         else:
             it["key"] = H.kind_key(code, label)
             it["kind"] = H.decode_type(code)["kind"]
+            it["unknown_bits"] = list(H.decode_type(code)["unknown_bits"])
             it["verified"] = it["key"] in ok_types
-            if it["kind"] != "real":
-                try:
-                    H.encode_param_value(it["kind"], new)
-                except H.FocasError as e:
-                    it["problems"].append(e.detail.get("message", "書けない値です"))
+            mis = H.label_type_problem(code, label)
+            if mis:
+                it["problems"].append(mis)
+            # 書く前に全件点検する（途中の1件で断られて、半分だけ書いた状態にしない）。
+            # 実数の小数点以下の桁数は、機械の値の書き方（控え）から決める。書くときにヘルパーが
+            # 機械から読んだ桁数で、もう一度同じ点検をする
+            try:
+                H.encode_param_value(it["kind"], new,
+                                     H.real_decimals(old) if it["kind"] == "real" else None)
+            except H.FocasError as e:
+                it["problems"].append(e.detail.get("message", "書けない値です"))
         lk = H.label_kind(label)
         if lk in ("L", "T"):
             it["problems"].append("系統型（L・T）の軸の指し方は未確認なので書けません")
@@ -412,7 +425,7 @@ def plan_writes(raw, plan, types, *, verified):
     for key, idx in unverified.items():
         ex = items[idx[0]]
         blockers.append(
-            f"型 {key} はこの機種ではまだ書いたことがありません（{len(idx)} 件。例 N{ex['no']:05d} "
+            f"型 {H.kind_label(key)} はこの機種ではまだ書いたことがありません（{len(idx)} 件。例 N{ex['no']:05d} "
             f"{ex['label'] or '-'}）。先に『同じ値を書く確認』をしてください")
     return {"items": items, "missing": missing, "unwritable": unwritable, "expected": expected,
             "mismatch": mismatch, "blockers": blockers, "unverified": unverified}
@@ -434,19 +447,21 @@ def _read_value(client, it):
 
 def _gate(client, *, cnc_id, backup_info, allowed):
     """書く直前の確認（確認ボタンの瞬間と、1件ごとの直前）。戻り値 (理由の並び, アラーム)。
-    つながっている機械の CNC ID が控えのものと同じこと・リセット・非常停止なし・アラームは許したものだけ
+    つながっている機械の機械ごとの番号（CNC ID）が控えのものと同じこと（取れない機械には書かない）・リセット・非常停止なし・アラームは許したものだけ
     （SW0100＝PWE が出ていること）・控えが完全なこと。"""
     ident = client.call("identify")
     st = client.call("status")
     al = client.call("alarms")["alarms"]
     reasons = []
-    if cnc_id and ident.get("cnc_id") != cnc_id:
-        reasons.append("つながっている機械が控えを取ったときと違います（CNC ID が違います）")
+    if not cnc_id or not ident.get("cnc_id"):
+        reasons.append("機械ごとの番号（CNC ID）が読めていません。どの機械か確かめられないので、この機械には書きません")
+    elif ident.get("cnc_id") != cnc_id:
+        reasons.append("つながっている機械が控えを取ったときと違います（機械ごとの番号（CNC ID）が違います）")
     if not ident.get("supported"):
         reasons.append("この機種はまだ対応していません")
     w = writable_state(st, al, allowed_alarms=allowed, backup_info=backup_info,
-                       cnc_id=ident.get("cnc_id") if cnc_id else None)
-    reasons += w["reasons"]
+                       cnc_id=ident.get("cnc_id"))
+    reasons += [r for r in w["reasons"] if r not in reasons]
     return reasons, al
 
 
@@ -473,6 +488,7 @@ class WriteResult:
         self.new_alarms = []
         self.power_cycle = False
         self.verify = None
+        self.folder = None            # この結果（書込ジョブ.json）がある控えのフォルダ
         self.started_at = None
         self.finished_at = None
 
@@ -633,11 +649,13 @@ def _finish_alarms(client, res):
 
 def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None, newtext=None,
               types=None, cancel=None, progress=None, on_item=None, log_path=None, job_path=None,
-              full_check=True):
+              full_check=True, expected=None, unwritable=None):
     """書込の一覧 items（plan_writes の items）を1件ずつ書く。戻り値は WriteResult。
 
     書く前に、確認済みでない型・書けない値・書ける状態でないことがあれば、機械に1度も書かずに
     WriteRefused。1件でも止まったら残りは書かない。中止（cancel）は次の1件の前で止まる。
+    expected（プレビューの『変わる行』の数）と unwritable（片側にしか無い番号）を渡すと、plan_writes の
+    点検をここでもう一度する（件数がずれていたら、片側にしか無い番号があれば、1件も書かない）。
     全部書けたら、パラメータを丸ごと吸い出して newtext と全行比べる（full_check）。
     PW0000 が出たら power_cycle=True（電源を入れ直してください、と言うのは呼ぶ側。待たない）。
     """
@@ -649,12 +667,17 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
     if not items:
         raise WriteRefused(["書くものがありません"])
     bad = []
+    if expected is not None and len(items) + len(unwritable or ()) != expected:
+        bad.append(f"プレビューの『変わる行』{expected} 件と、書く一覧 {len(items) + len(unwritable or ())} 件が"
+                   "合いません（画面と中身がずれています）")
+    if unwritable:
+        bad.append(f"片側にしか無い番号があります（{len(unwritable)} 件）。機械に無い番号は書けません")
     for it in items:
         name = f"N{it['no']:05d} {it.get('label') or '-'}"
         if it.get("problems"):
             bad.append(f"{name}: " + "／".join(it["problems"]))
         elif it.get("key") not in ver:
-            bad.append(f"{name} の型 {it.get('key')} は、この機種ではまだ書いたことがありません"
+            bad.append(f"{name} の型 {H.kind_label(it.get('key'))} は、この機種ではまだ書いたことがありません"
                        "（先に『同じ値を書く確認』をしてください）")
     if bad:
         raise WriteRefused(bad)
@@ -732,7 +755,7 @@ def verify_all(client, newtext, types, items, *, progress=None):
 
 
 def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None, cancel=None,
-             progress=None, on_item=None, log_path=None, job_path=None):
+             progress=None, on_item=None, log_path=None, job_path=None, verified_extra=()):
     """書いた分（touched）を、逆の順で旧値に書き戻す。自動では呼ばない（ボタンから）。
 
     各件の直前の値が「書いた値」（または読み戻した値）でも「元の値」でもなければ止める
@@ -742,12 +765,16 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
     ctx = dict(ctx or {})
     prog = progress or (lambda d, t, n: None)
     stop = cancel or (lambda: False)
-    ver = verified_list(settings, family)
+    # verified_extra: 同じ値を書く確認が通らなかった型を、その1件だけ元に戻すときに渡す
+    ver = verified_list(settings, family) + [k for k in verified_extra if k]
     allowed = allowed_codes(settings)
     targets = [it for it in reversed(result.items) if it.get("touched")]
     if not targets:
         raise WriteRefused(["元に戻すものがありません"])
-    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed)
+    # 書いたあとに PW0000（電源の入れ直しの要求）が出ているのは普通。出ていても元に戻せる
+    # （1件ごとの _write_one も同じ。ここだけ断ると、書いた値が機械に残ったままになる）
+    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info,
+                         allowed=tuple(allowed) + (POWER_ALARM,))
     if reasons:
         raise WriteRefused(reasons)
     out = WriteResult([dict(it, old=it["new"], new=it["old"], undo_of=it) for it in targets], cnc_id)
@@ -799,7 +826,7 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
     else:
         out.state = "done"
     _finish_alarms(client, out)
-    out.power_cycle = any(is_power_alarm(a) for a in out.new_alarms)
+    out.power_cycle = any(is_power_alarm(a) for a in list(out.new_alarms) + list(out.alarms_after))
     out.finished_at = _now()
     _save_job(job_path, out, uctx)
     return out
@@ -819,16 +846,41 @@ def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, 
     reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed)
     if reasons:
         raise WriteRefused(reasons)
-    cur, _kind = _read_value(client, it)
+    cur, kind = _read_value(client, it)
     probe = dict(it, before=None, after=None, rc=None, touched=False, old=cur, new=cur)
+    base = {"key": key, "no": it["no"], "label": it["label"], "value": cur, "at": _now(),
+            "cnc_id": cnc_id, "item": probe, "changed": False, "original": cur, "now": None}
+    # 書く前に「いま読んだ値 == 控えの値」を比べる。違えば書かずに止める（控えのあとで機械の値が
+    # 変わっている。『今と同じ値を書く』つもりが、別の値を確定させてしまうのを防ぐ）
+    if it.get("old") is not None and not _same(kind, cur, it["old"]):
+        note = (f"書く前に読んだ機械の値（{cur}）が、控えの値（{it['old']}）と違います。"
+                "控えのあとで機械の値が変わっています。何も書かずに止めました。控えを取り直してください")
+        probe["before"] = cur
+        _log_item(log_path, ctx, cnc_id, probe, f"同値書込の確認 {key}: 通らない(stale)")
+        return dict(base, ok=False, result="stale", note=note)
     result, note, _new = _safe_write_one(
         client, probe, cur, verified=verified_list(settings, family) + [key], expect_before=cur,
         allowed=allowed, cnc_id=cnc_id, backup_info=backup_info, base_alarms=al0)
     ok = result == "ok"
+    probe["status"] = "ok" if ok else result
+    probe["note"] = note
     _log_item(log_path, ctx, cnc_id, probe,
               f"同値書込の確認 {key}: " + ("通った" if ok else f"通らない({result})"))
-    return {"ok": ok, "key": key, "no": it["no"], "label": it["label"], "value": cur,
-            "result": result, "note": note, "at": _now(), "cnc_id": cnc_id}
+    after = probe.get("after")
+    changed = bool(probe["touched"] and after is not None and not _same(kind, after, cur))
+    return dict(base, ok=ok, result=result, note=note, touched=probe["touched"], changed=changed,
+                now=after)
+
+
+def verify_undo_result(out, cnc_id=None):
+    """同じ値を書く確認で、機械の値が変わった（かもしれない）ときの、その1件を元に戻す用の結果。
+    run_undo にそのまま渡せる（元の値 = 確認の前に読んだ値）。"""
+    src = out["item"]
+    res = WriteResult([src], cnc_id)
+    res.items[0].update(touched=True, status="mismatch", before=src.get("before"),
+                        after=src.get("after"), rc=src.get("rc"))
+    res.state = "stopped"
+    return res
 
 
 def resolve_unknown(client, it, connect_args, *, cnc_id):
@@ -840,14 +892,93 @@ def resolve_unknown(client, it, connect_args, *, cnc_id):
     """
     client.call("connect", connect_args)
     ident = client.call("identify")
-    if cnc_id and ident.get("cnc_id") != cnc_id:
-        raise WriteRefused(["つなぎ直した機械が、控えを取った機械と違います（CNC ID が違います）"])
+    if not cnc_id or ident.get("cnc_id") != cnc_id:
+        raise WriteRefused(["つなぎ直した機械が、控えを取った機械と同じか確かめられません"
+                            "（機械ごとの番号（CNC ID）が違う、または読めません）"])
     cur, kind = _read_value(client, it)
     if _same(kind, cur, it["new"]):
         return "written", cur
     if _same(kind, cur, it["old"]):
         return "not_written", cur
     return "other", cur
+
+
+def load_job(path):
+    """書込ジョブ.json を読み戻して WriteResult にする（画面を閉じたあとでも、元に戻せるように）。
+    読めなければ None。"""
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+        res = WriteResult([], d.get("cnc_id"))
+        for it in d.get("items") or []:
+            base = {"problems": [], "type_code": None, "kind": None, "verified": True,
+                    "status": "pending", "touched": False, "before": None, "after": None,
+                    "rc": None, "note": ""}
+            base.update(it)
+            res.items.append(base)
+        res.state, res.stop_reason = d.get("state") or "stopped", d.get("stop_reason")
+        res.started_at, res.finished_at = d.get("started_at"), d.get("finished_at")
+        res.power_cycle = bool(d.get("power_cycle"))
+        res.folder = str(Path(path).parent)
+        return res
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def find_pending_job(root, cnc_id):
+    """控えの置き場（root）の下から、この機械（CNC ID）の一番新しい書込ジョブを探す。
+    機械に書いたものが残っていて、まだ元に戻していなければ WriteResult、無ければ None。
+    CNC ID が空のときは探さない（どの機械か分からない）。"""
+    if not cnc_id or not root or not Path(root).is_dir():
+        return None
+    jobs = []
+    for p in Path(root).rglob(JOB_NAME):
+        try:
+            jobs.append((p.stat().st_mtime, p))
+        except OSError:
+            pass
+    for _t, p in sorted(jobs, reverse=True):
+        res = load_job(p)
+        if res is None or res.cnc_id != cnc_id:
+            continue
+        if not res.written():
+            return None
+        undo = load_job(p.parent / ("元に戻す_" + JOB_NAME))
+        if undo is not None and undo.state == "done":
+            return None
+        return res
+    return None
+
+
+def basic_leftovers(raw, basic_text, plan, types, axes):
+    """今回は書かない番号のうち、製品の軸で「機械の値」と「BASIC の値」が違うもの。
+    製品の値が BASIC と同じ番号は、製品の値としては出てこないので書かれない。機械が前の製品の値の
+    ままかもしれない、という注意のため。書く内容は変えない（土台は今の機械）。
+    今回の一覧（プレビューの行）に出ている番号は除く。戻り値 [(番号, ラベル, 機械の値, BASICの値)]。"""
+    if not basic_text or not axes:
+        return []
+    labels = {f"A{int(a)}" for a in axes}
+    handled = set()
+    for r in (plan or {}).get("rows") or []:
+        try:
+            handled.add(int(str(r[0]).split("(")[0]))
+        except ValueError:
+            pass
+    machine = fanuc_param.values_map(raw)
+    basic = fanuc_param.values_map(basic_text)
+    out = []
+    for (num, label) in sorted(basic):
+        if label not in labels or (num, label) not in machine:
+            continue
+        try:
+            no = int(num)
+        except ValueError:
+            continue
+        if no in handled:
+            continue
+        kind = _kind_of_text(types, no, machine[(num, label)])
+        if not _same(kind, machine[(num, label)], basic[(num, label)]):
+            out.append((no, label, machine[(num, label)], basic[(num, label)]))
+    return out
 
 
 STATUS_TEXT = {"pending": "（まだ書いていません）", "ok": "書けた・読み戻しOK", "stale": "書かずに止めた",

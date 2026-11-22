@@ -489,6 +489,11 @@ class WriteResult:
         self.power_cycle = False
         self.verify = None
         self.folder = None            # この結果（書込ジョブ.json）がある控えのフォルダ
+        # 書込ジョブ.json から探して戻した結果のとき（find_pending_job）だけ入る
+        self.job_kind = None          # "completed"（最後まで成功）/ "interrupted"（途中で止まった・不明）
+        self.job_time = None          # 書いた日時の文字列
+        self.job_age_days = None
+        self.job_old = False          # OLD_JOB_DAYS 日以上前
         self.started_at = None
         self.finished_at = None
 
@@ -771,6 +776,10 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
     targets = [it for it in reversed(result.items) if it.get("touched")]
     if not targets:
         raise WriteRefused(["元に戻すものがありません"])
+    # 別の機械の結果を、今の機械に使わない（値が偶然合っていても、別の機械の書込は戻さない）
+    if not getattr(result, "cnc_id", None) or result.cnc_id != cnc_id:
+        raise WriteRefused(["この結果は、いまつながっている機械のものではありません"
+                            "（結果の機械ごとの番号（CNC ID）が違う、または分かりません）。何も戻していません"])
     # 書いたあとに PW0000（電源の入れ直しの要求）が出ているのは普通。出ていても元に戻せる
     # （1件ごとの _write_one も同じ。ここだけ断ると、書いた値が機械に残ったままになる）
     reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info,
@@ -924,10 +933,26 @@ def load_job(path):
         return None
 
 
-def find_pending_job(root, cnc_id):
-    """控えの置き場（root）の下から、この機械（CNC ID）の一番新しい書込ジョブを探す。
+OLD_JOB_DAYS = 7      # これより古い途中のジョブは、元に戻す前に確認を1回はさむ
+
+
+def _job_time(res, mtime):
+    t = res.started_at or res.finished_at
+    if t:
+        return str(t)
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+
+
+def find_pending_job(root, cnc_id, alarms=None, now=None):
+    """控えの置き場（root）の下から、この機械（CNC ID）の一番新しい、機械に書いたジョブを探す。
+    1件も書かなかったジョブ（書く前に止まった）は飛ばして、その前のジョブを探す。
     機械に書いたものが残っていて、まだ元に戻していなければ WriteResult、無ければ None。
-    CNC ID が空のときは探さない（どの機械か分からない）。"""
+    CNC ID が空のときは探さない（どの機械か分からない）。
+
+    戻した結果には job_kind（completed = 最後まで成功した書込・interrupted = 途中で止まった/不明、
+    または元に戻す途中）・job_time（書いた日時）・job_age_days・job_old を付ける。
+    alarms（今の機械のアラーム）を渡すと、PW0000 が今出ていないのに古い記録が power_cycle のときは
+    power_cycle を False にする（古い『電源を入れ直して』を出さない）。"""
     if not cnc_id or not root or not Path(root).is_dir():
         return None
     jobs = []
@@ -936,17 +961,58 @@ def find_pending_job(root, cnc_id):
             jobs.append((p.stat().st_mtime, p))
         except OSError:
             pass
-    for _t, p in sorted(jobs, reverse=True):
+    for mtime, p in sorted(jobs, reverse=True):
         res = load_job(p)
         if res is None or res.cnc_id != cnc_id:
             continue
         if not res.written():
-            return None
+            continue                  # 1件も書いていない。その前のジョブを探す
         undo = load_job(p.parent / ("元に戻す_" + JOB_NAME))
         if undo is not None and undo.state == "done":
             return None
+        completed = (res.state == "done" and undo is None
+                     and all(it["status"] == "ok" for it in res.written()))
+        res.job_kind = "completed" if completed else "interrupted"
+        res.job_time = _job_time(res, mtime)
+        age = ((now if now is not None else time.time()) - mtime) / 86400.0
+        res.job_age_days = max(0, int(age))
+        res.job_old = age >= OLD_JOB_DAYS
+        if alarms is not None and res.power_cycle                 and not any(is_power_alarm(a) for a in alarms):
+            res.power_cycle = False
         return res
     return None
+
+
+def describe_pending_job(res):
+    """find_pending_job の結果を、画面に出す前置きの文にする。"""
+    n = len(res.written())
+    when = res.job_time or "日時不明"
+    if res.job_kind == "completed":
+        return (f"前回（{when}）に {n} 件を書きました。最後まで書けていて、今もそのままです。")
+    text = (f"前回（{when}）の書込のうち {n} 件が、機械に書いたままです（途中で止まったため、元の値には戻っていません）。"
+            "［書いた分を元に戻す］で戻せます。")
+    if res.job_old:
+        text += (f"\n※ {res.job_age_days} 日以上前の記録です。そのあとに機械の値が変わっているかもしれないので、"
+                 "元に戻す前に確認を出します。")
+    return text
+
+
+def reread_verify_undo(client, res, connect_args, *, cnc_id):
+    """同じ値を書く確認で、読み戻しができなかった（通信切れ）1件。つなぎ直して今の値を読み、
+    確認の前の値のままなら "unchanged"、違えば今の値を after に入れて "changed"（元に戻せる）にする。
+    CNC ID が違う機械なら WriteRefused。書かない。"""
+    if not getattr(res, "cnc_id", None) or res.cnc_id != cnc_id:
+        raise WriteRefused(["この結果は、いまつながっている機械のものではありません"])
+    client.call("connect", connect_args)
+    ident = client.call("identify")
+    if not cnc_id or ident.get("cnc_id") != cnc_id:
+        raise WriteRefused(["つなぎ直した機械が、控えを取った機械と同じか確かめられません"])
+    it = res.items[0]
+    cur, kind = _read_value(client, it)
+    if _same(kind, cur, it["old"]):
+        return "unchanged", cur
+    it["after"] = cur
+    return "changed", cur
 
 
 def basic_leftovers(raw, basic_text, plan, types, axes):

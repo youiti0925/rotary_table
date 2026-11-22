@@ -2874,6 +2874,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._leftover = []
         self._closing = False                    # 書込・元に戻す の最中に閉じると言われた（1件終わったら止める）
         self._vfy_undo = None                    # 同じ値を書く確認で値が変わった1件（元に戻す用）
+        self._undo_partial = False               # 元に戻すが途中で止まった（続きがある）
         self.seiban = seiban
         self._client_factory = client_factory
         self.client = None
@@ -3077,6 +3078,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.b_undo_one = QtWidgets.QPushButton("確認した1件を元の値に戻す")
         self.b_undo_one.setToolTip("同じ値を書く確認で値が変わったとき、その1件だけを元の値に戻します")
         self.b_undo_one.clicked.connect(self.start_undo_one)
+        self.lbl_undo_why = QtWidgets.QLabel("")
+        self.lbl_undo_why.setWordWrap(True)
+        self.lbl_undo_why.setStyleSheet("color:#b45309; padding:2px;")
+        self.lbl_undo_why.setVisible(False)
+        rl.addWidget(self.lbl_undo_why)
         rr.addWidget(self.b_undo)
         rr.addWidget(self.b_undo_one)
         rr.addWidget(self.b_resolve)
@@ -3284,6 +3290,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if old != ident.get("cnc_id"):                   # 別の機械につながったら、控えも結果も引き継がない
             self._backup, self._wplan, self._plan, self._raw = None, None, None, None
             self._result, self._undone, self._rewrite_blocked = None, False, False
+            self._vfy_undo, self._undo_partial = None, False   # 確認した1件の戻し用も、別の機械には持ち越さない
+            self.lbl_alert.setText("")
+            self.lbl_alert.setVisible(False)
             self.lbl_backup.setText("控え: まだ取っていません（機械は読むだけです）")
             self.tbl.setRowCount(0)
             self.lbl_summary.setText("控えを取ると、機械と違う所の一覧がここに出ます")
@@ -3390,15 +3399,19 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self._result, self._undone = None, False
         if self._result is None:
             try:
-                self._result = focas_ops.find_pending_job(self._root(), (self._ident or {}).get("cnc_id"))
+                self._result = focas_ops.find_pending_job(
+                    self._root(), (self._ident or {}).get("cnc_id"), alarms=self._alarms)
             except Exception:
                 self._result = None
         if self._result is not None and self._result.written():
             n = len(self._result.written())
+            if self._result.job_kind is not None:
+                head = focas_ops.describe_pending_job(self._result)
+            else:
+                head = (f"{self._result.started_at or '先ほど'} に書いた分のうち {n} 件が、機械に書いたままです"
+                        "（元の値には戻っていません）。［書いた分を元に戻す］で戻せます。")
             self.txt_result.setPlainText(
-                f"前回の書込のうち {n} 件が、機械に書いたままです（元の値には戻っていません）。"
-                "［書いた分を元に戻す］で戻せます。\n\n"
-                + "\n".join(focas_ops.describe_result(self._result)))
+                head + "\n\n" + "\n".join(focas_ops.describe_result(self._result)))
         else:
             self.txt_result.clear()
         if not res.complete:
@@ -3611,10 +3624,26 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.b_verify.setEnabled(idle and has_unver and self._gate_only())
         res = self._result
         touched = len(res.written()) if res is not None else 0
-        self.b_undo.setText(f"書いた分（{touched} 件）を元に戻す" if touched else "書いた分を元に戻す")
-        self.b_undo.setEnabled(idle and c and touched > 0 and not self._undone)
-        self.b_undo_one.setVisible(self._vfy_undo is not None)
-        self.b_undo_one.setEnabled(idle and c and self._vfy_undo is not None)
+        completed = res is not None and res.job_kind == "completed"   # 前回の最後まで成功した書込
+        self.b_undo.setVisible(not completed)
+        base = "元に戻す（続き）" if self._undo_partial else "書いた分を元に戻す"
+        self.b_undo.setText(f"{base}（{touched} 件）" if touched else base)
+        have_backup = bool(self._backup)
+        self.b_undo.setEnabled(idle and c and have_backup and touched > 0 and not self._undone
+                               and not completed)
+        why = ""
+        if touched > 0 and not self._undone and not completed:
+            if not c:
+                why = "元に戻すには、機械につないでください。"
+            elif not have_backup:
+                why = "元に戻すには、先に［控えを取る］を押してください（この回の控えが要ります）。"
+        self.lbl_undo_why.setText(why)
+        self.lbl_undo_why.setVisible(bool(why))
+        vu = self._vfy_undo
+        self.b_undo_one.setVisible(vu is not None)
+        reread = vu is not None and vu.items[0].get("after") is None
+        self.b_undo_one.setText("つなぎ直して今の値を読む" if reread else "確認した1件を元の値に戻す")
+        self.b_undo_one.setEnabled(idle and c and vu is not None and (have_backup or reread))
         unknown = bool(res is not None and any(it["status"] == "unknown" for it in res.items))
         self.b_resolve.setVisible(unknown)
         self.b_resolve.setEnabled(idle and unknown)
@@ -3718,13 +3747,16 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 f"元に戻す途中で止まりました: {err}\n機械には、書いた値のまま残っている番号があるかもしれません。"
                 "つなぎ直して読み戻さないと分かりません。この画面では何も自動でやり直しません。")
         self._refresh_enabled()
-        self._after_stopped_for_close(None)
+        self._after_stopped_for_close(None, undo=True)
 
     # --- 元に戻す -------------------------------------------------------------------------
 
     def start_undo(self):
         res = self._result
-        if self._busy or res is None or not res.written() or self.client is None or not self._connected:
+        if (self._busy or res is None or not res.written() or self.client is None
+                or not self._connected or not self._backup):
+            return
+        if res.job_old and not self._confirm_old_undo(res):
             return
         client = self.client
         folder, info = self._backup
@@ -3743,18 +3775,37 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
         self._run(work, self._undo_ok, self._undo_failed, mode="undo")
 
+    def _confirm_old_undo(self, res):
+        """古い（OLD_JOB_DAYS 日以上前の）途中のジョブを元に戻す前の確認（1回）。戻してよければ True。"""
+        n = len(res.written())
+        return QtWidgets.QMessageBox.question(
+            self, "古い記録を元に戻します",
+            f"{res.job_time} に書いた {n} 件（{res.job_age_days} 日以上前）を、元の値に戻します。\n"
+            "そのあとに、機械の値が変わっているかもしれません。\n"
+            "（今の値が書いた値でも元の値でもない番号は、止めて戻しません）\n\n元に戻しますか？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+
     def _undo_ok(self, out):
         self._show_items(out, undo=True)
         if out.state == "done":
             self._undone = True
+            self._undo_partial = False
+        elif any(it["status"] == "ok" for it in out.items):
+            self._undo_partial = True
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(out, undo=True)))
         self._refresh_enabled()
-        self._after_stopped_for_close(out)
+        self._after_stopped_for_close(out, undo=True)
 
     def start_undo_one(self):
         """同じ値を書く確認で値が変わったとき、その1件だけを確認の前の値に戻す。"""
         res = self._vfy_undo
-        if self._busy or res is None or self.client is None or not self._connected or not self._backup:
+        if self._busy or res is None or self.client is None or not self._connected:
+            return
+        if res.items[0].get("after") is None:         # 読み戻せていない。先に今の値を読む
+            self._start_vfy_reread(res)
+            return
+        if not self._backup:
             return
         client = self.client
         folder, info = self._backup
@@ -3778,8 +3829,55 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self._show_items(out, undo=True)
             self.txt_result.setPlainText("\n".join(focas_ops.describe_result(out, undo=True)))
             self._refresh_enabled()
+            self._after_stopped_for_close(out, undo=True)
 
         self._run(work, ok, self._undo_failed, mode="undo")
+
+    def _start_vfy_reread(self, res):
+        """同じ値を書く確認で読み戻せなかった（通信切れ）とき、つなぎ直して今の値を読む。
+        今の値が確認の前の値のままなら戻すものは無い。違えば、その値から元に戻せる。"""
+        client = self.client
+        cnc_id = (self._ident or {}).get("cnc_id")
+        args = {"host": self.e_host.text().strip(), "port": self.sp_port.value(),
+                "timeout": focas_client.connect_timeout(self.settings),
+                "families": dict(self.settings.get("focas_families") or {})}
+        it = res.items[0]
+        name = f"N{it['no']:05d} {it['label'] or '-'}"
+        self.txt_result.setPlainText(f"つなぎ直して、{name} の今の値を読んでいます…")
+
+        def work(progress):
+            verdict, cur = focas_ops.reread_verify_undo(client, res, args, cnc_id=cnc_id)
+            return verdict, cur, client.call("identify"), client.call("status"), client.call("alarms")
+
+        def ok(r):
+            verdict, cur, ident, status, alarms = r
+            self._ident = ident
+            self._set_connected(True)
+            self._set_state(self._connected_text(), "color:#166534; font-weight:bold;")
+            self._show_state(status, alarms)
+            if verdict == "unchanged":
+                self._vfy_undo = None
+                self.lbl_alert.setVisible(False)
+                self.txt_result.setPlainText(
+                    f"{name} は、読み直すと確認の前の値（{cur}）のままでした。戻すものはありません。")
+            else:
+                self.lbl_alert.setText(
+                    f"機械の値が変わっています。{name} の元の値は {it['old']}（いまは {cur}）です。"
+                    "［確認した1件を元の値に戻す］を押してください。")
+                self.lbl_alert.setVisible(True)
+                self.txt_result.setPlainText(
+                    f"{name} を読み直しました。いまの値は {cur} で、確認の前の値（{it['old']}）と違います。"
+                    "［確認した1件を元の値に戻す］で戻せます。")
+            self._refresh_enabled()
+
+        def failed(err):
+            msg = "\n".join(err.reasons) if isinstance(err, focas_ops.WriteRefused) else str(err)
+            self.txt_result.setPlainText(
+                f"今の値を読めませんでした: {msg}\n機械の値は、確認の前の値のままか分かりません。"
+                "つなぎ直せたら、もう一度［つなぎ直して今の値を読む］を押してください。")
+            self._refresh_enabled()
+
+        self._run(work, ok, failed, mode="resolve")
 
     # --- つなぎ直して確かめる（書けたか不明のとき）---------------------------------------------
 
@@ -3872,6 +3970,10 @@ class FocasWriteDialog(QtWidgets.QDialog):
                     if out.get("changed"):
                         msg = (f"機械の値が変わりました。{name} の元の値は {out['original']}（いまは {out['now']}）です。"
                                "［確認した1件を元の値に戻す］を押してください。")
+                    elif out.get("now") is None:
+                        msg = ("機械の値が変わったかもしれません（書いたあとの値を読み戻せませんでした）。"
+                               f"{name} の元の値は {out['original']} です。"
+                               "［つなぎ直して今の値を読む］を押してください。今の値が元の値と違えば、そのあと戻せます。")
                     else:
                         msg = (f"機械の値が変わったかもしれません。{name} の元の値は {out['original']} です。"
                                "［確認した1件を元の値に戻す］を押してください。")
@@ -3885,11 +3987,19 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def _confirm_close(self):
         """書込・元に戻すの最中に閉じると言われたときの確認。続けて閉じてよければ True。"""
+        if self._mode == "undo":
+            title, body = ("元に戻す途中です",
+                           "いま元の値に戻している途中です。\n"
+                           "閉じると、いま戻している1件が終わったら止めます（残りは戻しません。"
+                           "まだ書いたままの番号が機械に残ります）。\n"
+                           "あとで［元に戻す（続き）］で続きを戻せます。\n\n止めますか？")
+        else:
+            title, body = ("書込の途中です",
+                           "いま機械へ書いている途中です。\n"
+                           "閉じると、いま書いている1件が終わったら止めます（残りは書きません）。\n"
+                           "書いた分は元に戻せます。\n\n止めますか？")
         return QtWidgets.QMessageBox.question(
-            self, "書込の途中です",
-            "いま機械へ書いている途中です。\n"
-            "閉じると、いま書いている1件が終わったら止めます（残りは書きません）。\n"
-            "書いた分は元に戻せます。\n\n止めますか？",
+            self, title, body,
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
@@ -3921,11 +4031,28 @@ class FocasWriteDialog(QtWidgets.QDialog):
             return False
         return True
 
-    def _after_stopped_for_close(self, res, refused=False):
-        """閉じると言われて止めたあと、結果が出たところで呼ぶ。"""
+    def _after_stopped_for_close(self, res, refused=False, undo=False):
+        """閉じると言われて止めたあと、結果が出たところで呼ぶ。
+        undo=True は元に戻すの結果（書込とは件数の意味が逆: 戻せた件数 ok が多いほど良い）。"""
         if not self._closing:
             return
         self._closing = False
+        if undo:
+            if res is not None and getattr(res, "state", "") == "done":
+                QtCore.QTimer.singleShot(0, self.reject)   # 全部戻せた。そのまま閉じる
+                return
+            if res is None:
+                text = ("元に戻せませんでした。機械には、書いた値が残っているかもしれません。結果は画面に出しています。"
+                        "\nこのまま閉じてもよいですか？")
+            else:
+                back = sum(1 for it in res.items if it["status"] == "ok")
+                left = len(res.items) - back
+                text = (f"止めました。元に戻せたのは {back} 件、まだ書いたままの番号が {left} 件あります。"
+                        "結果は画面に出しています。［元に戻す（続き）］で続きを戻せます。"
+                        "\nこのまま閉じてもよいですか？")
+            if self._ask_close_after_stop(text):
+                QtCore.QTimer.singleShot(0, self.reject)
+            return
         n = len(res.written()) if res is not None and hasattr(res, "written") else 0
         if refused or (res is not None and n == 0 and getattr(res, "state", "") in ("done", "cancelled")):
             QtCore.QTimer.singleShot(0, self.reject)      # 何も書いていない。そのまま閉じる

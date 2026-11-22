@@ -12,3 +12,6 @@ K:*
 settings.json
 # 生成した測定プログラム
 *.NC
+# FOCAS で機械から取った控え（リポジトリに入れない）とヘルパーの記録
+機械バックアップ/
+focas_helper.log

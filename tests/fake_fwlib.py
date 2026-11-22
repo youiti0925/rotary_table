@@ -14,7 +14,7 @@
   force_rc         {関数名: 戻り値} その関数は常にその戻り値
   dump_pad_lines   パラメータの控えに詰め物の行を足して大きくする
   extra_programs   PATH1 にプログラムを N 本足す
-  alarms / status / cnc_id / remaining など
+  alarms / status / cnc_id / remaining / cnc_type など
 偽物の仮定（実機では未確認）: L1・L2 は 軸の欄 0/1→L1、2→L2 で読める。
 """
 
@@ -74,7 +74,7 @@ class FakeMachine:
                 continue
             a, b = line.split(",")
             self.types[int(a)] = int(b)
-        self.cnc_type, self.mt_type = b"31", b"M "
+        self.cnc_type, self.mt_type = sc.get("cnc_type", "31").encode().ljust(2), b"M "
         self.series, self.version, self.axes_txt = b"G103", b"18.0", b"6 "
         self.max_axis = 6
         self.axis_names = [b"X", b"Y", b"Z", b"A", b"B", b"C"]

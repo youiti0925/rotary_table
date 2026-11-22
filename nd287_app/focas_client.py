@@ -174,6 +174,7 @@ class FocasClient:
         self.extra_args = list(extra_args)
         self.log_path = log_path
         self.env = env
+        self.on_log = None            # 画面の「やり取りの記録」用: on_log(文字)
         self.hello = None
         self.connected = False
         self.stderr_tail = collections.deque(maxlen=200)
@@ -340,7 +341,19 @@ class FocasClient:
             if got:
                 self._lock.release()
 
+    def abort(self):
+        """ロックを待たずに止める（命令の最中に画面を閉じるとき）。呼び出し中の命令は lost で終わる。"""
+        self._kill()
+
     # --- 命令 ----------------------------------------------------------------
+
+    def _note(self, text):
+        cb = self.on_log
+        if cb is not None:
+            try:
+                cb(text)
+            except Exception:
+                pass
 
     def _new_id(self):
         self._next_id += 1
@@ -358,6 +371,7 @@ class FocasClient:
             if not self.alive:
                 self.start()                      # 切れていたら起動し直す
             mid = self._new_id()
+            self._note(f"→ {cmd}")
             t = timeout if timeout is not None else self.timeouts.get(cmd, self.timeouts["default"])
             try:
                 self._send({"id": mid, "cmd": cmd, "args": args or {}})
@@ -393,12 +407,14 @@ class FocasClient:
                 if msg.get("id") != mid:
                     continue                       # 前の命令の古い返事は捨てる
                 if msg.get("ok"):
+                    self._note(f"← {cmd} OK")
                     if cmd == "connect":
                         self.connected = True
                     elif cmd == "disconnect":
                         self.connected = False
                     return msg.get("result")
                 err = msg.get("error") or {"kind": "protocol", "message": "error がありません"}
+                self._note(f"× {cmd} {err.get('kind')} {err.get('func', '')} {err.get('rc', '')}".rstrip())
                 if err.get("kind") in ("lost", "connect"):
                     self.connected = False
                 raise _from_dict(err)

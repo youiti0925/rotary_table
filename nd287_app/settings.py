@@ -164,6 +164,20 @@ DEFAULTS = dict(
     ftp_password="cnc",
     ftp_port=21,
     ftp_list_style="unix",       # 一覧の形。出ないときは "dos"
+    # FOCAS（PCから機械を直接読み書きする FANUC の仕組み）。32bit Python の別プロセス
+    # （ヘルパー）で動かす。段1〜3では読む・控えるだけ。書込に関する値は段4以降で使う。
+    focas_python32="",           # 32bit Python の場所（空なら既定の場所を探す）
+    focas_dll_dir="",            # Fwlib32.dll のフォルダ（空なら SERVO GUIDE → SysWOW64）
+    focas_helper_path="",        # focas_helper.py の場所（空なら exe の隣 → パッケージのフォルダ）
+    focas_host="192.168.1.1",
+    focas_port=8193,
+    focas_timeout=10,            # 接続の時間切れ[秒]
+    focas_backup_dir="機械バックアップ",  # 控えの置き場所（BASIC・製品データのフォルダの中は不可）
+    focas_prog_folder="//CNC_MEM/USER/PATH1/",
+    focas_allowed_alarms=["SW0100"],       # これだけなら書けるアラーム（SW0100＝PWE が ON）
+    focas_verified_kinds={"31i": ["byte/none"]},   # 同値書込が済んだ型（実機で確かめたもの）
+    focas_families={"31": "31i"},          # 機種(cnc_type) → 手順の割り当て
+    focas_write_log_csv=r"マスタ/FOCAS書込ログ.csv",
     # Webモニタ（離れたPCのブラウザから閲覧・再測定指示）。社内LAN内での利用前提
     web_enabled=False,
     web_port=8765,

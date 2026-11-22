@@ -247,6 +247,10 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.FtpServerDialog(None, s)), [])
 
+    def test_focas_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.FocasDialog(None, s)), [])
+
     def test_help_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.HelpDialog(None)), [])

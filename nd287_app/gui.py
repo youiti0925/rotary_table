@@ -118,6 +118,7 @@ from . import fanuc_param
 from . import fanuc_pcorr
 from . import param_build
 from . import ftpserver
+from . import focas_backup, focas_client, focas_ops
 from . import controllers
 from . import seiban_flow
 from . import batch_build
@@ -2104,6 +2105,684 @@ class FtpServerDialog(QtWidgets.QDialog):
 
     def reject(self):
         self.stop()
+        super().reject()
+
+
+class _FocasJob(QtCore.QThread):
+    """機械への命令を別スレッドで行う（待っている間に画面が固まらないように）。"""
+
+    finished_ok = QtCore.Signal(object)
+    failed = QtCore.Signal(object)
+    progress = QtCore.Signal(int, int, str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            res = self._fn(lambda d, t, n: self.progress.emit(int(d), int(t), str(n)))
+        except BaseException as e:          # 画面へ渡す（スレッドの中で握りつぶさない）
+            self.failed.emit(e)
+        else:
+            self.finished_ok.emit(res)
+
+
+class FocasDialog(QtWidgets.QDialog):
+    """機械と直接つなぐ（FOCAS）。つなぐ・状態・控え・自己診断。**読むだけで、機械には何も書かない。**
+
+    FOCAS は、PC から機械（制御装置）をネットワークで直接読み書きする FANUC の仕組み。
+    32bit Python の別プロセス（ヘルパー）を通して動かす（focas_client / focas_helper）。
+    ダイアログを作っただけではヘルパーを起動しない。起動は「つなぐ」を押したとき。
+    閉じると必ず切る（握ったままにしない）。
+    """
+
+    log_line = QtCore.Signal(str)
+
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.settings = settings
+        self.client = None
+        self._job = None
+        self._busy = False
+        self._busy_quiet = False
+        self._on_ok = None
+        self._on_err = None
+        self._cancel = False
+        self._connected = False
+        self._ident = None
+        self._status = None
+        self._alarms = []
+        self._last_error = None
+        self._session_backup = None      # この回に取った控え (フォルダ, 情報)
+        self._last_backup = None         # 前回までの控え (フォルダ, 情報)
+        self._controllers = []
+        self._report = ""
+        self.setWindowTitle("機械と直接つなぐ（FOCAS）")
+        fit_to_screen(self, 760, 720)
+        v = QtWidgets.QVBoxLayout(self)
+
+        lead = QtWidgets.QLabel(
+            "<b>FOCAS</b>（フォーカス）は、PC から機械（制御装置）をネットワークで直接読む FANUC の仕組みです。"
+            "この画面は<b>読むだけ</b>で、機械には何も書きません。<br>"
+            "<b>上から順に ① → ② → ③ とやってください。</b>"
+            "社内LAN・機械と1対1の配線での利用を想定しています。")
+        lead.setWordWrap(True)
+        lead.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(lead)
+
+        # ① つなぐ
+        box = QtWidgets.QGroupBox("① 機械につなぐ")
+        f = QtWidgets.QFormLayout(box)
+        self.e_host = QtWidgets.QLineEdit(str(settings.get("focas_host", "192.168.1.1")))
+        self.e_host.setPlaceholderText("機械の IP アドレス（例 192.168.1.1）")
+        self.sp_port = QtWidgets.QSpinBox()
+        self.sp_port.setRange(1, 65535)
+        self.sp_port.setValue(int(settings.get("focas_port", 8193)))
+        self.sp_port.setToolTip("FOCAS の決まりの番号は 8193")
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.e_host, 1)
+        row.addWidget(QtWidgets.QLabel("ポート番号"))
+        row.addWidget(self.sp_port)
+        f.addRow("機械の IP アドレス", row)
+        btns = QtWidgets.QHBoxLayout()
+        self.b_connect = QtWidgets.QPushButton("つなぐ")
+        self.b_connect.setObjectName("primary")
+        self.b_connect.clicked.connect(self.connect_machine)
+        self.b_disconnect = QtWidgets.QPushButton("切る")
+        self.b_disconnect.clicked.connect(self.disconnect_machine)
+        self.b_setup = QtWidgets.QPushButton("はじめての設定")
+        self.b_setup.setToolTip("FOCAS 用の Python（32bit）と、FANUC のライブラリ（Fwlib32.dll）の場所を選びます")
+        self.b_setup.clicked.connect(self.first_setup)
+        self.lbl_state = QtWidgets.QLabel("つながっていません")
+        self.lbl_state.setWordWrap(True)
+        btns.addWidget(self.b_connect)
+        btns.addWidget(self.b_disconnect)
+        btns.addWidget(self.b_setup)
+        btns.addWidget(self.lbl_state, 1)
+        f.addRow(hscroll_buttons(btns))
+        v.addWidget(box)
+
+        # 機械の今
+        now = QtWidgets.QGroupBox("機械の今")
+        nv = QtWidgets.QVBoxLayout(now)
+        self.lbl_machine = QtWidgets.QLabel("（つなぐと出ます）")
+        self.lbl_unit = QtWidgets.QLabel("")
+        self.lbl_status = QtWidgets.QLabel("")
+        for w in (self.lbl_machine, self.lbl_unit, self.lbl_status):
+            w.setWordWrap(True)
+            nv.addWidget(w)
+        self.tbl_alarm = QtWidgets.QTableWidget(0, 3)
+        self.tbl_alarm.setHorizontalHeaderLabels(["アラーム", "種類・番号・軸", "文言"])
+        self.tbl_alarm.verticalHeader().setVisible(False)
+        self.tbl_alarm.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_alarm.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_alarm.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_alarm.horizontalHeader().setStretchLastSection(True)
+        self.tbl_alarm.setMinimumHeight(80)
+        nv.addWidget(self.tbl_alarm)
+        ar = QtWidgets.QHBoxLayout()
+        self.b_alarm_help = QtWidgets.QPushButton("対処を見る")
+        self.b_alarm_help.setToolTip("選んだアラームの意味と対処の目安を調べます")
+        self.b_alarm_help.clicked.connect(self.show_alarm_help)
+        ar.addWidget(self.b_alarm_help)
+        ar.addStretch(1)
+        nv.addLayout(ar)
+        self.lbl_writable = QtWidgets.QLabel("")
+        self.lbl_writable.setWordWrap(True)
+        self.lbl_writable.setToolTip("書込の機能はまだ入っていません。判定だけ出しています")
+        nv.addWidget(self.lbl_writable)
+        v.addWidget(now)
+
+        # ② 控えを取る
+        bk = QtWidgets.QGroupBox("② 控え（バックアップ）を取る")
+        bf = QtWidgets.QFormLayout(bk)
+        self.e_backup = QtWidgets.QLineEdit(str(settings.get("focas_backup_dir", "機械バックアップ")))
+        self.e_backup.setPlaceholderText("控えを置くフォルダ（BASIC・製品データのフォルダの中は不可）")
+        brow = QtWidgets.QHBoxLayout()
+        brow.setContentsMargins(0, 0, 0, 0)
+        brow.addWidget(self.e_backup, 1)
+        b_br = QtWidgets.QPushButton("参照…")
+        b_br.clicked.connect(self._browse_backup)
+        brow.addWidget(b_br)
+        bf.addRow("控えの置き場所", brow)
+        self.cmb_unit = QtWidgets.QComboBox()
+        self.cmb_unit.addItem("（号機を決めない）", "")
+        self.cmb_unit.setToolTip(
+            "号機番号は機械から読めません。号機マスタの候補から、人が選びます（黙って決めません）")
+        bf.addRow("号機（フォルダ名に付く）", self.cmb_unit)
+        bb = QtWidgets.QHBoxLayout()
+        self.b_backup = QtWidgets.QPushButton("控えを取る")
+        self.b_backup.setObjectName("primary")
+        self.b_backup.clicked.connect(self.take_backup)
+        self.b_cancel = QtWidgets.QPushButton("中止")
+        self.b_cancel.clicked.connect(self._cancel_job)
+        self.b_open = QtWidgets.QPushButton("フォルダを開く")
+        self.b_open.clicked.connect(self.open_backup_folder)
+        bb.addWidget(self.b_backup)
+        bb.addWidget(self.b_cancel)
+        bb.addWidget(self.b_open)
+        bf.addRow(hscroll_buttons(bb))
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        bf.addRow(self.bar)
+        self.lbl_last = QtWidgets.QLabel("前回の控え: なし")
+        self.lbl_last.setWordWrap(True)
+        self.lbl_check = QtWidgets.QLabel("")
+        self.lbl_check.setWordWrap(True)
+        bf.addRow(self.lbl_last)
+        bf.addRow(self.lbl_check)
+        v.addWidget(bk)
+
+        # ③ すること
+        st = QtWidgets.QGroupBox("③ すること")
+        sh = QtWidgets.QHBoxLayout()
+        self.b_view = QtWidgets.QPushButton("パラメータを見る")
+        self.b_view.setToolTip("取った控えのパラメータを、既存の『パラメータを見る／比較』で開きます")
+        self.b_view.clicked.connect(self.view_params)
+        self.b_progs = QtWidgets.QPushButton("プログラム一覧…")
+        self.b_progs.setEnabled(False)
+        self.b_progs.setToolTip("あとで追加します（今は控えにプログラムが入っています）")
+        self.b_write = QtWidgets.QPushButton("パラメータを書く…")
+        self.b_write.setEnabled(False)
+        self.b_write.setToolTip("まだ作っていません。今は読むだけです")
+        for b in (self.b_view, self.b_progs, self.b_write):
+            sh.addWidget(b)
+        st_l = QtWidgets.QVBoxLayout(st)
+        st_l.addWidget(hscroll_buttons(sh))
+        v.addWidget(st)
+
+        # 診断
+        dg = QtWidgets.QGroupBox("自己診断（読むだけ）")
+        dl = QtWidgets.QVBoxLayout(dg)
+        dr = QtWidgets.QHBoxLayout()
+        self.b_diag = QtWidgets.QPushButton("自己診断")
+        self.b_diag.setToolTip(
+            "機種・状態・アラーム・型情報を読み、パラメータを1つずつ読んで控えと見比べます。\n"
+            "結果は機械の読み方（符号・小数・軸の欄）を確かめるのに使います")
+        self.b_diag.clicked.connect(self.run_self_check)
+        self.chk_full = QtWidgets.QCheckBox("全部の番号を読んで比べる（時間がかかります）")
+        self.b_copy = QtWidgets.QPushButton("結果をコピー")
+        self.b_copy.clicked.connect(self._copy_report)
+        self.b_why = QtWidgets.QPushButton("いまどこで止まっている？")
+        self.b_why.clicked.connect(self.show_diagnosis)
+        for w in (self.b_diag, self.chk_full, self.b_copy, self.b_why):
+            dr.addWidget(w)
+        dl.addWidget(hscroll_buttons(dr))
+        self.diag = QtWidgets.QPlainTextEdit()
+        self.diag.setReadOnly(True)
+        self.diag.setMinimumHeight(110)
+        self.diag.setPlaceholderText("自己診断の結果がここに出ます")
+        dl.addWidget(self.diag)
+        v.addWidget(dg)
+
+        # やり取りの記録（折りたたみ）
+        lg = QtWidgets.QGroupBox("やり取りの記録（命令の名前と戻り値だけ）")
+        lg.setCheckable(True)
+        lg.setChecked(False)
+        ll = QtWidgets.QVBoxLayout(lg)
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(400)
+        self.log.setMinimumHeight(90)
+        self.log.setVisible(False)
+        lg.toggled.connect(self.log.setVisible)
+        ll.addWidget(self.log)
+        v.addWidget(lg)
+        self.log_line.connect(self.log.appendPlainText)
+
+        bbx = QtWidgets.QDialogButtonBox()
+        bbx.addButton("閉じる", QtWidgets.QDialogButtonBox.RejectRole)
+        bbx.rejected.connect(self.reject)
+        v.addWidget(bbx)
+        wrap_long_labels(self)
+        wrap_scrollable(self, keep_bottom=1)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._poll)
+        self._load_controllers()
+        self._refresh_last_backup()
+        self._refresh_enabled()
+
+    # --- 下請け ----------------------------------------------------------------
+
+    def _warn(self, title, text):
+        QtWidgets.QMessageBox.warning(self, title, text)
+
+    def _info(self, title, text):
+        QtWidgets.QMessageBox.information(self, title, text)
+
+    def _load_controllers(self):
+        mpath = self.settings.get("controller_master_csv", "")
+        if mpath and not Path(mpath).is_absolute():
+            mpath = str(app_dir() / mpath)
+        try:
+            self._controllers = controllers.load_controllers(mpath) if mpath else []
+        except Exception:
+            self._controllers = []
+
+    def _root(self):
+        return focas_backup.resolve_root({"focas_backup_dir": self.e_backup.text().strip()})
+
+    def _browse_backup(self):
+        p = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "控えを置くフォルダ", str(self._root()))
+        if p:
+            self.e_backup.setText(p)
+            self._persist()
+            self._refresh_last_backup()
+
+    def _persist(self):
+        """設定を保存する。控えの置き場所が BASIC・製品データのフォルダと重なるなら断る（1回目の確認）。"""
+        root = self.e_backup.text().strip()
+        ok = True
+        try:
+            focas_backup.check_destination(self._root(), self.settings)
+            self.settings["focas_backup_dir"] = root
+        except focas_backup.BackupError as e:
+            ok = False
+            self._warn("控えの置き場所", str(e))
+            self.e_backup.setText(str(self.settings.get("focas_backup_dir", "機械バックアップ")))
+        self.settings["focas_host"] = self.e_host.text().strip()
+        self.settings["focas_port"] = self.sp_port.value()
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        return ok
+
+    def _log(self, text):
+        self.log_line.emit(text)
+
+    def _ensure_client(self):
+        if self.client is None:
+            self.client = focas_client.make_client(
+                self.settings, log_path=str(app_dir() / "focas_helper.log"))
+            self.client.on_log = self._log
+        return self.client
+
+    # --- 別スレッドで命令する --------------------------------------------------
+
+    def _run(self, fn, on_ok, on_err=None, quiet=False):
+        """fn(progress) を別スレッドで実行する。同時に1つだけ。"""
+        if self._busy:
+            if self._busy_quiet:        # 状態の読み直しの最中なら、少し待ってやり直す
+                QtCore.QTimer.singleShot(150, lambda: self._run(fn, on_ok, on_err, quiet))
+            return False
+        self._busy, self._busy_quiet = True, quiet
+        self._on_ok, self._on_err = on_ok, on_err
+        job = _FocasJob(fn, self)
+        job.finished_ok.connect(self._job_ok)
+        job.failed.connect(self._job_failed)
+        job.progress.connect(self._job_progress)
+        self._job = job
+        if not quiet:
+            self._refresh_enabled()
+        job.start()
+        return True
+
+    def _job_done(self):
+        job, self._job = self._job, None
+        if job is not None:
+            job.wait(5000)
+            job.deleteLater()
+        quiet = self._busy_quiet
+        self._busy = False
+        self._busy_quiet = False
+        if not quiet:
+            self._refresh_enabled()
+
+    @QtCore.Slot(object)
+    def _job_ok(self, result):
+        cb = self._on_ok
+        self._job_done()
+        if cb:
+            cb(result)
+
+    @QtCore.Slot(object)
+    def _job_failed(self, err):
+        cb = self._on_err
+        self._job_done()
+        self._handle_error(err)
+        if cb:
+            cb(err)
+
+    @QtCore.Slot(int, int, str)
+    def _job_progress(self, done, total, note):
+        self.bar.setRange(0, max(1, total))
+        self.bar.setValue(min(done, max(1, total)))
+        self.bar.setFormat(f"{note}  %v / %m")
+
+    def _handle_error(self, err):
+        if isinstance(err, focas_client.FocasError):
+            self._last_error = str(err)
+            self.lbl_state.setText(str(err))
+            self.lbl_state.setStyleSheet("color:#b91c1c; font-weight:bold;")
+            if err.kind in ("lost", "timeout", "connect", "no_python", "no_helper", "not_32bit",
+                            "no_dll", "helper_old", "protocol", "not_connected"):
+                self._set_connected(False)
+        elif isinstance(err, focas_backup.BackupError):
+            self._last_error = str(err)
+            self._warn("控えの置き場所", str(err))
+        else:
+            self._last_error = f"{type(err).__name__}: {err}"
+            self.lbl_state.setText("想定外のエラー: " + self._last_error)
+            self.lbl_state.setStyleSheet("color:#b91c1c; font-weight:bold;")
+
+    def _refresh_enabled(self):
+        idle = not self._busy
+        c = self._connected
+        self.b_connect.setEnabled(idle and not c)
+        self.b_disconnect.setEnabled(idle and c)
+        self.b_setup.setEnabled(idle and not c)
+        self.e_host.setEnabled(not c)
+        self.sp_port.setEnabled(not c)
+        self.b_backup.setEnabled(idle and c)
+        self.b_cancel.setEnabled(self._busy and not self._busy_quiet)
+        self.b_diag.setEnabled(idle and c)
+        self.chk_full.setEnabled(idle and c)
+        self.b_view.setEnabled(idle and self._best_backup() is not None)
+        self.b_open.setEnabled(self._best_backup() is not None)
+        self.b_alarm_help.setEnabled(c)
+
+    def _set_connected(self, ok):
+        self._connected = ok
+        if ok:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self._ident = None
+            self._status = None
+            self._alarms = []
+            self.lbl_machine.setText("（つなぐと出ます）")
+            self.lbl_unit.setText("")
+            self.lbl_status.setText("")
+            self.tbl_alarm.setRowCount(0)
+            self.lbl_writable.setText("")
+            self.lbl_writable.setStyleSheet("")
+        self._refresh_enabled()
+
+    # --- ① つなぐ・切る ----------------------------------------------------------
+
+    def connect_machine(self):
+        host = self.e_host.text().strip()
+        if not host:
+            self._warn("つなぐ", "機械の IP アドレスを入れてください")
+            return
+        self._persist()
+        client = self._ensure_client()
+        port, timeout = self.sp_port.value(), int(self.settings.get("focas_timeout", 10))
+        families = dict(self.settings.get("focas_families") or {})
+        self.lbl_state.setText("つないでいます…")
+        self.lbl_state.setStyleSheet("")
+
+        def work(progress):
+            client.call("connect", {"host": host, "port": port, "timeout": timeout,
+                                    "families": families})
+            return (client.call("identify"), client.call("status"), client.call("alarms"))
+
+        self._run(work, self._connected_ok)
+
+    def _connected_ok(self, res):
+        ident, status, alarms = res
+        self._ident = ident
+        self._set_connected(True)
+        self.lbl_state.setText(f"つながりました（{self.e_host.text().strip()}:{self.sp_port.value()}）")
+        self.lbl_state.setStyleSheet("color:#166534; font-weight:bold;")
+        axes = " ".join(ident.get("axis_names") or []) or "読めず"
+        self.lbl_machine.setText(
+            f"機種 {ident['cnc_type']}i {ident['mt_type']}　系列 {ident['series']}　版 {ident['version']}"
+            f"　軸 {ident.get('axes')}（{axes}）<br>CNC ID {ident.get('cnc_id')}"
+            + ("" if ident.get("supported") else
+               "<br><b>この機種はまだ対応していません（状態の確認だけできます）</b>"))
+        self.lbl_machine.setTextFormat(QtCore.Qt.RichText)
+        cands = focas_backup.unit_candidates(ident, self._controllers)
+        self.cmb_unit.clear()
+        self.cmb_unit.addItem("（号機を決めない）", "")
+        for u in cands:
+            self.cmb_unit.addItem(f"号機{u}", u)
+        self.lbl_unit.setText(
+            ("号機マスタでは " + "・".join(f"号機{u}" for u in cands) + " とみられます"
+             "（号機番号は機械から読めないので、合っているか確かめて、②で選んでください）")
+            if cands else "号機マスタに当てはまる号機が見つかりません")
+        self._session_backup = None
+        self._refresh_last_backup()
+        self._show_state(status, alarms)
+
+    def disconnect_machine(self):
+        client = self.client
+
+        def work(progress):
+            if client is not None:
+                client.call("disconnect")
+            return None
+
+        def done(_):
+            self._set_connected(False)
+            self.lbl_state.setText("切りました")
+            self.lbl_state.setStyleSheet("")
+        self._run(work, done)
+
+    def _show_state(self, status, alarms):
+        self._status = status
+        self._alarms = alarms.get("alarms", []) if isinstance(alarms, dict) else list(alarms)
+        v, t = status["values"], status["text"]
+        self.lbl_status.setText(
+            f"モード {t['aut']}（生の値 {v['aut']}）／運転 {t['run']}（{v['run']}）／"
+            f"動作 {t['motion']}（{v['motion']}）／非常停止 {t['emergency']}（{v['emergency']}）／"
+            f"アラーム信号 {t['alarm']}（{v['alarm']}）")
+        self.tbl_alarm.setRowCount(len(self._alarms))
+        for i, a in enumerate(self._alarms):
+            for j, txt in enumerate((a["code"], f"{a['type']}・{a['no']}・{a['axis']}", a["text"])):
+                self.tbl_alarm.setItem(i, j, QtWidgets.QTableWidgetItem(str(txt)))
+        self.tbl_alarm.resizeColumnsToContents()
+        self.tbl_alarm.horizontalHeader().setStretchLastSection(True)
+        self._show_writable()
+
+    def _show_writable(self):
+        """「書ける？」の帯。書込の機能はまだ無い。判定だけ出す。"""
+        if self._status is None:
+            return
+        info = self._session_backup[1] if self._session_backup else None
+        w = focas_ops.writable_state(
+            self._status, self._alarms,
+            allowed_alarms=tuple(self.settings.get("focas_allowed_alarms") or ("SW0100",)),
+            backup_info=info, cnc_id=(self._ident or {}).get("cnc_id"))
+        if w["ok"]:
+            self.lbl_writable.setText("書ける？ ― いま書けます（※書込の機能はまだ入っていません）")
+            self.lbl_writable.setStyleSheet(
+                "background:#dcfce7; color:#166534; padding:6px; font-weight:bold;"
+                "border:1px solid #86efac; border-radius:4px;")
+        else:
+            self.lbl_writable.setText("書ける？ ― 書けません: " + " ／ ".join(w["reasons"]))
+            self.lbl_writable.setStyleSheet(
+                "background:#fef2f2; color:#b91c1c; padding:6px;"
+                "border:1px solid #fecaca; border-radius:4px;")
+
+    def _poll(self):
+        """状態を2秒ごとに読み直す（重い処理の間は読まない）。"""
+        client = self.client
+        if self._busy or not self._connected or client is None:
+            return
+
+        def work(progress):
+            return (client.call("status"), client.call("alarms"))
+
+        self._run(work, lambda r: self._show_state(*r), quiet=True)
+
+    # --- ② 控え ---------------------------------------------------------------------
+
+    def _best_backup(self):
+        return self._session_backup or self._last_backup
+
+    def _refresh_last_backup(self):
+        cid = (self._ident or {}).get("cnc_id")
+        found = focas_backup.latest_backup(self._root(), cid) if cid else None
+        self._last_backup = found
+        if found:
+            folder, info = found
+            self.lbl_last.setText(
+                f"前回の控え: {info.get('taken_at')}（{'完全' if info.get('complete') else '不完全'}）"
+                f"　{folder}")
+        else:
+            self.lbl_last.setText("前回の控え: なし" if cid else "前回の控え: （つなぐと探します）")
+        self._refresh_enabled()
+
+    def take_backup(self):
+        if not self._connected or self.client is None:
+            return
+        if not self._persist():             # 置き場所が不適切なら、前の場所へ黙って取らずに止める
+            return
+        try:
+            focas_backup.check_destination(self._root(), self.settings)        # 2回目の確認
+        except focas_backup.BackupError as e:
+            self._warn("控えの置き場所", str(e))
+            return
+        client, root = self.client, self._root()
+        unit = self.cmb_unit.currentData() or ""
+        host, port = self.e_host.text().strip(), self.sp_port.value()
+        ctls = self._controllers
+        self._cancel = False
+        self.lbl_check.setText("控えを取っています…（機械は読むだけです）")
+        self.lbl_check.setStyleSheet("")
+
+        def work(progress):
+            return focas_backup.take_backup(
+                client, root, self.settings, purpose="手動", unit=unit, host=host, port=port,
+                controllers=ctls, cancel=lambda: self._cancel, progress=progress)
+
+        self._run(work, self._backup_ok, self._backup_failed)
+
+    def _backup_ok(self, res):
+        self._session_backup = (res.folder, res.info)
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        self.bar.setFormat("終わりました")
+        if res.complete:
+            self.lbl_check.setText(f"点検 OK ― 控えは完全です。{res.folder}")
+            self.lbl_check.setStyleSheet("color:#166534; font-weight:bold;")
+        else:
+            self.lbl_check.setText("点検の指摘があります（控えは不完全です）:<br>・"
+                                   + "<br>・".join(res.problems[:8]))
+            self.lbl_check.setTextFormat(QtCore.Qt.RichText)
+            self.lbl_check.setStyleSheet("color:#b91c1c;")
+        self._refresh_last_backup()
+        self._show_writable()
+
+    def _backup_failed(self, err):
+        self.bar.setFormat("止まりました")
+        self.lbl_check.setText(f"控えは途中で止まりました: {err}")
+        self.lbl_check.setStyleSheet("color:#b91c1c;")
+        self._refresh_last_backup()
+
+    def _cancel_job(self):
+        self._cancel = True
+
+    def open_backup_folder(self):
+        b = self._best_backup()
+        folder = b[0] if b else self._root()
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+
+    # --- ③ ----------------------------------------------------------------------------
+
+    def view_params(self):
+        b = self._best_backup()
+        if not b:
+            return
+        p = Path(b[0]) / "パラメータ.DAT"
+        if not p.is_file():
+            self._warn("パラメータを見る", "この控えにパラメータがありません")
+            return
+        ParamViewerDialog(self, self.settings, file_a=str(p)).exec()
+
+    def show_alarm_help(self):
+        dlg = AlarmHelpDialog(self, self.settings)
+        row = self.tbl_alarm.currentRow()
+        if 0 <= row < len(self._alarms):
+            dlg.e_query.setText(self._alarms[row]["code"])
+        dlg.exec()
+
+    # --- 診断 --------------------------------------------------------------------------
+
+    def run_self_check(self):
+        if not self._connected or self.client is None:
+            return
+        client = self.client
+        b = self._best_backup()
+        folder = b[0] if b and (Path(b[0]) / "パラメータ.DAT").is_file() else None
+        full = self.chk_full.isChecked()
+        self.diag.setPlainText("自己診断をしています…（読むだけです）")
+
+        def work(progress):
+            return focas_ops.self_check(client, folder, full=full, progress=progress)
+
+        self._run(work, self._diag_ok, lambda e: self.diag.setPlainText(f"止まりました: {e}"))
+
+    def _diag_ok(self, lines):
+        self._report = focas_ops.format_report(lines)
+        self.diag.setPlainText(self._report)
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        self.bar.setFormat("終わりました")
+
+    def _copy_report(self):
+        QtWidgets.QApplication.clipboard().setText(self._report or self.diag.toPlainText())
+
+    def show_diagnosis(self):
+        head, todo = focas_ops.diagnose(self.client, self.settings, self._last_error)
+        msg = head + ("\n\n次に見るところ:\n・" + "\n・".join(todo) if todo else "")
+        self._info("いまどこで止まっている？", msg)
+
+    def first_setup(self):
+        """32bit Python と Fwlib32.dll のフォルダを選ぶ（ダイアログを足さずに順に聞く）。"""
+        cur = focas_client.resolve_python32(str(self.settings.get("focas_python32") or ""))
+        self._info("はじめての設定",
+                   "FOCAS には 32bit 版の Python と、FANUC のライブラリ（Fwlib32.dll、"
+                   "SERVO GUIDE に付属）が要ります。\n\n"
+                   f"いま見つかっている Python: {cur or 'なし'}\n\nこのあと順に場所を聞きます"
+                   "（キャンセルすると今のままです）。")
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "32bit 版の python.exe を選ぶ", cur or "", "python.exe (python*.exe);;すべて (*.*)")
+        if p:
+            self.settings["focas_python32"] = p
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Fwlib32.dll のあるフォルダを選ぶ（空のままなら自動で探します）",
+            str(self.settings.get("focas_dll_dir") or r"C:\Program Files (x86)\FANUC SERVO GUIDE"))
+        if d:
+            self.settings["focas_dll_dir"] = d
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        if self.client is not None and not self._connected:
+            self.client.close()
+            self.client = None
+
+    # --- 閉じる ------------------------------------------------------------------------
+
+    def _shutdown(self):
+        """閉じたら必ず切る（握ったままにしない）。命令の最中なら、ヘルパーを止めて待つ。"""
+        self._timer.stop()
+        self._cancel = True
+        client = self.client
+        if self._job is not None and client is not None:
+            client.abort()
+            self._job.wait(8000)
+        if client is not None:
+            client.close()
+        self.client = None
+        self._connected = False
+
+    def closeEvent(self, event):
+        self._shutdown()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._shutdown()
         super().reject()
 
 
@@ -7895,6 +8574,8 @@ class MainWindow(QtWidgets.QMainWindow):
              "FANUCのアラーム番号・メッセージから意味と対処の目安を調べる"),
             ("FTPサーバー…", self.show_ftp_server,
              "このPCをFTPサーバーにして、カード無しで制御装置にファイルを取りに来させる"),
+            ("機械と直接つなぐ（FOCAS）…", self.show_focas,
+             "PCから機械を直接読み、控え（バックアップ）を取る。読むだけで、機械には何も書かない"),
         ):
             act = tools_menu.addAction(text)
             act.setToolTip(tip)
@@ -9191,6 +9872,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_ftp_server(self):
         """このPCをFTPサーバーにして、制御装置に直接ファイルを取りに来させる。"""
         FtpServerDialog(self, self.settings).exec()
+
+    def show_focas(self):
+        """PCから機械を直接読む（FOCAS）。つなぐ・状態・控え・自己診断。"""
+        FocasDialog(self, self.settings).exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)

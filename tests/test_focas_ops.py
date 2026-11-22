@@ -233,5 +233,118 @@ class TestDiagnose(unittest.TestCase):
         self.assertIn("なにか", head)
 
 
+class TestSelfCheckUnreadValues(unittest.TestCase):
+    """A-2: 「読めず」が1つでもあれば OK にしない。全部読めなければ NG、一部なら「一部読めず」。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.settings = copy.deepcopy(DEFAULTS)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def backed_up(self):
+        c = DirectClient().connect()
+        r = B.take_backup(c, self.root, self.settings)
+        return c, r.folder
+
+    def a1(self, c, folder, **kw):
+        return next(l for l in O.self_check(c, folder, **kw) if "A1" in l["title"])
+
+    def test_nothing_read_is_ng_and_never_says_it_matches(self):
+        c, folder = self.backed_up()
+        c.lib.sc["force_rc"] = {"cnc_rdparam": 3}
+        a1 = self.a1(c, folder)
+        self.assertEqual(a1["level"], "ng")
+        self.assertIn("全部読めませんでした", a1["title"])
+        self.assertIn("一致 0", a1["title"])
+        self.assertNotIn("合っています", "\n".join(a1["lines"]))
+        self.assertTrue(O.report_has_ng(O.self_check(c, folder)))
+
+    def test_some_unread_is_warn_not_ok(self):
+        c, folder = self.backed_up()
+        orig = c.lib._cnc_rdparam
+
+        def some(h, no, axis, length, buf):
+            if no.value == 20:
+                return 3
+            return orig(h, no, axis, length, buf)
+        c.lib.cnc_rdparam.impl = some
+        a1 = self.a1(c, folder)
+        self.assertEqual(a1["level"], "warn")
+        self.assertIn("一部読めず", a1["title"])
+        self.assertIn("読めず", " ".join(a1["lines"]))
+        self.assertGreater(int(a1["title"].split("一致 ")[1].split("・")[0]), 0)
+        # 一致したものがあるときだけ「合っています」が出る（読めた分だけ、と断る）
+        self.assertIn("合っています", "\n".join(a1["lines"]))
+        self.assertIn("読めた", "\n".join(a1["lines"]))
+
+    def test_all_matching_is_ok_and_says_so(self):
+        c, folder = self.backed_up()
+        a1 = self.a1(c, folder)
+        self.assertEqual(a1["level"], "ok")
+        self.assertIn("合っています", "\n".join(a1["lines"]))
+
+    def test_different_value_is_still_ng(self):
+        c, folder = self.backed_up()
+        orig = c.lib._cnc_rdparam
+
+        def wrong(h, no, axis, length, buf):
+            rc = orig(h, no, axis, length, buf)
+            if rc == 0 and no.value == 20:
+                import ctypes
+                import struct
+                ctypes.memmove(buf, struct.pack("<hhb", no.value, axis.value, 99), 5)
+            return rc
+        c.lib.cnc_rdparam.impl = wrong
+        a1 = self.a1(c, folder)
+        self.assertEqual(a1["level"], "ng")
+        self.assertNotIn("合っています", "\n".join(a1["lines"]))
+
+
+class TestSelfCheckOtherModels(unittest.TestCase):
+    """B-5: 31i 以外では状態を 31i の並びで日本語にしない。"""
+
+    def test_status_is_raw_only_on_an_unsupported_model(self):
+        c = DirectClient({"cnc_type": "0", "status": {"aut": 1, "run": 3}})
+        c.connect()
+        out = O.self_check(c)
+        st = next(l for l in out if "状態の数値" in l["title"])
+        self.assertIn("生の数値だけ", st["title"])
+        self.assertIn("run=3", st["lines"][0])
+        text = "\n".join(st["lines"])
+        for word in ("運転中", "メモリ", "読み:"):
+            self.assertNotIn(word, text)
+
+
+class TestUserFacingWords(unittest.TestCase):
+    """C: 利用者向けの文に「ヘルパー」「SHA-256」「JSON」を説明なしで出さない。"""
+
+    def test_helper_is_always_explained_in_messages(self):
+        for kind in ("internal", "protocol", "no_helper", "helper_old"):
+            msg, hint = C.describe({"kind": kind, "message": ""})
+            if "ヘルパー" in msg:
+                self.assertIn("機械と話す小さなプログラム", msg, kind)
+        msg, hint = O.diagnose(None, {"focas_python32": sys.executable,
+                                      "focas_helper_path": r"C:\ない\h.py"})
+        self.assertIn("機械と話す小さなプログラム", msg)
+
+    def test_diagnose_wording(self):
+        head, todo = O.diagnose(None, {"focas_python32": sys.executable,
+                                       "focas_helper_path": __file__})
+        self.assertNotIn("ヘルパー", head)
+
+    def test_no_bare_jargon_in_messages(self):
+        for err in ({"kind": "protocol", "message": ""}, {"kind": "internal", "message": ""}):
+            msg, hint = C.describe(err)
+            self.assertNotIn("JSON", msg + hint)
+            self.assertNotIn("SHA", msg + hint)
+        with self.assertRaises(C.FocasError) as cm:
+            C.FocasClient.decode_data({"data": "AAAA", "sha256": "x", "size": 3})
+        self.assertNotIn("SHA", cm.exception.message)
+        self.assertIn("指紋", cm.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,8 @@ INFO_NAME = "控え_情報.json"
 TABLE_NAME = "控え表.txt"
 TYPES_NAME = "型情報.csv"
 PROGRAM_DIR = "プログラム"
+SUBDIR_END_RC = 0       # フォルダ一覧の正常な終わり（実機 31i の記録）
+ALLDIR_END_RC = 3       # プログラム一覧の正常な終わり
 
 # (命令の種別, 保存するファイル名, 必須か)。ワーク原点オフセットは戻り値 6 で読めなかった【事実】
 DUMPS = (
@@ -48,9 +50,39 @@ def _norm(p):
     return s.rstrip("\\/") or s
 
 
+def _variants(p):
+    """同じ場所の別の書き方（書いたまま・realpath で本当の場所に直したもの）。
+    割当ドライブ・subst・ジャンクション・シンボリックリンク・短い名前（PROGRA~1）は
+    realpath が本当の場所に直す。割当ドライブは UNC（\\\\サーバー\\共有）の形に直ることがある。"""
+    raw = os.path.expanduser(str(p))
+    out = [_norm(raw)]
+    try:
+        out.append(_norm(os.path.realpath(raw)))
+    except (OSError, ValueError):
+        pass
+    return out
+
+
 def _inside(child, parent):
-    c, p = _norm(child), _norm(parent)
-    return c == p or c.startswith(p + os.sep)
+    """child が parent と同じ場所か、その中か。名前の比べ・realpath・samefile の3通りで見る。
+    UNC と割当ドライブは、realpath が同じ形に直せた範囲で一致する（直せなければ別の場所と見る）。"""
+    for c in _variants(child):
+        for p in _variants(parent):
+            if c == p or c.startswith(p + os.sep):
+                return True
+    # 実在するなら、ファイルシステムが「同じ場所」と言うかで見る（名前の書き方によらない）
+    try:
+        if os.path.exists(parent):
+            cur = Path(os.path.abspath(os.path.expanduser(str(child))))
+            for a in (cur, *cur.parents):
+                try:
+                    if a.exists() and os.path.samefile(a, parent):
+                        return True
+                except OSError:
+                    continue
+    except (OSError, ValueError):
+        pass
+    return False
 
 
 def resolve_root(settings):
@@ -135,7 +167,8 @@ def _safe_rel(path):
 
 
 class BackupResult:
-    def __init__(self, folder, complete, problems, info):
+    def __init__(self, folder, complete, problems, info, warnings=()):
+        self.warnings = list(warnings)
         self.folder = folder
         self.complete = complete
         self.problems = problems
@@ -165,7 +198,7 @@ def take_backup(client, root, settings, *, purpose="手動", unit="", host="", p
     check_destination(folder, settings)            # 書く直前にもう一度（2回目）
     folder.mkdir(parents=True)
 
-    files, unread, problems = {}, {}, []
+    files, unread, problems, warnings = {}, {}, [], []
     info = {
         "source": SOURCE, "purpose": purpose,
         "taken_at": time.strftime("%Y-%m-%d %H:%M:%S", stamp),
@@ -194,7 +227,13 @@ def take_backup(client, root, settings, *, purpose="手動", unit="", host="", p
     try:
         info["program_info"] = client.call("prog_info")
         tick("プログラムの登録数")
-        types = client.call("param_info")["types"]
+        pinfo = client.call("param_info")
+        types = pinfo["types"]
+        if pinfo.get("complete") is False:
+            problems.append(
+                f"型情報を最後まで読めませんでした（最後の戻り値 {pinfo.get('last_rc')}、"
+                f"次の番号 {pinfo.get('next_no')}）")
+            info["types_end"] = {"last_rc": pinfo.get("last_rc"), "next_no": pinfo.get("next_no")}
         with open(folder / TYPES_NAME, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
             w.writerow(["番号", "型コード"])
@@ -235,12 +274,21 @@ def take_backup(client, root, settings, *, purpose="手動", unit="", host="", p
             if not nums:
                 problems.append("パラメータの番号が1つも読めません")
 
-        listed, saved = [], 0
+        listed, saved, n_folders, list_rcs = [], 0, 0, []
         if not cancelled:
             tree = client.call("prog_list", {"path": "//CNC_MEM/", "recursive": True})["tree"]
             for t in tree:
                 for pr in t["programs"]:
                     listed.append(t["path"] + pr["name"])
+                n_folders += len(t.get("folders") or [])
+                rs, ra = t.get("rc_sub"), t.get("rc_all")
+                list_rcs.append({"path": t["path"], "rc_sub": rs, "rc_all": ra})
+                # 正常な終わりは subdir が 0（件数 0）・alldir が 3 だけ（実機の記録）
+                if rs != SUBDIR_END_RC or ra != ALLDIR_END_RC:
+                    problems.append(
+                        f"プログラムの一覧を最後まで読めませんでした: {t['path']}"
+                        f"（フォルダ一覧の戻り値 {rs}・プログラム一覧の戻り値 {ra}。"
+                        f"正常な終わりは {SUBDIR_END_RC} と {ALLDIR_END_RC}）")
             for i, path in enumerate(listed):
                 if stop():
                     cancelled = True
@@ -260,7 +308,15 @@ def take_backup(client, root, settings, *, purpose="手動", unit="", host="", p
                 save(_safe_rel(path), data)
                 saved += 1
                 prog(total_steps + i + 1, total_steps + len(listed), path)
-        info["programs"] = {"listed": len(listed), "saved": saved, "paths": listed}
+        info["programs"] = {"listed": len(listed), "saved": saved, "paths": listed,
+                            "folders": n_folders, "list_rcs": list_rcs}
+        reg = (info.get("program_info") or {}).get("registered")
+        if not cancelled and isinstance(reg, int) and reg != len(listed) + n_folders:
+            warnings.append(
+                f"登録本数 {reg} と、たどった数（プログラム {len(listed)} 本 + フォルダ "
+                f"{n_folders} 個 = {len(listed) + n_folders}）が合いません。"
+                "登録本数はプログラムとフォルダの数とみられます（目安で、不完全とはしていません）。"
+                "読み漏れが無いか確かめてください")
         if not cancelled and saved != len(listed):
             problems.append(f"プログラムの本数が合いません（一覧 {len(listed)} 本・保存 {saved} 本）")
     except C.FocasError as e:
@@ -268,17 +324,18 @@ def take_backup(client, root, settings, *, purpose="手動", unit="", host="", p
         info["aborted"] = e.message
         if e.kind not in ("lost", "timeout", "not_connected"):
             info["aborted_kind"] = e.kind
-        _finish(folder, info, files, unread, problems, False)
+        _finish(folder, info, files, unread, problems, False, warnings)
         raise
     if cancelled:
         problems.append("途中で中止しました")
     complete = not problems
-    _finish(folder, info, files, unread, problems, complete)
-    return BackupResult(folder, complete, problems, info)
+    _finish(folder, info, files, unread, problems, complete, warnings)
+    return BackupResult(folder, complete, problems, info, warnings)
 
 
-def _finish(folder, info, files, unread, problems, complete):
+def _finish(folder, info, files, unread, problems, complete, warnings=()):
     info["files"] = files
+    info["warnings"] = list(warnings)
     info["unread"] = unread
     info["problems"] = problems
     info["complete"] = bool(complete)
@@ -308,6 +365,10 @@ def table_text(info):
     if info.get("problems"):
         lines.append("点検の指摘:")
         lines += [f"  ・{p}" for p in info["problems"]]
+        lines.append("")
+    if info.get("warnings"):
+        lines.append("注意（不完全とはしていません）:")
+        lines += [f"  ・{p}" for p in info["warnings"]]
         lines.append("")
     if info.get("unread"):
         lines.append("読めなかったもの:")

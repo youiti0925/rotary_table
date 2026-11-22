@@ -359,5 +359,152 @@ class TestResolve(unittest.TestCase):
         self.assertIsNone(c.pid)
 
 
+class TestHelperLog(Base):
+    """B-3: focas_helper.log に、命令名・戻り値・ヘルパーのトレースバックが残る。上限もある。"""
+
+    def test_commands_and_return_values_are_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.client({"force_rc": {"cnc_rdparam": 7}}, log_path=log)
+            c.call("connect", {"host": "127.0.0.1", "port": 8193, "timeout": 1})
+            c.call("param_info")
+            with self.assertRaises(C.FocasError):
+                c.call("param_read", {"no": 20})
+            text = Path(log).read_text(encoding="utf-8")
+            self.assertIn("→ connect", text)
+            self.assertIn("← connect OK", text)
+            self.assertIn("× param_read kind=focas func=cnc_rdparam rc=7", text)
+            self.assertNotIn("127.0.0.1", text)                 # 命令の中身（args）は書かない
+            self.assertRegex(text, r"(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d ")
+
+    def test_helper_traceback_reaches_the_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.connected({"raise_in": "cnc_statinfo"}, log_path=log)
+            with self.assertRaises(C.FocasError) as cm:
+                c.call("status")
+            self.assertEqual(cm.exception.kind, "internal")
+            self.assertIn("focas_helper.log", cm.exception.hint)
+            deadline = time.monotonic() + 5
+            text = ""
+            while time.monotonic() < deadline:
+                text = Path(log).read_text(encoding="utf-8")
+                if "RuntimeError" in text:
+                    break
+                time.sleep(0.05)
+            self.assertIn("Traceback", text)
+            self.assertIn("RuntimeError", text)
+            self.assertIn("cmd=status", text)
+
+    def test_log_is_capped(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "focas_helper.log")
+            c = self.client(log_path=log)
+            for i in range(200):
+                c._append_log("x" * 2000)                      # 約 400KB
+            self.assertTrue(os.path.exists(log))
+            self.assertTrue(os.path.exists(log + ".1"))        # 上限を超えたら古い方を回す
+            self.assertLessEqual(os.path.getsize(log), C.LOG_MAX_BYTES + 3000)
+            for i in range(2000):
+                c._append_log("y" * 2000)
+            self.assertLessEqual(os.path.getsize(log), C.LOG_MAX_BYTES + 3000)
+            self.assertLessEqual(os.path.getsize(log + ".1"), C.LOG_MAX_BYTES + 3000)
+
+    def test_no_log_path_is_fine(self):
+        c = self.client()
+        c._append_log("何も起きない")
+
+
+class TestTimeouts(unittest.TestCase):
+    """B-6: 接続はクライアントの待ち時間を「設定の時間 + 余裕」に。プログラム1本はクライアントを長く。"""
+
+    def test_connect_timeout_follows_setting_plus_margin(self):
+        c = C.make_client({"focas_timeout": 20})
+        self.assertEqual(c.timeouts["connect"], 20 + C.CONNECT_MARGIN)
+        c = C.make_client({})
+        self.assertEqual(c.timeouts["connect"], 10 + C.CONNECT_MARGIN)
+        c = C.make_client({"focas_timeout": "abc"})
+        self.assertEqual(c.timeouts["connect"], 10 + C.CONNECT_MARGIN)
+        self.assertGreater(C.make_client({"focas_timeout": 3}).timeouts["connect"], 3)
+
+    def test_client_waits_longer_than_helper_for_a_program(self):
+        from nd287_app import focas_helper as H
+        c = C.make_client({})
+        self.assertGreater(c.timeouts["prog_read"], H.PROG_READ_LIMIT)
+        self.assertEqual((H.PROG_READ_LIMIT, c.timeouts["prog_read"]), (60, 75))
+        self.assertGreater(c.timeouts["param_dump"], H.PARAM_DUMP_LIMIT)
+
+
+class TestAbort(Base):
+    """B-10: abort() の後は、call() がヘルパーを起動し直さない。"""
+
+    def test_call_after_abort_does_not_restart_the_helper(self):
+        c = self.connected()
+        c.abort()
+        self.assertFalse(c.alive)
+        import unittest.mock as mock
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("起動してはいけない")):
+            with self.assertRaises(C.FocasError) as cm:
+                c.call("status")
+        self.assertEqual(cm.exception.kind, "aborted")
+        with self.assertRaises(C.FocasError):
+            c.start()
+        self.assertFalse(c.alive)
+        c.close()                                               # 何度閉じてもよい
+
+    def test_abort_during_a_call_ends_it_and_next_call_does_not_restart(self):
+        c = self.connected({"hang_in": "cnc_statinfo"}, )
+        result = {}
+
+        def run():
+            try:
+                c.call("status", timeout=30)
+            except C.FocasError as e:
+                result["e"] = e
+        t = threading.Thread(target=run)
+        t.start()
+        time.sleep(0.5)
+        c.abort()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertIn(result["e"].kind, ("lost", "protocol", "aborted"))
+        with self.assertRaises(C.FocasError) as cm:
+            c.call("status")
+        self.assertEqual(cm.exception.kind, "aborted")
+
+
+class TestResolveNextToExe(unittest.TestCase):
+    """B-4: exe にしたとき、ヘルパー（focas_helper.py）は exe の隣を探す。"""
+
+    def test_helper_next_to_a_frozen_exe_is_found(self):
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "focas_helper.py").write_text("# x", encoding="utf-8")
+            exe = Path(d) / "nd287_bunkatsu.exe"
+            exe.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(sys, "executable", str(exe)):
+                self.assertEqual(Path(C.resolve_helper("")).resolve(),
+                                 (Path(d) / "focas_helper.py").resolve())
+
+    def test_frozen_without_helper_next_to_it_falls_back_to_package_folder(self):
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "nd287_bunkatsu.exe"
+            exe.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(sys, "executable", str(exe)):
+                got = C.resolve_helper("")
+            self.assertTrue(got == "" or got.endswith("focas_helper.py"))
+            self.assertNotEqual(Path(got).resolve().parent, Path(d).resolve()) if got else None
+
+    def test_build_script_copies_the_helper_next_to_the_exe(self):
+        bat = (Path(__file__).resolve().parent.parent / "exeを作る.bat").read_text(encoding="utf-8")
+        self.assertIn("nd287_app\\focas_helper.py", bat)
+        self.assertIn("dist\\focas_helper.py", bat)
+        self.assertLess(bat.index("PyInstaller"), bat.index("copy /y"))
+        self.assertIn("focas_helper.py", bat.split("完成:")[1])
+
+
 if __name__ == "__main__":
     unittest.main()

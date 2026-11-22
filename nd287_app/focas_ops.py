@@ -123,13 +123,18 @@ def self_check(client, backup_folder=None, *, full=False, progress=None):
         out.append(_line("warn", "ここで止めました",
                          "この機種は読む手順を作っていないので、状態の確認だけにしました"))
     st = client.call("status")
-    v, t = st["values"], st["text"]
-    out.append(_line(
-        "info", "状態の数値（A3: 運転中・一時停止・非常停止の数値は未確認）",
-        "  ".join(f"{k}={v[k]}" for k in v),
-        f"読み: モード {t['aut']} / 運転 {t['run']} / 動作 {t['motion']} / 非常停止 {t['emergency']}"
-        f" / アラーム {t['alarm']}",
-        "機械をメモリ運転中・一時停止・非常停止・各モードにして、そのつど読み直すと表が確かめられます"))
+    v, t = st["values"], st.get("text") or {}
+    if st.get("interpreted", True) and t:
+        out.append(_line(
+            "info", "状態の数値（A3: 運転中・一時停止・非常停止の数値は未確認）",
+            "  ".join(f"{k}={v[k]}" for k in v),
+            f"読み: モード {t['aut']} / 運転 {t['run']} / 動作 {t['motion']} / 非常停止 {t['emergency']}"
+            f" / アラーム {t['alarm']}",
+            "機械をメモリ運転中・一時停止・非常停止・各モードにして、そのつど読み直すと表が確かめられます"))
+    else:
+        out.append(_line(
+            "info", "状態の数値（この機種は読み方の表が未確認なので、生の数値だけ）",
+            "  ".join(f"{k}={v[k]}" for k in v)))
     al = client.call("alarms")
     out.append(_line("info", f"アラーム {al['count']} 件" + ("（10件以上あるかもしれません）" if al["truncated"] else ""),
                      *[f"{a['code']}  種類 {a['type']}・番号 {a['no']}・軸 {a['axis']}  {a['text']}"
@@ -180,16 +185,27 @@ def self_check(client, backup_folder=None, *, full=False, progress=None):
                 bad.append((no, lab, r["type_code"], vm[(no, lab)], r["value"]))
         done += len(part)
         prog(done, len(items), "パラメータを1つずつ読んで比べています")
-    level = "ok" if not bad else "ng"
+    # 1つでも「読めず」があれば OK にしない。全部読めなければ NG、一部なら「一部読めず」（注意）
+    if bad:
+        level, verdict = "ng", ""
+    elif not items:
+        level, verdict = "warn", "（比べる番号がありません）"
+    elif n_ok == 0:
+        level, verdict = "ng", "（全部読めませんでした）"
+    elif unread:
+        level, verdict = "warn", "（一部読めず）"
+    else:
+        level, verdict = "ok", ""
     out.append(_line(
-        level, f"パラメータの値の確認（A1・{'全部' if full else '代表'}）: {len(items)} 個中 一致 {n_ok}・"
+        level, f"パラメータの値の確認（A1・{'全部' if full else '代表'}）{verdict}: {len(items)} 個中 一致 {n_ok}・"
                f"違う {len(bad)}・読めず {len(unread)}",
         *[f"違う: N{no:05d} {lab or '-'}  型コード {ty}  控え={a}  1つずつ読むと={b}"
           for no, lab, ty, a, b in bad[:40]],
         *([f"…ほか {len(bad) - 40} 個"] if len(bad) > 40 else []),
         *[f"読めず: N{no:05d} {lab or '-'}  戻り値 {rc}" for no, lab, rc in unread[:20]],
-        *([] if bad else ["バイト型の符号・実数の『値と桁数』・軸型/主軸型の軸の欄の読み方が控えと合っています"
-                          if items else ""])))
+        *(["バイト型の符号・実数の『値と桁数』・軸型/主軸型の軸の欄の読み方が、"
+           + ("読めた" if unread else "") + f"{n_ok} 個については控えと合っています"]
+          if n_ok and not bad else [])))
 
     # A2: 系統型 L1・L2 は、軸の欄を 0・1・2 に替えて読み、控えの値と比べる
     probe = []
@@ -241,13 +257,13 @@ def diagnose(client, settings, last_error=None):
         return ("FOCAS 用の Python（32bit）が見つかりません。",
                 ["『はじめての設定』で 32bit の python.exe を選ぶ"])
     if not helper:
-        return ("FOCAS ヘルパー（focas_helper.py）が見つかりません。",
+        return (f"{C.HELPER_NAME}（focas_helper.py）が見つかりません。",
                 ["アプリのフォルダ（exe の隣）に focas_helper.py があるか確認する"])
     if client is None or not client.alive:
-        head = "ヘルパーはまだ起動していません。"
+        head = "機械と話す小さなプログラムは、まだ起動していません。"
         todo.append("『つなぐ』を押す")
     elif not client.connected:
-        head = "ヘルパーは起動していますが、機械にはつながっていません。"
+        head = "機械と話す小さなプログラムは起動していますが、機械にはつながっていません。"
         todo += ["IP アドレスとポート番号を確かめる（既定 8193）",
                  "LAN ケーブル・機械の電源を確かめる",
                  "SERVO GUIDE など別の FOCAS ソフトが同時につないでいないか確かめる（同時接続の動きは未確認）"]
@@ -257,5 +273,5 @@ def diagnose(client, settings, last_error=None):
         head += f" 直近のエラー: {last_error}"
     tail = [l for l in (list(client.stderr_tail)[-5:] if client is not None else []) if l]
     if tail:
-        todo.append("ヘルパーの出力: " + " / ".join(tail))
+        todo.append("機械と話す小さなプログラムの出力: " + " / ".join(tail))
     return head, todo

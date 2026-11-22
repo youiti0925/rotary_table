@@ -24,6 +24,7 @@ import os
 import struct
 import sys
 import time
+import traceback
 
 PROTO = 1
 
@@ -48,6 +49,15 @@ RC_NAMES = {
 RC_LOST = (-8, -16)
 RC_BUFFER = 10
 RC_BUSY = -1
+# フォルダの読み終わり。実機（31i）の実行記録（2026-11-22 focas_dirs.py）:
+#   cnc_rdpdf_alldir は最後のページの後に戻り値 3 を返して終わる。
+#   cnc_rdpdf_subdir は戻り値 0・件数 0 で終わる。
+# これ以外の戻り値で止まったら「読み切れていない」（不完全）。
+ALLDIR_END_RC = 3
+SUBDIR_END_RC = 0
+DIR_BUSY_TRIES = 5          # 処理中(-1)のとき、短くあけて読み直す回数
+PROG_READ_LIMIT = 60        # プログラム1本を読む時間の上限[秒]（クライアントはこれより長く待つ）
+PARAM_DUMP_LIMIT = 150
 
 DUMP_KINDS = {"param": 2, "pitch": 3, "macro": 4, "tool": 1, "workofs": 5}
 
@@ -197,6 +207,7 @@ def decode_type(code):
 
 
 DATA_SIZE = {"bit": 1, "byte": 1, "word": 2, "dword": 4, "real": 8}
+PARAM_MIN_LENGTH = 8        # cnc_rdparam の長さの下限（実機で通った値）
 
 
 def fmt_real(prm, dec):
@@ -271,11 +282,13 @@ class Family31i(Family):
     def _subdirs(self, hp, path):
         out, start, rc = [], 0, 0
         while True:
-            num = ctypes.c_short(10)
-            req = ctypes.create_string_buffer(
-                path.encode().ljust(212, b"\0")[:212] + struct.pack("<hh", start, 0), 216)
-            res = ctypes.create_string_buffer(40 * 10)
-            rc = hp.read_rc("cnc_rdpdf_subdir", hp.h, ctypes.byref(num), req, res)
+            def make():
+                num = ctypes.c_short(10)
+                req = ctypes.create_string_buffer(
+                    path.encode().ljust(212, b"\0")[:212] + struct.pack("<hh", start, 0), 216)
+                res = ctypes.create_string_buffer(40 * 10)
+                return (hp.h, ctypes.byref(num), req, res), (num, res)
+            rc, (num, res) = hp.call_retry("cnc_rdpdf_subdir", make)
             if rc in RC_LOST:
                 raise _fail("cnc_rdpdf_subdir", rc)
             if rc != 0 or num.value <= 0:
@@ -289,11 +302,13 @@ class Family31i(Family):
     def _entries(self, hp, path):
         out, start, rc = [], 0, 0
         while True:
-            num = ctypes.c_short(10)
-            req = ctypes.create_string_buffer(
-                path.encode().ljust(212, b"\0")[:212] + struct.pack("<hhhh", start, 1, 0, 0), 220)
-            res = ctypes.create_string_buffer(128 * 10)
-            rc = hp.read_rc("cnc_rdpdf_alldir", hp.h, ctypes.byref(num), req, res)
+            def make():
+                num = ctypes.c_short(10)
+                req = ctypes.create_string_buffer(
+                    path.encode().ljust(212, b"\0")[:212] + struct.pack("<hhhh", start, 1, 0, 0), 220)
+                res = ctypes.create_string_buffer(128 * 10)
+                return (hp.h, ctypes.byref(num), req, res), (num, res)
+            rc, (num, res) = hp.call_retry("cnc_rdpdf_alldir", make)
             if rc in RC_LOST:
                 raise _fail("cnc_rdpdf_alldir", rc)
             if rc != 0 or num.value <= 0:
@@ -323,6 +338,8 @@ class Family31i(Family):
                 "path": p, "folders": subs,
                 "programs": [x for x in items if x["kind"] == 1],
                 "rc_sub": rs, "rc_all": ra,
+                # 正常な終わり: subdir は 0（件数 0）、alldir は 3。それ以外は読み切れていない
+                "ok": rs == SUBDIR_END_RC and ra == ALLDIR_END_RC,
             })
             if not recursive:
                 break
@@ -332,8 +349,11 @@ class Family31i(Family):
         return tree
 
     def param_info(self, hp, start, count, emit):
+        """型の表を読む。戻り値は (型の並び, 終わり方)。終わり方は
+        {"complete", "last_rc", "next_no"}。途中で 0 以外が返ったら complete=False。"""
         types, s, batches = [], int(start), 0
         seen = set()
+        last_rc, next_no = 0, 0
         while True:
             n = ctypes.c_ushort(count)
             buf = ctypes.create_string_buffer(6 + 4 * count)
@@ -341,6 +361,7 @@ class Family31i(Family):
             if rc in RC_LOST or (rc != 0 and batches == 0):
                 raise _fail("cnc_rdparainfo", rc)
             if rc != 0:
+                last_rc, next_no = rc, s       # s は読もうとして失敗した先頭の番号
                 break
             info_no, prev_no, next_no = struct.unpack("<hhh", buf.raw[:6])
             added, last = 0, -1
@@ -363,7 +384,7 @@ class Family31i(Family):
             emit({"event": "progress", "done": len(types), "total": 0, "note": "型情報"})
         for no, ty in types:
             hp.types[no] = ty
-        return types
+        return types, {"complete": last_rc == 0, "last_rc": last_rc, "next_no": next_no}
 
     def type_of(self, hp, no):
         """1番号の型コード。表に無ければ 1件だけ読んで調べる（ptype_probe と同じ呼び方）。"""
@@ -385,8 +406,10 @@ class Family31i(Family):
         kind = ty["kind"]
         ax = axis_field(label) if axis is None else int(axis)
         buf = ctypes.create_string_buffer(16)
+        # 長さは実機で通った値に合わせる（バイト型を 8 で読んだ呼び方）。4+型の大きさが 8 に
+        # 届かない型は 8 にする。5 で通るかは未確認。実数は 12。
         rc = hp.read_rc("cnc_rdparam", hp.h, ctypes.c_short(no), ctypes.c_short(ax),
-                        ctypes.c_short(4 + DATA_SIZE[kind]), buf)
+                        ctypes.c_short(max(4 + DATA_SIZE[kind], PARAM_MIN_LENGTH)), buf)
         hp.check("cnc_rdparam", rc)
         return {"no": no, "label": label or "", "axis": ax, "kind": kind,
                 "value": parse_param_data(kind, buf.raw), "type_code": ty["code"]}
@@ -469,6 +492,17 @@ class Helper:
             rc = fn(*args)
         return rc
 
+    def call_retry(self, name, make_args, tries=DIR_BUSY_TRIES):
+        """処理中（-1）なら短くあけて読み直す。読み直すたびに make_args() で引数を作り直す
+        （前の呼び出しが書き換えた件数の欄を持ち越さない）。戻り値は (rc, make_args の2つ目)。"""
+        fn = getattr(self.api, name)
+        for i in range(max(1, tries)):
+            args, extra = make_args()
+            rc = fn(*args)
+            if rc != RC_BUSY or i == tries - 1:
+                return rc, extra
+            self.sleep(0.2)
+
     def check(self, func, rc):
         if rc != 0:
             raise _fail(func, rc)
@@ -549,7 +583,7 @@ class Helper:
         out["cnc_id"] = "-".join(f"{int(x) & 0xFFFFFFFF:08X}" for x in cid) if rc == 0 else None
         out["cnc_id_rc"] = rc
         n = ctypes.c_short(32)
-        buf = ctypes.create_string_buffer(2 * 32)
+        buf = ctypes.create_string_buffer(4 * 32)       # 実機で動いた大きさ（focas_exec.py）
         rc = self.read_rc("cnc_rdaxisname", self.h, ctypes.byref(n), buf)
         names = None
         if rc == 0:
@@ -568,7 +602,13 @@ class Helper:
         self.need_handle()
         st = (ctypes.c_short * 16)()
         self.check("cnc_statinfo", self.read_rc("cnc_statinfo", self.h, st))
-        return parse_statinfo(list(st))
+        out = parse_statinfo(list(st))
+        # 数値の読み（MDI・リセット等）は 31i の並びで確かめたもの。ほかの機種では
+        # 並びが違うかもしれないので、生の数値だけ返す。
+        out["interpreted"] = bool(self.family and FAMILY_CLASSES[self.family].implemented)
+        if not out["interpreted"]:
+            out["text"] = {}
+        return out
 
     def cmd_alarms(self, a, emit):
         self.need_handle()
@@ -592,15 +632,15 @@ class Helper:
     def cmd_prog_read(self, a, emit):
         fam = self.need_family()
         path = _check_path(a.get("path"))
-        data, last, end_rc = fam.upload(self, 0, path, float(a.get("limit", 60)), emit,
+        data, last, end_rc = fam.upload(self, 0, path, float(a.get("limit", PROG_READ_LIMIT)), emit,
                                         path.rsplit("/", 1)[-1])
         return _data_result(data, last, end_rc)
 
     def cmd_param_info(self, a, emit):
         fam = self.need_family()
         count = max(1, min(int(a.get("count", 100)), 100))
-        types = fam.param_info(self, int(a.get("start", 0)), count, emit)
-        return {"count": len(types), "types": types}
+        types, end = fam.param_info(self, int(a.get("start", 0)), count, emit)
+        return {"count": len(types), "types": types, **end}
 
     def cmd_param_read(self, a, emit):
         fam = self.need_family()
@@ -628,7 +668,7 @@ class Helper:
         kind = a.get("kind")
         if kind not in DUMP_KINDS:
             raise FocasError("bad_args", message=f"知らない種別です: {kind}")
-        data, last, end_rc = fam.upload(self, DUMP_KINDS[kind], "", float(a.get("limit", 150)),
+        data, last, end_rc = fam.upload(self, DUMP_KINDS[kind], "", float(a.get("limit", PARAM_DUMP_LIMIT)),
                                         emit, kind)
         out = _data_result(data, last, end_rc)
         out["kind"] = kind
@@ -646,6 +686,18 @@ class Helper:
         "param_read_many": cmd_param_read_many, "param_dump": cmd_param_dump,
         "quit": cmd_quit,
     }
+
+    @staticmethod
+    def _trace(msg):
+        """想定外の例外のトレースバックを標準エラーに出す（アプリが focas_helper.log に残す）。
+        返事には載せない。命令の中身（args）は書かない。"""
+        cmd = msg.get("cmd") if isinstance(msg, dict) else None
+        try:
+            sys.stderr.write(f"[helper] 想定外の例外 cmd={cmd}\n")
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+        except Exception:
+            pass
 
     def handle(self, msg, write):
         """1つの命令を処理して、返事（dict）を返す。どんな例外でも返事にする。"""
@@ -669,6 +721,7 @@ class Helper:
         except FocasError as e:
             return {"id": mid, "ok": False, "error": e.as_dict()}
         except Exception as e:                      # ヘルパーが黙って死なない
+            self._trace(msg)
             return {"id": mid, "ok": False,
                     "error": {"kind": "internal", "message": f"{type(e).__name__}: {e}"}}
 

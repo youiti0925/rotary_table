@@ -24,12 +24,18 @@ from pathlib import Path
 
 PROTO = 1
 
+# 利用者向けの文では、初めに説明をつけて呼ぶ（「ヘルパー」だけでは何か分からない）
+HELPER_NAME = "機械と話す小さなプログラム（ヘルパー）"
+
+CONNECT_MARGIN = 5              # 接続の待ち時間 = 設定の時間 + この余裕[秒]
+LOG_MAX_BYTES = 256 * 1024      # focas_helper.log の上限。超えたら古い方を .1 に回す（1世代だけ残す）
+
 DEFAULT_TIMEOUTS = {
     "start": 10,            # 起動〜hello
     "connect": 15,
     "default": 5,           # 状態・アラーム・1件の読み書き
     "param_dump": 180,      # 控え（パラメータ全部）
-    "prog_read": 60,
+    "prog_read": 75,        # ヘルパー側の上限（既定 60 秒）より長く待つ。短いとヘルパーの終わりを待たずに止めてしまう
     "prog_list": 60,
     "param_info": 60,
     "param_read_many": 30,
@@ -100,15 +106,15 @@ def describe(err):
         return ("内部エラー（命令の引数が正しくありません）。" + (err.get("message") or ""),
                 "focas_helper.log を見てください")
     if kind == "internal":
-        return ("内部エラー（ヘルパーで想定外の例外）。" + (err.get("message") or ""),
+        return (f"内部エラー（{HELPER_NAME}で想定外の例外）。" + (err.get("message") or ""),
                 "focas_helper.log を見てください")
     if kind == "protocol":
-        return ("内部エラー（ヘルパーの返事が読めません）。" + (err.get("message") or ""),
+        return (f"内部エラー（{HELPER_NAME}の返事が読めません）。" + (err.get("message") or ""),
                 "focas_helper.log を見てください")
     if kind == "no_python":
         return ("FOCAS 用の Python（32bit）が見つかりません。", "設定で場所を選んでください")
     if kind == "no_helper":
-        return ("FOCAS ヘルパー（focas_helper.py）が見つかりません。",
+        return (f"{HELPER_NAME}（focas_helper.py）が見つかりません。",
                 "アプリのフォルダ（exe の隣）に置いてあるか確認してください")
     if kind == "not_32bit":
         return ("これは 64bit の Python です。FANUC のライブラリは 32bit でしか動きません。",
@@ -117,7 +123,10 @@ def describe(err):
         return ("FANUC のライブラリ（Fwlib32.dll）が見つかりません。",
                 "SERVO GUIDE が入っているか確認してください")
     if kind == "helper_old":
-        return ("FOCAS ヘルパーの版がアプリと合いません。", "ヘルパーを新しいものに置き換えてください")
+        return (f"{HELPER_NAME}の版がアプリと合いません。",
+                "focas_helper.py をアプリと同じ版の新しいものに置き換えてください")
+    if kind == "aborted":
+        return ("中止したので、この接続は使えません。", "もう一度つないでください")
     return (f"想定外のエラーです（{kind}）。", "")
 
 
@@ -183,6 +192,8 @@ class FocasClient:
         self._lock = threading.RLock()
         self._next_id = 0
         self._threads = []
+        self._aborted = False         # abort() の後は、call() が起動し直さない
+        self._log_lock = threading.Lock()
 
     # --- 起動・終了 ----------------------------------------------------------
 
@@ -196,6 +207,7 @@ class FocasClient:
 
     def start(self):
         with self._lock:
+            self._check_aborted()
             if self.alive:
                 return self.hello
             self._cleanup()
@@ -237,6 +249,10 @@ class FocasClient:
                 raise
             return self.hello
 
+    def _check_aborted(self):
+        if self._aborted:
+            raise _from_dict({"kind": "aborted"})
+
     def _read_stdout(self, proc, q):
         try:
             for line in iter(proc.stdout.readline, b""):
@@ -250,12 +266,7 @@ class FocasClient:
             for line in iter(proc.stderr.readline, b""):
                 text = line.decode("utf-8", "replace").rstrip("\r\n")
                 self.stderr_tail.append(text)
-                if self.log_path:
-                    try:
-                        with open(self.log_path, "a", encoding="utf-8") as f:
-                            f.write(text + "\n")
-                    except OSError:
-                        pass
+                self._append_log("[helper] " + text)
         except (OSError, ValueError):
             pass
 
@@ -269,7 +280,7 @@ class FocasClient:
         kind, data = item
         if kind != "line":
             raise _from_dict({"kind": "protocol",
-                              "message": "ヘルパーが起動できませんでした。" + self._tail_text()})
+                              "message": f"{HELPER_NAME}が起動できませんでした。" + self._tail_text()})
         try:
             hello = json.loads(data.decode("utf-8"))
             if not isinstance(hello, dict) or hello.get("hello") != 1:
@@ -288,7 +299,7 @@ class FocasClient:
 
     def _tail_text(self):
         tail = [l for l in list(self.stderr_tail)[-3:] if l]
-        return ("（ヘルパーの出力: " + " / ".join(tail) + "）") if tail else ""
+        return (f"（{HELPER_NAME}の出力: " + " / ".join(tail) + "）") if tail else ""
 
     def _get(self, timeout):
         try:
@@ -342,12 +353,35 @@ class FocasClient:
                 self._lock.release()
 
     def abort(self):
-        """ロックを待たずに止める（命令の最中に画面を閉じるとき）。呼び出し中の命令は lost で終わる。"""
+        """ロックを待たずに止める（命令の最中に画面を閉じるとき）。呼び出し中の命令は lost で終わる。
+        これ以降、call() はヘルパーを起動し直さない（aborted のエラーになる）。"""
+        self._aborted = True
         self._kill()
 
     # --- 命令 ----------------------------------------------------------------
 
+    def _append_log(self, text):
+        """focas_helper.log に1行足す。上限（LOG_MAX_BYTES）を超えたら古い方を .1 に回す。
+        命令の名前・戻り値・ヘルパーの標準エラーだけ（機械から読んだ中身は書かない）。"""
+        path = self.log_path
+        if not path:
+            return
+        line = (time.strftime("%Y-%m-%d %H:%M:%S ")
+                + str(text).replace("\r", " ").replace("\n", " ") + "\n")
+        with self._log_lock:
+            try:
+                try:
+                    if os.path.getsize(path) > LOG_MAX_BYTES:
+                        os.replace(path, str(path) + ".1")
+                except OSError:
+                    pass
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except OSError:
+                pass
+
     def _note(self, text):
+        self._append_log(text)
         cb = self.on_log
         if cb is not None:
             try:
@@ -368,6 +402,7 @@ class FocasClient:
         """命令を1つ送って、返事の result を返す。失敗は FocasError。
         途中経過（event）は on_event(dict) に渡す。"""
         with self._lock:
+            self._check_aborted()
             if not self.alive:
                 self.start()                      # 切れていたら起動し直す
             mid = self._new_id()
@@ -377,7 +412,7 @@ class FocasClient:
                 self._send({"id": mid, "cmd": cmd, "args": args or {}})
             except (OSError, ValueError):
                 self._kill()
-                raise _from_dict({"kind": "lost", "message": "ヘルパーに送れませんでした"})
+                raise _from_dict({"kind": "lost", "message": f"{HELPER_NAME}に送れませんでした"})
             deadline = time.monotonic() + t
             while True:
                 item = self._get(deadline - time.monotonic())
@@ -388,7 +423,7 @@ class FocasClient:
                 if kind == "eof":
                     self._kill()
                     raise _from_dict({"kind": "lost",
-                                      "message": "ヘルパーが突然終わりました。" + self._tail_text()})
+                                      "message": f"{HELPER_NAME}が突然終わりました。" + self._tail_text()})
                 if kind == "partial":
                     self._kill()
                     raise _from_dict({"kind": "protocol", "message": "返事が途中で切れました"})
@@ -399,7 +434,7 @@ class FocasClient:
                 except ValueError:
                     self._kill()                   # 同期が取れなくなるので止める
                     raise _from_dict({"kind": "protocol",
-                                      "message": "JSON ではない返事を受け取りました"})
+                                      "message": "読み取れない形の返事を受け取りました"})
                 if "event" in msg:
                     if msg.get("id") == mid and on_event is not None:
                         on_event(msg)
@@ -414,27 +449,38 @@ class FocasClient:
                         self.connected = False
                     return msg.get("result")
                 err = msg.get("error") or {"kind": "protocol", "message": "error がありません"}
-                self._note(f"× {cmd} {err.get('kind')} {err.get('func', '')} {err.get('rc', '')}".rstrip())
+                self._note(f"× {cmd} kind={err.get('kind')} func={err.get('func', '')} "
+                           f"rc={err.get('rc', '')}".rstrip())
                 if err.get("kind") in ("lost", "connect"):
                     self.connected = False
                 raise _from_dict(err)
 
     @staticmethod
     def decode_data(result):
-        """prog_read / param_dump の result から中身のバイトを取り出す（SHA-256 を確かめる）。"""
+        """prog_read / param_dump の result から中身のバイトを取り出す（中身の指紋 SHA-256 を確かめる）。"""
         import hashlib
         data = base64.b64decode(result["data"])
         if hashlib.sha256(data).hexdigest() != result.get("sha256") or len(data) != result.get("size"):
-            raise _from_dict({"kind": "protocol", "message": "受け取った中身が壊れています（SHA-256 不一致）"})
+            raise _from_dict({"kind": "protocol", "message": "受け取った中身が壊れています（中身の指紋が合いません）"})
         return data
 
 
 def make_client(settings, log_path=None):
-    """設定から FocasClient を作る（起動はしない）。"""
+    """設定から FocasClient を作る（起動はしない）。
+
+    時間切れの決め方: 接続はクライアントの待ち時間を「設定 focas_timeout ＋ 余裕」にする
+    （ヘルパーが DLL に渡す時間より短いと、接続の失敗を返事で受け取れず、時間切れ扱いになる）。
+    プログラム1本の読みはクライアント 75 秒・ヘルパー 60 秒（クライアントを長くする）。
+    """
+    try:
+        t = max(1, int(settings.get("focas_timeout", 10)))
+    except (TypeError, ValueError):
+        t = 10
     return FocasClient(
         resolve_python32(str(settings.get("focas_python32") or "")),
         resolve_helper(str(settings.get("focas_helper_path") or "")),
         dll_dir=str(settings.get("focas_dll_dir") or ""),
+        timeouts={"connect": t + CONNECT_MARGIN},
         log_path=log_path,
         env=None,
     )

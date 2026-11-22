@@ -275,5 +275,156 @@ class TestUnitCandidates(Base):
         self.assertEqual(r.info["unit"], "")
 
 
+class TestProgramListEnd(Base):
+    """A-1: プログラム一覧が最後まで読めていないのに「完全」になってはいけない。
+    実機（31i）では alldir は 3、subdir は 0・件数 0 で終わるのが正常。"""
+
+    def test_normal_machine_is_complete_with_no_warning(self):
+        c, r = self.take()
+        self.assertTrue(r.complete, r.problems)
+        self.assertEqual(r.warnings, [])
+        rcs = r.info["programs"]["list_rcs"]
+        self.assertTrue(rcs)
+        self.assertTrue(all((x["rc_sub"], x["rc_all"]) == (0, 3) for x in rcs))
+        self.assertEqual(r.info["programs"]["folders"], 4)
+        self.assertEqual(r.info["warnings"], [])
+
+    def test_alldir_not_ending_with_3_makes_it_incomplete_and_shows_the_rc(self):
+        for rc in (5, 6, -1, 0):
+            sc = {"alldir_end_rc": 0} if rc == 0 else {"force_rc": {"cnc_rdpdf_alldir": rc}}
+            c, r = self.take(sc)
+            self.assertFalse(r.complete, rc)
+            text = " ".join(r.problems)
+            self.assertIn("プログラムの一覧を最後まで読めませんでした", text, rc)
+            self.assertIn(f"プログラム一覧の戻り値 {rc}", text, rc)
+            info = json.loads((r.folder / B.INFO_NAME).read_text(encoding="utf-8"))
+            self.assertFalse(info["complete"])
+            self.assertTrue(any(x["rc_all"] == rc for x in info["programs"]["list_rcs"]), rc)
+
+    def test_subdir_nonzero_makes_it_incomplete(self):
+        c, r = self.take({"force_rc": {"cnc_rdpdf_subdir": 5}})
+        self.assertFalse(r.complete)
+        self.assertIn("フォルダ一覧の戻り値 5", " ".join(r.problems))
+
+    def test_busy_a_few_times_is_retried_and_still_complete(self):
+        c, r = self.take({"busy_first": {"cnc_rdpdf_alldir": 2}})
+        self.assertTrue(r.complete, r.problems)
+
+    def test_registered_count_mismatch_is_only_a_warning(self):
+        c, r = self.take({"registered": 72})
+        self.assertTrue(r.complete, r.problems)                   # 不完全にはしない（推測のため）
+        self.assertEqual(len(r.warnings), 1)
+        self.assertIn("72", r.warnings[0])
+        self.assertIn("目安", r.warnings[0])
+        self.assertTrue(r.info["warnings"])
+        table = (r.folder / B.TABLE_NAME).read_text(encoding="utf-8")
+        self.assertIn("目安", table)
+        self.assertIn("不完全とはしていません", table)
+
+    def test_real_machine_count_72_is_62_programs_plus_10_folders(self):
+        # 実機: プログラム 62本 + フォルダ 10個 = 登録 72。数え方が同じなら警告は出ない
+        c, r = self.take({"extra_programs": 58})                 # 4+58=62 本
+        self.assertEqual(r.info["programs"]["listed"], 62)
+        self.assertEqual(r.info["program_info"]["registered"], 62 + 4)   # 偽物のフォルダは4個
+        self.assertEqual(r.warnings, [])
+
+
+class TestParamInfoIncomplete(Base):
+    """B-2: 型情報の読みが途中で 0 以外になったら、最後の戻り値と次の番号を残して不完全にする。"""
+
+    def test_rdparainfo_failing_midway_is_incomplete_and_recorded(self):
+        c = self.client({"rdparainfo_fail_at": 2, "rdparainfo_fail_rc": 5})
+        # 100件ずつだと1回で終わるので、5件ずつの読みを直接頼んで途中失敗を作る
+        orig = c.call
+
+        def small(cmd, args=None, **kw):
+            if cmd == "param_info":
+                args = {"count": 5}
+            return orig(cmd, args, **kw)
+        c.call = small
+        r = B.take_backup(c, self.root, self.settings)
+        self.assertFalse(r.complete)
+        text = " ".join(r.problems)
+        self.assertIn("型情報を最後まで読めませんでした", text)
+        self.assertIn("最後の戻り値 5", text)
+        info = json.loads((r.folder / B.INFO_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(info["types_end"]["last_rc"], 5)
+        self.assertGreater(info["types_end"]["next_no"], 0)
+
+
+class TestDestinationAliases(Base):
+    """B-9: 割当ドライブ・ジャンクション・短い名前でも、BASIC・製品フォルダの中と見抜く。"""
+
+    def setUp(self):
+        super().setUp()
+        self.basic = self.tmp / "BASIC_FOLDER_LONG_NAME"
+        self.basic.mkdir()
+
+    def _junction(self, link, target):
+        import os
+        import subprocess
+        if os.name != "nt":
+            os.symlink(str(target), str(link), target_is_directory=True)
+            return
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True)
+        if r.returncode != 0:
+            self.skipTest("ジャンクションを作れない環境です")
+
+    def test_junction_to_basic_dir_is_refused(self):
+        link = self.tmp / "ただのリンク"
+        self._junction(link, self.basic)
+        with self.assertRaises(B.BackupError):
+            B.check_destination(link / "控え", {"param_basic_dir": str(self.basic)})
+        with self.assertRaises(B.BackupError):
+            B.check_destination(link, {"param_basic_dir": str(self.basic)})
+        # 逆向き: BASIC 側の設定がリンクで、置き場所が本物の場所
+        with self.assertRaises(B.BackupError):
+            B.check_destination(self.basic / "x", {"param_basic_dir": str(link)})
+
+    def test_short_8dot3_name_is_refused(self):
+        import os
+        if os.name != "nt":
+            self.skipTest("Windows だけ")
+        import ctypes
+        buf = ctypes.create_unicode_buffer(520)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(self.basic), buf, 520)
+        short = buf.value if n else ""
+        if not short or short.lower() == str(self.basic).lower():
+            self.skipTest("この場所では短い名前が作られていません")
+        with self.assertRaises(B.BackupError):
+            B.check_destination(Path(short) / "控え", {"param_basic_dir": str(self.basic)})
+
+    def test_subst_drive_is_refused(self):
+        import os
+        import subprocess
+        if os.name != "nt":
+            self.skipTest("Windows だけ")
+        used = {c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(c + ":\\")}
+        free = [c for c in "RSTUVWXYZ" if c not in used]
+        if not free:
+            self.skipTest("空いているドライブ文字がありません")
+        d = free[0] + ":"
+        r = subprocess.run(["subst", d, str(self.basic)], capture_output=True)
+        if r.returncode != 0:
+            self.skipTest("subst を使えない環境です")
+        try:
+            with self.assertRaises(B.BackupError):
+                B.check_destination(d + "\\控え", {"param_basic_dir": str(self.basic)})
+        finally:
+            subprocess.run(["subst", d, "/d"], capture_output=True)
+
+    def test_unrelated_folder_with_junction_is_still_allowed(self):
+        other = self.tmp / "別の場所"
+        other.mkdir()
+        link = self.tmp / "別へのリンク"
+        self._junction(link, other)
+        B.check_destination(link / "控え", {"param_basic_dir": str(self.basic)})
+
+    def test_variants_normalise_slashes_and_case(self):
+        v = B._variants(str(self.basic).upper() + "/")
+        self.assertIn(B._norm(self.basic), v)
+
+
 if __name__ == "__main__":
     unittest.main()

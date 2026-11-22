@@ -21,7 +21,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem FOCAS（機械と直接つなぐ）の「機械と話す小さなプログラム」は exe の中に入らない。
+rem 32bit の Python で別に動かすので、exe の隣へ focas_helper.py を写す。
+copy /y "nd287_app\focas_helper.py" "dist\focas_helper.py" >nul
+if errorlevel 1 (
+    echo [エラー] focas_helper.py を dist に写せませんでした。
+    pause
+    exit /b 1
+)
+
 echo.
 echo 完成: dist\nd287_bunkatsu.exe
+echo 同じフォルダに dist\focas_helper.py も作りました。exeと一緒に検査PCへコピーしてください。
+echo （FOCASを使わない検査PCでは、focas_helper.py が無くてもアプリは動きます。）
 echo このexeを検査PCにコピーすれば、Pythonなしでダブルクリック起動できます。
 pause

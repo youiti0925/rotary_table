@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -378,6 +379,119 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(s["ui_font_pt"], 9)
             self.assertEqual(s["focas_port"], 8193)
             self.assertNotIn("_load_error", s)
+
+
+class TestReviewFixes(DialogBase):
+    def test_red_message_after_a_failed_poll_goes_away_when_the_next_read_works(self):
+        from nd287_app import focas_client as C
+        d = self.dialog()
+        self.connect(d)
+        orig = d.client.call
+        state = {"fail": True}
+
+        def flaky(cmd, args=None, **kw):
+            if cmd == "status" and state["fail"]:
+                state["fail"] = False
+                raise C.FocasError("focas", "機械が cnc_statinfo を受け付けませんでした（戻り値 5）。",
+                                   {"kind": "focas", "rc": 5})
+            return orig(cmd, args, **kw)
+        d.client.call = flaky
+        d._poll()
+        self.wait(d)
+        self.assertIn("受け付けませんでした", d.lbl_state.text())
+        self.assertIn("b91c1c", d.lbl_state.styleSheet())
+        self.assertTrue(d._connected)                            # この種類のエラーでは切れない
+        d._poll()
+        self.wait(d)
+        self.assertNotIn("受け付けませんでした", d.lbl_state.text())
+        self.assertIn("つながっています", d.lbl_state.text())
+        self.assertNotIn("b91c1c", d.lbl_state.styleSheet())
+
+    def test_after_closing_a_waiting_quiet_retry_does_not_start_anything(self):
+        import unittest.mock as mock
+        d = self.dialog()
+        self.connect(d)
+        called = []
+        d._busy, d._busy_quiet = True, True                      # 読み直しの最中のつもり
+        d._run(lambda progress: called.append(1), lambda r: None)    # 150ms 後にやり直す予約
+        d.close()                                               # その前に閉じる
+        d._busy, d._busy_quiet = False, False
+        with mock.patch.object(subprocess, "Popen",
+                               side_effect=AssertionError("閉じた後に起動してはいけない")):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 0.5:
+                self.app.processEvents()
+                time.sleep(0.02)
+        self.assertEqual(called, [])
+        self.assertIsNone(d.client)
+        self.assertFalse(d._run(lambda progress: called.append(2), lambda r: None))
+        self.assertEqual(called, [])
+
+    def test_a_job_in_flight_when_closing_does_not_restart_the_helper(self):
+        import unittest.mock as mock
+        d = self.dialog()
+        self.connect(d)
+        client = d.client
+        orig = client.call
+        started, results = threading.Event(), []
+
+        def slow(cmd, args=None, **kw):
+            started.set()
+            time.sleep(0.8)                                     # 命令の最中に閉じられる
+            try:
+                return orig(cmd, args, **kw)
+            except Exception as e:
+                results.append(e)
+                raise
+        client.call = slow
+        d._poll()
+        self.assertTrue(started.wait(5))
+        with mock.patch.object(subprocess, "Popen",
+                               side_effect=AssertionError("閉じた後に起動してはいけない")):
+            d.close()
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 1.5:
+                self.app.processEvents()
+                time.sleep(0.02)
+        self.assertTrue(client._aborted)
+        self.assertFalse(client.alive)
+        self.assertEqual([getattr(e, "kind", None) for e in results], ["aborted"])
+
+    def test_unsupported_model_shows_raw_numbers_and_no_writable_band(self):
+        self.scenario({"cnc_type": "0", "status": {"aut": 1, "run": 3},
+                       "alarms": [[100, 0, 0, "x"]]})
+        d = self.dialog()
+        self.connect(d)
+        text = d.lbl_status.text()
+        self.assertIn("生の数値", text)
+        self.assertIn("run=3", text)
+        for word in ("運転中", "メモリ", "MDI"):
+            self.assertNotIn(word, text)
+        band = d.lbl_writable.text()
+        self.assertNotIn("いま書けます", band)
+        self.assertNotIn("書けません", band)
+        self.assertIn("判定しません", band)
+
+    def test_backup_warning_is_shown_but_is_not_incomplete(self):
+        self.scenario({"registered": 72})
+        d = self.dialog()
+        self.connect(d)
+        d.b_backup.click()
+        self.wait(d, 90)
+        text = d.lbl_check.text()
+        self.assertIn("控えは完全です", text)
+        self.assertIn("目安", text)
+        self.assertTrue(d._session_backup[1]["complete"])
+
+    def test_program_list_not_read_to_the_end_is_shown_as_incomplete(self):
+        self.scenario({"force_rc": {"cnc_rdpdf_alldir": 5}})
+        d = self.dialog()
+        self.connect(d)
+        d.b_backup.click()
+        self.wait(d, 90)
+        text = d.lbl_check.text()
+        self.assertIn("不完全", text)
+        self.assertIn("戻り値 5", text)
 
 
 if __name__ == "__main__":

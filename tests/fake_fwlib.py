@@ -10,11 +10,17 @@
   lost_after       N 回呼んだあとは全部 -16（接続切れ）
   buffer_every     cnc_upload4 を N 回に 1 回 EW_BUFFER(10) にする
   hang_in          その関数で固まる（返事をしない）
+  raise_in         その関数で例外を起こす（ヘルパーの想定外の例外の試験）
   connect_fail_count  最初の N 回は接続に失敗（-16）
   force_rc         {関数名: 戻り値} その関数は常にその戻り値
   dump_pad_lines   パラメータの控えに詰め物の行を足して大きくする
   extra_programs   PATH1 にプログラムを N 本足す
+  alldir_end_rc    cnc_rdpdf_alldir が全部読み終えた後に返す戻り値（既定 3。実機の動き）
+  busy_first       {関数名: N} その関数は最初の N 回だけ -1（処理中）を返す
+  rdparainfo_fail_at  N 回目の cnc_rdparainfo から戻り値 {rdparainfo_fail_rc}（既定 5）
   alarms / status / cnc_id / remaining / cnc_type など
+実機の動き（2026-11-22 の focas_dirs.py の記録）: cnc_rdpdf_alldir は最後のページの後に戻り値 3 で終わり、
+cnc_rdpdf_subdir は戻り値 0・件数 0 で終わる。登録本数（cnc_rdproginfo）は「プログラム＋フォルダ」の数。
 偽物の仮定（実機では未確認）: L1・L2 は 軸の欄 0/1→L1、2→L2 で読める。
 """
 
@@ -104,7 +110,9 @@ class FakeMachine:
             self.add_program(base + "O" + "1" * 35, b"%\nO1(LONG) \n%", "L")
         for path, b64 in (sc.get("program_bytes") or {}).items():
             self.add_program(path, base64.b64decode(b64), "BIN")
-        self.registered = len(self.programs)
+        # 実機は 62本＋フォルダ10個で 72 だった。ルート（//CNC_MEM/）は数えない
+        self.registered = sc.get("registered", len(self.programs) + len(
+            self.all_folders() - {"//CNC_MEM/"}))
 
     def add_program(self, path, data, comment=""):
         self.programs[path] = (data, comment)
@@ -169,6 +177,10 @@ class FakeFwlib:
         self.connect_tries = 0
         self.upload_pos = None
         self.upload_n = 0
+        self.busy_left = dict(self.sc.get("busy_first") or {})
+        self.rdparainfo_calls = 0
+        self.rdparam_lengths = []
+        self.axisname_buf_size = None
         self.calls_log = calls_log
         self.host = None
         self._hang = threading.Event()
@@ -187,12 +199,17 @@ class FakeFwlib:
         sc = self.sc
         if sc.get("hang_in") == fn.name:
             self._hang.wait(3600)
+        if sc.get("raise_in") == fn.name:
+            raise RuntimeError("偽物の DLL が壊れた")
         if fn.impl is None:
             return 1                    # EW_FUNC: 実装していない
         if fn.name != "cnc_freelibhndl" and "lost_after" in sc and self.count > sc["lost_after"]:
             return -16
         if fn.name in (sc.get("force_rc") or {}):
             return sc["force_rc"][fn.name]
+        if self.busy_left.get(fn.name, 0) > 0:
+            self.busy_left[fn.name] -= 1
+            return -1
         if fn.name not in ("cnc_allclibhndl3", "cnc_freelibhndl") and self.handle is None:
             return -8
         return fn.impl(*args)
@@ -231,6 +248,7 @@ class FakeFwlib:
         return 0
 
     def _cnc_rdaxisname(self, h, n, buf):
+        self.axisname_buf_size = ctypes.sizeof(buf)
         names = self.m.axis_names
         _put(buf, b"".join(nm + b"\0" for nm in names))
         _target(n).value = len(names)
@@ -291,6 +309,8 @@ class FakeFwlib:
             out += bytes(e)
         _put(res, out)
         _target(num).value = len(items)
+        if not items:
+            return int(self.sc.get("alldir_end_rc", 3))     # 実機: 最後のページの後は 3
         return 0
 
     # --- 吸い出し ---------------------------------------------------------------------
@@ -331,6 +351,10 @@ class FakeFwlib:
     # --- パラメータ -----------------------------------------------------------------------
 
     def _cnc_rdparainfo(self, h, start, count, buf):
+        self.rdparainfo_calls += 1
+        fail_at = self.sc.get("rdparainfo_fail_at")
+        if fail_at and self.rdparainfo_calls >= fail_at:
+            return int(self.sc.get("rdparainfo_fail_rc", 5))
         s = _val(start)
         n = _val(count)
         nos = sorted(no for no in self.m.types if no >= s)
@@ -359,6 +383,7 @@ class FakeFwlib:
 
     def _cnc_rdparam(self, h, no, axis, length, buf):
         no, axis, length = _val(no), _val(axis), _val(length)
+        self.rdparam_lengths.append((no, length))
         ty = self.m.types.get(no)
         lab = self._label_for(no, axis)
         if ty is None or lab is None:

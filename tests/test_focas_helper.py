@@ -6,6 +6,7 @@
 """
 
 import base64
+import contextlib
 import ctypes
 import hashlib
 import io
@@ -74,7 +75,8 @@ class TestApi(unittest.TestCase):
         # 一覧にない名前がコード側に出てくるなら、ここで気づく（コメント内の名前は除く）
         code_only = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
         doc_free = re.sub(r'"""[\s\S]*?"""', "", code_only)
-        used = set(re.findall(r'(?:read_rc\(|check\(|_fail\(|api\.)"?((?:cnc|pmc)_\w+)', doc_free))
+        used = set(re.findall(r'(?:read_rc\(|call_retry\(|check\(|_fail\(|api\.)"?((?:cnc|pmc)_\w+)',
+                              doc_free))
         self.assertGreater(len(used), 10)
         self.assertEqual(used - set(H.ALLOWED_FUNCS), set())
 
@@ -238,7 +240,9 @@ class TestCommands(unittest.TestCase):
         r = run.ok("prog_info")
         self.assertEqual(r["remaining"], 0)
         self.assertEqual((r["used"], r["unused"]), (32500, 105000))
-        self.assertEqual(r["registered"], 4)
+        # 登録本数は「プログラム＋フォルダ」の数（実機は 62本＋フォルダ10個で 72 だった）。
+        # 偽物は プログラム4本 + フォルダ4個（USER・PATH1・PATH2・LIBRARY）
+        self.assertEqual(r["registered"], 8)
 
     def test_prog_list_walks_folders(self):
         lib, hp, run = connected()
@@ -483,9 +487,16 @@ class TestRobustness(unittest.TestCase):
         def boom(h, arr):
             raise RuntimeError("DLL が壊れた")
         lib.cnc_statinfo.impl = boom
-        r = run("status")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            r = run("status")
         self.assertFalse(r["ok"])
         self.assertEqual(r["error"]["kind"], "internal")
+        # B-3: トレースバックは標準エラーへ（返事には載せない）
+        self.assertIn("Traceback", err.getvalue())
+        self.assertIn("RuntimeError", err.getvalue())
+        self.assertIn("cmd=status", err.getvalue())
+        self.assertNotIn("Traceback", json.dumps(r))
         self.assertIn("RuntimeError", r["error"]["message"])
         self.assertTrue(run("alarms")["ok"])                       # そのあとも動く
 
@@ -550,7 +561,7 @@ class TestRobustness(unittest.TestCase):
         src = Path(H.__file__).read_text(encoding="utf-8")
         mods = set(re.findall(r"^\s*(?:import|from)\s+([A-Za-z_][\w]*)", src, re.M))
         self.assertEqual(mods - {"base64", "ctypes", "hashlib", "json", "os", "struct",
-                                 "sys", "time", "platform"}, set())
+                                 "sys", "time", "platform", "traceback"}, set())
         self.assertNotIn("nd287_app", mods)
 
 
@@ -610,3 +621,166 @@ class TestMain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 以下はレビューの指摘（A-1・B-1〜B-8）への対応
+# ---------------------------------------------------------------------------
+
+class TestDirectoryEnd(unittest.TestCase):
+    """A-1: 実機（31i）では alldir は最後のページの後に 3、subdir は 0・件数 0 で終わる。
+    それ以外の戻り値は「読み切れていない」。"""
+
+    def test_normal_end_is_ok(self):
+        lib, hp, run = connected()
+        r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertEqual((r["rc_sub"], r["rc_all"]), (0, 3))
+        self.assertTrue(r["ok"])
+        t = run.ok("prog_list", path="//CNC_MEM/", recursive=True)["tree"]
+        self.assertTrue(all(x["ok"] for x in t))
+        self.assertTrue(all(x["rc_all"] == 3 and x["rc_sub"] == 0 for x in t))
+
+    def test_alldir_ending_with_zero_is_not_the_normal_end(self):
+        lib, hp, run = connected({"alldir_end_rc": 0})
+        r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["rc_all"], 0)
+
+    def test_other_nonzero_is_incomplete_and_rc_is_returned(self):
+        for rc in (5, 6, 7, -1):
+            lib, hp, run = connected({"force_rc": {"cnc_rdpdf_alldir": rc}})
+            r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+            self.assertFalse(r["ok"], rc)
+            self.assertEqual(r["rc_all"], rc)
+        lib, hp, run = connected({"force_rc": {"cnc_rdpdf_subdir": 5}})
+        r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["rc_sub"], 5)
+
+    def test_busy_is_retried_a_few_times_then_succeeds(self):
+        lib, hp, run = connected({"busy_first": {"cnc_rdpdf_alldir": 3}})
+        r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(r["programs"]), 3)
+
+    def test_busy_forever_gives_up_as_incomplete(self):
+        lib, hp, run = connected({"force_rc": {"cnc_rdpdf_alldir": -1}})
+        r = run.ok("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["rc_all"], -1)
+        self.assertEqual(lib.called("cnc_rdpdf_alldir"), H.DIR_BUSY_TRIES)
+
+    def test_lost_still_raises(self):
+        lib, hp, run = connected({"force_rc": {"cnc_rdpdf_alldir": -16}})
+        r = run("prog_list", path="//CNC_MEM/USER/PATH1/")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["kind"], "lost")
+
+
+class TestRealBehaviourFixes(unittest.TestCase):
+    def test_rdparam_length_is_at_least_8_and_real_is_12(self):
+        lib, hp, run = connected()
+        run.ok("param_read", no=20)                         # バイト型 → 4+1=5 ではなく 8
+        run.ok("param_read", no=1420, label="A1", axis=1)   # 実数型 → 12
+        run.ok("param_read", no=0, label="L1", axis=0)      # ビット型 → 8
+        by = {}
+        for no, ln in lib.rdparam_lengths:
+            by.setdefault(no, ln)
+        self.assertEqual(by[20], 8)
+        self.assertEqual(by[1420], 12)
+        self.assertEqual(by[0], 8)
+        self.assertGreaterEqual(min(ln for _, ln in lib.rdparam_lengths), 8)
+
+    def test_param_length_rule_for_each_kind(self):
+        for kind, size in H.DATA_SIZE.items():
+            self.assertEqual(max(4 + size, H.PARAM_MIN_LENGTH), {"real": 12, "dword": 8}.get(kind, 8))
+
+    def test_rdparainfo_failure_midway_is_reported(self):
+        lib, hp, run = connected({"rdparainfo_fail_at": 3, "rdparainfo_fail_rc": 5})
+        r = run.ok("param_info", count=5)
+        self.assertFalse(r["complete"])
+        self.assertEqual(r["last_rc"], 5)
+        self.assertGreater(r["next_no"], 0)
+        self.assertEqual(len(r["types"]), 10)               # 取れた分は残る
+
+    def test_rdparainfo_normal_end_is_complete(self):
+        lib, hp, run = connected()
+        r = run.ok("param_info", count=5)
+        self.assertTrue(r["complete"])
+        self.assertEqual(r["last_rc"], 0)
+
+    def test_rdaxisname_buffer_is_4x32_and_reads_names(self):
+        lib, hp, run = connected()
+        i = run.ok("identify")
+        self.assertEqual(lib.axisname_buf_size, 4 * 32)
+        self.assertEqual(i["axis_names"], ["X", "Y", "Z", "A", "B", "C"])
+
+    def test_status_on_unsupported_family_is_raw_only(self):
+        lib, hp = make()
+        lib.m.cnc_type = b"0 "
+        lib.m.status["aut"] = 1
+        run = Run(hp)
+        run.ok("connect", host="127.0.0.1")
+        r = run.ok("status")
+        self.assertFalse(r["interpreted"])
+        self.assertEqual(r["text"], {})                     # 31i の並びで日本語にしない
+        self.assertEqual(r["values"]["aut"], 1)
+
+    def test_status_on_31i_is_interpreted(self):
+        lib, hp, run = connected({"status": {"aut": 1}})
+        r = run.ok("status")
+        self.assertTrue(r["interpreted"])
+        self.assertEqual(r["text"]["aut"], "メモリ")
+
+    def test_timeouts_of_helper_are_shorter_than_clients(self):
+        from nd287_app import focas_client as C
+        self.assertGreater(C.DEFAULT_TIMEOUTS["prog_read"], H.PROG_READ_LIMIT)
+        self.assertGreater(C.DEFAULT_TIMEOUTS["param_dump"], H.PARAM_DUMP_LIMIT)
+
+
+class TestAllowListWatch(unittest.TestCase):
+    """B-8: 許可一覧の見張りを強める。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        cls.src = Path(H.__file__).read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.src)
+
+    def test_lib_appears_only_in_api_init(self):
+        import ast
+        api = next(n for n in self.tree.body if isinstance(n, ast.ClassDef) and n.name == "Api")
+        init = next(n for n in api.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        inside = {id(x) for x in ast.walk(init)}
+        hits = [n for n in ast.walk(self.tree)
+                if (isinstance(n, ast.Attribute) and n.attr == "_lib")
+                or (isinstance(n, ast.Name) and n.id == "_lib")]
+        self.assertTrue(hits)                                # 見張りが空振りでないこと
+        for n in hits:
+            self.assertIn(id(n), inside, f"_lib が Api.__init__ の外にあります（{n.lineno} 行）")
+
+    def test_every_cnc_pmc_name_in_code_is_allowed(self):
+        import ast
+        import re
+        pat = re.compile(r"\b(?:cnc|pmc)_\w+")
+        doc_ids = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef)) and n.body \
+                    and isinstance(n.body[0], ast.Expr) \
+                    and isinstance(getattr(n.body[0], "value", None), ast.Constant) \
+                    and isinstance(n.body[0].value.value, str):
+                doc_ids.add(id(n.body[0].value))
+        names = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in doc_ids:
+                names |= set(pat.findall(n.value))
+            elif isinstance(n, ast.Name):
+                names |= set(pat.findall(n.id))
+            elif isinstance(n, ast.Attribute):
+                names |= set(pat.findall(n.attr))
+        # 返事の項目名（DLL の関数ではない）。増えたときは、関数でないことを確かめてここへ足す
+        data_keys = {"cnc_id", "cnc_id_rc", "cnc_type"}
+        names -= data_keys
+        self.assertGreater(len(names), 10)
+        self.assertEqual(names - set(H.ALLOWED_FUNCS), set())
+        self.assertEqual(names & set(FORBIDDEN), set())

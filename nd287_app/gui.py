@@ -2158,6 +2158,8 @@ class FocasDialog(QtWidgets.QDialog):
         self._last_backup = None         # 前回までの控え (フォルダ, 情報)
         self._controllers = []
         self._report = ""
+        self._closed = False             # 閉じた後は、命令を始めない（古いクライアントを起こさない）
+        self._state_err = False          # lbl_state が赤いエラーの文になっている
         self.setWindowTitle("機械と直接つなぐ（FOCAS）")
         fit_to_screen(self, 760, 720)
         v = QtWidgets.QVBoxLayout(self)
@@ -2408,9 +2410,12 @@ class FocasDialog(QtWidgets.QDialog):
 
     def _run(self, fn, on_ok, on_err=None, quiet=False):
         """fn(progress) を別スレッドで実行する。同時に1つだけ。"""
+        if self._closed:                # 閉じた後は何も始めない
+            return False
         if self._busy:
             if self._busy_quiet:        # 状態の読み直しの最中なら、少し待ってやり直す
-                QtCore.QTimer.singleShot(150, lambda: self._run(fn, on_ok, on_err, quiet))
+                QtCore.QTimer.singleShot(
+                    150, lambda: None if self._closed else self._run(fn, on_ok, on_err, quiet))
             return False
         self._busy, self._busy_quiet = True, quiet
         self._on_ok, self._on_err = on_ok, on_err
@@ -2441,6 +2446,17 @@ class FocasDialog(QtWidgets.QDialog):
         self._job_done()
         if cb:
             cb(result)
+        # 読み直しの一時失敗で赤くなった文は、次に読めたら元に戻す
+        if self._state_err and self._connected:
+            self._set_state(self._connected_text())
+
+    def _connected_text(self):
+        return f"つながっています（{self.e_host.text().strip()}:{self.sp_port.value()}）"
+
+    def _set_state(self, text, style="", err=False):
+        self.lbl_state.setText(text)
+        self.lbl_state.setStyleSheet(style)
+        self._state_err = err
 
     @QtCore.Slot(object)
     def _job_failed(self, err):
@@ -2459,18 +2475,17 @@ class FocasDialog(QtWidgets.QDialog):
     def _handle_error(self, err):
         if isinstance(err, focas_client.FocasError):
             self._last_error = str(err)
-            self.lbl_state.setText(str(err))
-            self.lbl_state.setStyleSheet("color:#b91c1c; font-weight:bold;")
+            self._set_state(str(err), "color:#b91c1c; font-weight:bold;", err=True)
             if err.kind in ("lost", "timeout", "connect", "no_python", "no_helper", "not_32bit",
-                            "no_dll", "helper_old", "protocol", "not_connected"):
+                            "no_dll", "helper_old", "protocol", "not_connected", "aborted"):
                 self._set_connected(False)
         elif isinstance(err, focas_backup.BackupError):
             self._last_error = str(err)
             self._warn("控えの置き場所", str(err))
         else:
             self._last_error = f"{type(err).__name__}: {err}"
-            self.lbl_state.setText("想定外のエラー: " + self._last_error)
-            self.lbl_state.setStyleSheet("color:#b91c1c; font-weight:bold;")
+            self._set_state("想定外のエラー: " + self._last_error,
+                            "color:#b91c1c; font-weight:bold;", err=True)
 
     def _refresh_enabled(self):
         idle = not self._busy
@@ -2517,8 +2532,7 @@ class FocasDialog(QtWidgets.QDialog):
         client = self._ensure_client()
         port, timeout = self.sp_port.value(), int(self.settings.get("focas_timeout", 10))
         families = dict(self.settings.get("focas_families") or {})
-        self.lbl_state.setText("つないでいます…")
-        self.lbl_state.setStyleSheet("")
+        self._set_state("つないでいます…")
 
         def work(progress):
             client.call("connect", {"host": host, "port": port, "timeout": timeout,
@@ -2531,8 +2545,8 @@ class FocasDialog(QtWidgets.QDialog):
         ident, status, alarms = res
         self._ident = ident
         self._set_connected(True)
-        self.lbl_state.setText(f"つながりました（{self.e_host.text().strip()}:{self.sp_port.value()}）")
-        self.lbl_state.setStyleSheet("color:#166534; font-weight:bold;")
+        self._set_state(f"つながりました（{self.e_host.text().strip()}:{self.sp_port.value()}）",
+                        "color:#166534; font-weight:bold;")
         axes = " ".join(ident.get("axis_names") or []) or "読めず"
         self.lbl_machine.setText(
             f"機種 {ident['cnc_type']}i {ident['mt_type']}　系列 {ident['series']}　版 {ident['version']}"
@@ -2563,18 +2577,23 @@ class FocasDialog(QtWidgets.QDialog):
 
         def done(_):
             self._set_connected(False)
-            self.lbl_state.setText("切りました")
-            self.lbl_state.setStyleSheet("")
+            self._set_state("切りました")
         self._run(work, done)
 
     def _show_state(self, status, alarms):
         self._status = status
         self._alarms = alarms.get("alarms", []) if isinstance(alarms, dict) else list(alarms)
-        v, t = status["values"], status["text"]
-        self.lbl_status.setText(
-            f"モード {t['aut']}（生の値 {v['aut']}）／運転 {t['run']}（{v['run']}）／"
-            f"動作 {t['motion']}（{v['motion']}）／非常停止 {t['emergency']}（{v['emergency']}）／"
-            f"アラーム信号 {t['alarm']}（{v['alarm']}）")
+        v, t = status["values"], status.get("text") or {}
+        if status.get("interpreted", True) and t:
+            self.lbl_status.setText(
+                f"モード {t['aut']}（生の値 {v['aut']}）／運転 {t['run']}（{v['run']}）／"
+                f"動作 {t['motion']}（{v['motion']}）／非常停止 {t['emergency']}（{v['emergency']}）／"
+                f"アラーム信号 {t['alarm']}（{v['alarm']}）")
+        else:
+            # 読み方の表は 31i で確かめたもの。この機種では生の数値だけ出す
+            self.lbl_status.setText(
+                "生の数値（この機種は読み方が未確認です）: "
+                + "　".join(f"{k}={val}" for k, val in v.items()))
         self.tbl_alarm.setRowCount(len(self._alarms))
         for i, a in enumerate(self._alarms):
             for j, txt in enumerate((a["code"], f"{a['type']}・{a['no']}・{a['axis']}", a["text"])):
@@ -2586,6 +2605,11 @@ class FocasDialog(QtWidgets.QDialog):
     def _show_writable(self):
         """「書ける？」の帯。書込の機能はまだ無い。判定だけ出す。"""
         if self._status is None:
+            return
+        if not self._status.get("interpreted", True) or not (self._ident or {}).get("supported", True):
+            # 31i 以外では状態の数値の意味が未確認なので、「書ける」「書けない」の判定は出さない
+            self.lbl_writable.setText("書ける？ ― この機種は状態の読み方が未確認なので、判定しません")
+            self.lbl_writable.setStyleSheet("")
             return
         info = self._session_backup[1] if self._session_backup else None
         w = focas_ops.writable_state(
@@ -2662,12 +2686,18 @@ class FocasDialog(QtWidgets.QDialog):
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.bar.setFormat("終わりました")
+        warn = list(getattr(res, "warnings", []) or [])
         if res.complete:
-            self.lbl_check.setText(f"点検 OK ― 控えは完全です。{res.folder}")
-            self.lbl_check.setStyleSheet("color:#166534; font-weight:bold;")
+            self.lbl_check.setText(f"点検 OK ― 控えは完全です。{res.folder}"
+                                   + ("<br>注意（不完全とはしていません）:<br>・" + "<br>・".join(warn[:4])
+                                      if warn else ""))
+            self.lbl_check.setTextFormat(QtCore.Qt.RichText)
+            self.lbl_check.setStyleSheet("color:#166534; font-weight:bold;"
+                                         if not warn else "color:#92400e; font-weight:bold;")
         else:
             self.lbl_check.setText("点検の指摘があります（控えは不完全です）:<br>・"
-                                   + "<br>・".join(res.problems[:8]))
+                                   + "<br>・".join(res.problems[:8])
+                                   + ("<br>注意:<br>・" + "<br>・".join(warn[:4]) if warn else ""))
             self.lbl_check.setTextFormat(QtCore.Qt.RichText)
             self.lbl_check.setStyleSheet("color:#b91c1c;")
         self._refresh_last_backup()
@@ -2766,6 +2796,7 @@ class FocasDialog(QtWidgets.QDialog):
 
     def _shutdown(self):
         """閉じたら必ず切る（握ったままにしない）。命令の最中なら、ヘルパーを止めて待つ。"""
+        self._closed = True
         self._timer.stop()
         self._cancel = True
         client = self.client

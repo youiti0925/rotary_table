@@ -251,6 +251,24 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.FocasDialog(None, s)), [])
 
+    def test_focas_write_dialog(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(
+            lambda s: G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None)), [])
+
+    def test_focas_write_dialog_with_a_long_list_and_long_texts(self):
+        """一覧が長くても・理由の文が長くても、最小サイズが画面を超えない。"""
+        import nd287_app.gui as G
+
+        def make(s):
+            d = G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None)
+            d.tbl.setRowCount(300)
+            d.lbl_why.setText("書けません: " + " ／ ".join(["運転中または停止中です（運転: 運転中・生の値 3）"] * 6))
+            d.lbl_summary.setText("機種 31i M　CNC ID 3C7B5D01-49C1F435-5E28C389-6592C486　" * 4)
+            d.txt_result.setPlainText("結果の行" + chr(10) + "x" * 80)
+            return d
+        self.assertEqual(self._check(make), [])
+
     def test_help_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.HelpDialog(None)), [])

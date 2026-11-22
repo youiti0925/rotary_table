@@ -600,6 +600,18 @@ def _write_one(client, it, value, *, verified, expect_before, allowed, cnc_id, b
     return "ok", "", new
 
 
+def _safe_write_one(client, it, value, **kw):
+    """_write_one の呼び出し。途中で接続が切れた・時間切れのときは、例外にせず結果にする
+    （どこまで書いたかの記録を失わないため）。書く前に切れたなら断った扱い、書いたあとなら不明。"""
+    try:
+        return _write_one(client, it, value, **kw)
+    except C.FocasError as e:
+        if it.get("touched"):
+            return "unknown", (f"{e.message} 書けたかどうかは不明です。つなぎ直して、読み戻した値で"
+                               "確かめてください（自動ではやり直しません）"), []
+        return "refused", f"書く前に機械との通信が止まりました。{e.message}", []
+
+
 def _add_new(seen, new):
     have = {_alarm_key(x) for x in seen}
     for a in new:
@@ -659,7 +671,7 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
             res.state, res.stop_reason = "cancelled", "中止しました（次の1件の前で止まりました）"
             break
         prog(i, total, f"N{it['no']:05d} {it['label'] or ''}")
-        result, note, new = _write_one(
+        result, note, new = _safe_write_one(
             client, it, it["new"], verified=ver, expect_before=it["old"], allowed=allowed,
             cnc_id=cnc_id, backup_info=backup_info, base_alarms=res.alarms_before)
         _add_new(res.new_alarms, new)
@@ -773,7 +785,7 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
             done_item(i, it, "stale", note)
             out.state, out.stop_reason = "stopped", f"{name}: {note}"
             break
-        result_, note, new = _write_one(
+        result_, note, new = _safe_write_one(
             client, it, it["new"], verified=ver, expect_before=cur, allowed=allowed, cnc_id=cnc_id,
             backup_info=backup_info, base_alarms=out.alarms_before)
         _add_new(out.new_alarms, new)
@@ -809,7 +821,7 @@ def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, 
         raise WriteRefused(reasons)
     cur, _kind = _read_value(client, it)
     probe = dict(it, before=None, after=None, rc=None, touched=False, old=cur, new=cur)
-    result, note, _new = _write_one(
+    result, note, _new = _safe_write_one(
         client, probe, cur, verified=verified_list(settings, family) + [key], expect_before=cur,
         allowed=allowed, cnc_id=cnc_id, backup_info=backup_info, base_alarms=al0)
     ok = result == "ok"
@@ -836,3 +848,67 @@ def resolve_unknown(client, it, connect_args, *, cnc_id):
     if _same(kind, cur, it["old"]):
         return "not_written", cur
     return "other", cur
+
+
+STATUS_TEXT = {"pending": "（まだ書いていません）", "ok": "書けた・読み戻しOK", "stale": "書かずに止めた",
+               "failed": "書けなかった", "mismatch": "読み戻しが違う", "unknown": "不明",
+               "refused": "断った"}
+
+
+def describe_result(res, *, undo=False):
+    """書込（または元に戻す）の結果を、画面に出す文の並びにする（Qt 非依存）。
+
+    書込の成否とアラームは分けて言う（電源を入れ直したから出るアラームを、書込の失敗とは言わない）。
+    書いていないのに変わった番号は隠さず出す。
+    """
+    what = "元に戻す" if undo else "書込"
+    n_ok = sum(1 for it in res.items if it["status"] == "ok")
+    total = len(res.items)
+    state = {"done": "最後までできました", "stopped": "途中で止まりました",
+             "cancelled": "中止しました", "running": "実行中", "ready": "まだ始めていません"}
+    lines = [f"{what}: 全 {total} 件中 {n_ok} 件が「書けた・読み戻しOK」です（{state.get(res.state, res.state)}）。"]
+    if res.stop_reason:
+        lines.append(f"止まった理由: {res.stop_reason}")
+    unknown = [it for it in res.items if it["status"] == "unknown"]
+    if unknown:
+        lines.append("書けたかどうかが不明な番号があります: "
+                     + "、".join(f"N{it['no']:05d} {it['label'] or '-'}" for it in unknown)
+                     + "。『つなぎ直して確かめる』を押すと、読み戻した値で決めます（自動ではやり直しません）")
+    pending = sum(1 for it in res.items if it["status"] == "pending")
+    if pending and res.state != "done":
+        lines.append(f"書いていない番号が {pending} 件残っています（途中で止めたため）。")
+    v = res.verify
+    if v is not None and not undo:
+        if v.get("error"):
+            lines.append(f"全行の照合ができませんでした: {v['error']}")
+        else:
+            lines.append(f"パラメータを丸ごと読み直して {v['checked']} 番号を照合: 書いた {v['written_ok']} 件は"
+                         + ("すべて合っています。" if v["ok"] else
+                            f" {len(v['written_ng'])} 件が合っていません（NG）。"))
+            for no, lab, want, got in v["written_ng"][:20]:
+                lines.append(f"  NG N{no} {lab or '-'}: 予定 {want}・機械 {got}")
+            if v["unexpected"]:
+                lines.append(f"書いていないのに変わっていた番号: {len(v['unexpected'])} 件"
+                             "（積算カウンタのように動いて当然の番号もあります。隠さず出しています）")
+                for no, lab, want, got in v["unexpected"][:30]:
+                    lines.append(f"  N{no} {lab or '-'}: 控え {want}・機械 {got}")
+                if len(v["unexpected"]) > 30:
+                    lines.append(f"  …ほか {len(v['unexpected']) - 30} 件")
+            else:
+                lines.append("書いていないのに変わった番号は、ありませんでした。")
+    if res.new_alarms:
+        lines.append(f"{what}のあとに増えたアラームが {len(res.new_alarms)} 件あります"
+                     "（書込が合っているかどうかとは別の話です）:")
+        for a in res.new_alarms:
+            lines.append(f"  {a.get('code')}（種類 {a.get('type')}・番号 {a.get('no')}）{a.get('text', '')}")
+    elif res.alarms_after is not None and not res.note:
+        lines.append(f"{what}のあとに増えたアラームは、ありません。")
+    if res.note:
+        lines.append(res.note)
+    if res.power_cycle:
+        lines.append("PW0000 が出ています。機械の電源を入れ直してください。 入れ直したあとは、"
+                     "控えを取り直して確かめてください（電源を待って自動で確かめる機能は、まだありません）。")
+    if res.written():
+        lines.append("最後に、機械のセッティング画面で『パラメータ書込』（PWE）を 0 に戻してください"
+                     "（アプリは PWE を触りません）。")
+    return lines

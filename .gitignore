@@ -15,3 +15,5 @@ settings.json
 # FOCAS で機械から取った控え（リポジトリに入れない）とヘルパーの記録
 機械バックアップ/
 focas_helper.log
+# FOCAS で機械へ書いた記録（機械の CNC ID が入る）
+マスタ/FOCAS書込ログ.csv

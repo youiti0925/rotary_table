@@ -18,6 +18,8 @@
   alldir_end_rc    cnc_rdpdf_alldir が全部読み終えた後に返す戻り値（既定 3。実機の動き）
   busy_first       {関数名: N} その関数は最初の N 回だけ -1（処理中）を返す
   rdparainfo_fail_at  N 回目の cnc_rdparainfo から戻り値 {rdparainfo_fail_rc}（既定 5）
+  pwe_required / write_ignore / write_store / write_alarms / write_side / write_rc_at
+                   cnc_wrparam の振る舞い（_cnc_wrparam の説明を見る）。書いた値は丸ごと吸い出し（param_dat）にも出る
   alarms / status / cnc_id / remaining / cnc_type など
 実機の動き（2026-11-22 の focas_dirs.py の記録）: cnc_rdpdf_alldir は最後のページの後に戻り値 3 で終わり、
 cnc_rdpdf_subdir は戻り値 0・件数 0 で終わる。登録本数（cnc_rdproginfo）は「プログラム＋フォルダ」の数。

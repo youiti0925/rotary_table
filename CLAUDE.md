@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **927件**。1件でも落ちたら先に進まない。
+- 現在 **1049件**。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -68,6 +68,9 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   ここを通さずに作成経路を増やすと、**画面と実ファイルがずれる**
   （5経路にコピペされていて、実際に2回事故を起こした）。
 - 旧書式（`Q1` なし・8台）では**数値に触らない**。小数を落とすと**1000倍ずれる**。
+- 土台が **FOCAS で取った機械の控え**のときも、**必ず `prepare()` を通す**（`gui.plan_prepare(..., focas_base=True)`）。
+  そのときだけ `reference=""`（機械に実在する番号を「実機に無い」と警告しない）・個体データの0化は製品の軸だけ
+  （`zero_scope="product"`）。機械へ書くのは「機械の控え」と作成結果の**差だけ**。
 
 ### FTPサーバー（`ftpserver.py`）
 - **中身を1バイトも変えない。** `TYPE A`（ASCIIモード）でも改行を書き換えない。

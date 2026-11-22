@@ -234,7 +234,7 @@ class TestBackupAndDiagnosis(DialogBase):
         self.assertTrue(d.b_open.isEnabled())
         # 控えが取れ、状態もよく、PWE も ON（SW0100）→ 「書ける？」は緑（書込の機能はまだ無い）
         self.assertIn("いま書けます", d.lbl_writable.text())
-        self.assertIn("まだ入っていません", d.lbl_writable.text())
+        self.assertIn("この画面は読むだけです", d.lbl_writable.text())
 
     def test_incomplete_backup_is_flagged(self):
         d = self.dialog()

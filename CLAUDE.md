@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1148件**。1件でも落ちたら先に進まない。
+- 現在 **1154件**。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -73,6 +73,9 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   （`zero_scope="product"`）。機械へ書くのは「機械の控え」と作成結果の**差だけ**。
 
 ### FTPサーバー（`ftpserver.py`）
+- **2026-11-23 から画面では隠している**（機械とのやり取りは FOCAS に決定）。消してはいない。
+  `settings` の `show_ftp=true` でツールメニューの「FTPサーバー…」と送信方式の「FTP」が戻る
+  （`tests/test_hidden_features.py`）。
 - **中身を1バイトも変えない。** `TYPE A`（ASCIIモード）でも改行を書き換えない。
   普通のFTPサーバーは `LF`→`CRLF` に直すので、`LF CR CR` が壊れる。
   **自前で実装している理由がこれ。**

@@ -1003,7 +1003,10 @@ class ProgramDialog(QtWidgets.QDialog):
         # 機械へ送信の設定ウィジェット（LAN＝共有フォルダ/FTP、またはメモリカード）
         self.cmb_send = QtWidgets.QComboBox()
         self.cmb_send.addItem("フォルダ／メモリカード（LAN共有・カードどちらも）", "folder")
-        self.cmb_send.addItem("FTP（機械のIPへ）", "ftp")
+        # FTP は既定で隠す（settings の show_ftp=true で出る）。隠しているときに
+        # 前回の設定が ftp でも、選べない方式にはせずフォルダに戻す。
+        if settings.get("show_ftp", False):
+            self.cmb_send.addItem("FTP（機械のIPへ）", "ftp")
         si = self.cmb_send.findData(str(settings.get("nc_send_method", "folder")))
         self.cmb_send.setCurrentIndex(si if si >= 0 else 0)
         self.e_send_folder = QtWidgets.QLineEdit(str(settings.get("nc_send_folder", "")))
@@ -1376,7 +1379,7 @@ class ProgramDialog(QtWidgets.QDialog):
     SEND_HELP = (
         "測定プログラムを機械へ渡す（LAN または メモリカード）\n"
         "\n"
-        "渡し方は2通り。どちらも「機械に取り込んで→メモリから運転」する形で、\n"
+        "どの渡し方も「機械に取り込んで→メモリから運転」する形で、\n"
         "Data Serverは不要です（内蔵イーサネット または カードでOK）。\n"
         "\n"
         "────────────────────────\n"
@@ -1391,6 +1394,7 @@ class ProgramDialog(QtWidgets.QDialog):
         "  ・「機械へ送信」で <機番>.NC をカードに書き出す → カードを機械へ挿す。\n"
         "→ いずれも機械側でそのファイルを選び、取り込んで運転する。\n"
         "\n"
+        "<<FTP>>"
         "────────────────────────\n"
         "方式2: FTP（機械がFTPサーバのとき）\n"
         "────────────────────────\n"
@@ -1400,6 +1404,7 @@ class ProgramDialog(QtWidgets.QDialog):
         "3. 「機械へ送信」を押す → FTPで <機番>.NC を送る。\n"
         "4. 機械側でそのファイルを選んで運転する。\n"
         "\n"
+        "<</FTP>>"
         "【注意】\n"
         "・このアプリは「渡すだけ」です。安全のため、運転開始（サイクル\n"
         "  スタート）は機械側で人が行ってください（自動起動はしません）。\n"
@@ -1408,7 +1413,7 @@ class ProgramDialog(QtWidgets.QDialog):
         "【うまくいかないとき】\n"
         "・「フォルダが見つかりません」→ そのパス（共有/カードのドライブ）を\n"
         "  このPCのエクスプローラで開けるか確認。\n"
-        "・FTPで失敗 → IP・ユーザ／パス・送信先フォルダ・パッシブ設定を確認。\n"
+        "<<FTP>>・FTPで失敗 → IP・ユーザ／パス・送信先フォルダ・パッシブ設定を確認。\n<</FTP>>"
         "・ファイル名は <機番>.NC（機番が無ければ Oxxxx.NC）。"
     )
 
@@ -1419,7 +1424,7 @@ class ProgramDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(dlg)
         text = QtWidgets.QPlainTextEdit()
         text.setReadOnly(True)
-        text.setPlainText(self.SEND_HELP)
+        text.setPlainText(send_help_text(self.settings.get("show_ftp", False)))
         layout.addWidget(text)
         b = QtWidgets.QPushButton("閉じる")
         b.clicked.connect(dlg.accept)
@@ -1428,6 +1433,14 @@ class ProgramDialog(QtWidgets.QDialog):
         row.addWidget(b)
         layout.addLayout(row)
         dlg.exec()
+
+
+def send_help_text(show_ftp):
+    """「機械へ送信の使い方」の文。FTP を隠しているときは FTP の段落を除く。"""
+    text = ProgramDialog.SEND_HELP
+    if show_ftp:
+        return text.replace("<<FTP>>", "").replace("<</FTP>>", "")
+    return re.sub(r"<<FTP>>.*?<</FTP>>", "", text, flags=re.S)
 
 
 def _log_param_creation(settings, **f):
@@ -9953,6 +9966,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("機械と直接つなぐ（FOCAS）…", self.show_focas,
              "PCから機械を直接読み、控え（バックアップ）を取る。読むだけで、機械には何も書かない"),
         ):
+            # FTP は既定で隠す（settings の show_ftp=true で出る）。機能は残してある。
+            if slot == self.show_ftp_server and not self.settings.get("show_ftp", False):
+                continue
             act = tools_menu.addAction(text)
             act.setToolTip(tip)
             act.triggered.connect(slot)

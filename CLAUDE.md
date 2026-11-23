@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1190件**。1件でも落ちたら先に進まない。
+- 現在 **1209件**。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -90,11 +90,16 @@ rm -f settings.json settings.json.bak      # ★必ず消す
 - 号機は機械から読めない。**人が一度選んだ号機**を CNC ID と組で `マスタ/FOCAS機械台帳.csv` に残し、
   次から CNC ID で引いて選んでおく（画面に「台帳」と出す）。最初の1回は今までどおり人が選ぶ。
 
-### 配布（`配布セットを作る.bat` → `installer/` → `deploy.py`）
+### 配布（`配布セットを作る.bat` → `deploy.py`、各PCは `インストール.bat` → exe の `--install`（`install.py`））
 - 各PCは配布セットの「インストール.bat」をダブルクリックするだけ。`%LOCALAPPDATA%\ND287分割測定` に入る（管理者不要）。
+- **PowerShell・VBScript を使わない。** 会社のPCは Cylance が PowerShell を止める（2026-11-23 CR0579 で確認）。
+  入れる処理・前のフォルダからの引き継ぎ・ショートカット（IShellLink を ctypes で）は全部 exe 自身がやる。
+- exe は **`nd287_exe_entry.py` から作る。** `nd287_app\__main__.py` を直接 PyInstaller に渡すと相対 import で
+  起動直後に落ちる exe になる（それまでの exeを作る.bat がそうだった）。
 - 32bit Python と fwlib*.dll はアプリの隣の `focas\` に入り、`focas_client.resolve_python32 / resolve_dll_dir` が
   設定の次に見る。更新しても settings.json・測定データ・控えは消さない。マスタは**無いファイルだけ**入れる。
-- `install.ps1` は **UTF-8 BOM 付き・CRLF**（Windows PowerShell 5 が日本語を読み違えないため）。bat は英数字だけ。
+- 初めて入れるときだけ、前のやり方のフォルダ（settings.json の隣に ND287分割測定.bat 等）を探し、
+  一番新しい settings.json のフォルダから設定・測定データ・控え・マスタを写す（元は消さない・上書きしない）。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

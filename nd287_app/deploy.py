@@ -6,7 +6,6 @@
 
 できるフォルダ（出力先。既定は リポジトリ\\配布\\ND287分割測定）:
     インストール.bat          … 各PCでこれをダブルクリック
-    install.ps1               … インストールの中身（bat から呼ばれる）
     はじめにお読みください.txt
     app\\
         nd287_bunkatsu.exe    … アプリ本体（Python 不要）
@@ -29,6 +28,8 @@ from . import focas_client
 from . import settings as S
 
 EXE_NAME = "nd287_bunkatsu.exe"
+# 配布セットの一番上に置くもの（入れる処理は exe 自身の --install。PowerShell は使わない）
+INSTALLER_PARTS = ("インストール.bat", "はじめにお読みください.txt")
 INSTALL_DIR_NAME = "ND287分割測定"
 # 32bit Python を写すとき入れないもの（大きいだけで FOCAS には要らない）
 PY_SKIP = {"Doc", "Tools", "tcl", "Scripts", "include", "libs", "__pycache__"}
@@ -100,7 +101,7 @@ def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, in
         raise DeployError(f"exe がありません: {exe}（先に exe を作ってください）")
     if not helper.is_file():
         raise DeployError(f"focas_helper.py がありません: {helper}")
-    for name in ("インストール.bat", "install.ps1", "はじめにお読みください.txt"):
+    for name in INSTALLER_PARTS:
         if not (installer_dir / name).is_file():
             raise DeployError(f"インストーラの部品がありません: {installer_dir / name}")
     if out.exists():
@@ -113,7 +114,7 @@ def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, in
     lines.append(f"アプリ本体: {exe.name}")
     if masters.is_dir():
         shutil.copytree(masters, app / "マスタ",
-                        ignore=shutil.ignore_patterns("ユーザー*.csv", "FOCAS*ログ.csv",
+                        ignore=shutil.ignore_patterns("ユーザー*.csv", "FOCAS*ログ.csv", "*ログ.csv",
                                                       "FOCAS機械台帳.csv", "__pycache__"))
         lines.append("マスタ: " + "・".join(sorted(p.name for p in (app / "マスタ").iterdir())))
     if py32_dir is not None:
@@ -128,7 +129,7 @@ def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, in
         lines.append(f"FANUC ライブラリ: {fwlib_dir}（" + "・".join(p.name for p in files) + "）")
     else:
         lines.append("FANUC ライブラリ（Fwlib32.dll）: 入れていません（FOCAS は使えません）")
-    for name in ("インストール.bat", "install.ps1", "はじめにお読みください.txt"):
+    for name in INSTALLER_PARTS:
         shutil.copy2(installer_dir / name, out / name)
     return lines
 

@@ -602,7 +602,7 @@ python -m unittest discover -s tests -v
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name nd287_bunkatsu --paths . nd287_app/__main__.py
+pyinstaller --onefile --windowed --name nd287_bunkatsu --paths . nd287_exe_entry.py
 ```
 
 できた `dist\nd287_bunkatsu.exe` を検査PCにコピーすれば、Python無しで

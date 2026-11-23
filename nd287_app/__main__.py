@@ -8,15 +8,21 @@
     python -m nd287_app                    # 実機接続（設定: 既定はCOM自動検出、9600 8E1）
     python -m nd287_app --dummy            # 実機なしで画面確認
     python -m nd287_app --port COM3 --baud 19200 --parity N
+    nd287_bunkatsu.exe --install [--quiet]  # このPCに入れる（配布セットの インストール.bat から）
 """
 
 import argparse
+import sys
 
 from .nd287 import ND287Device, DummyDevice
 from .settings import load_settings
 
 
 def main():
+    # 配布セットの「インストール.bat」から: このPCに入れる（install.py。PowerShell は使わない）
+    if "--install" in sys.argv[1:]:
+        from .install import main as install_main
+        sys.exit(install_main(sys.argv[1:]))
     ap = argparse.ArgumentParser(description="ND287 分割測定アプリ")
     ap.add_argument(
         "--port",

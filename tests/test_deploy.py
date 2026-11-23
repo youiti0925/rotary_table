@@ -28,40 +28,38 @@ class TempDir(unittest.TestCase):
 
 class TestInstallerFiles(unittest.TestCase):
     def test_parts_exist(self):
-        for name in ("インストール.bat", "install.ps1", "はじめにお読みください.txt"):
+        for name in ("インストール.bat", "はじめにお読みください.txt"):
             self.assertTrue((REPO / "installer" / name).is_file(), name)
         self.assertTrue((REPO / "配布セットを作る.bat").is_file())
+        self.assertTrue((REPO / "nd287_exe_entry.py").is_file())
 
-    def test_ps1_has_bom_and_crlf(self):
-        # Windows PowerShell 5 は BOM が無いと日本語を読み違える
-        data = (REPO / "installer" / "install.ps1").read_bytes()
-        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
-        self.assertIn(b"\r\n", data)
-        self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
+    def test_no_powershell(self):
+        # 会社のPCは Cylance が PowerShell を止める（2026-11-23 CR0579 で確認）
+        self.assertFalse((REPO / "installer" / "install.ps1").exists())
+        for name in ("インストール.bat",):
+            data = (REPO / "installer" / name).read_bytes().lower()
+            self.assertNotIn(b"powershell", data.replace(b"no powershell", b""))
+            self.assertNotIn(b"cscript", data)
+            self.assertNotIn(b"wscript", data)
 
-    def test_bat_is_ascii_and_calls_ps1(self):
+    def test_bat_is_ascii_and_runs_the_exe(self):
         # コードページに左右されないよう、インストール.bat の中身は英数字だけにする
         data = (REPO / "installer" / "インストール.bat").read_bytes()
         data.decode("ascii")
-        self.assertIn(b'-File "%~dp0install.ps1"', data)
-        self.assertIn(b"-ExecutionPolicy Bypass", data)
+        self.assertIn(b'start "" /wait "%~dp0app\\nd287_bunkatsu.exe" --install', data)
+        self.assertIn(b"pause", data)                          # 失敗したら止まって見せる
+        self.assertIn(b"\r\n", data)
 
-    def test_ps1_keeps_user_files(self):
-        text = (REPO / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("LOCALAPPDATA", text)                   # 管理者の権限が要らない場所
-        self.assertIn("/XD $srcMaster", text)                  # マスタは別扱い
-        self.assertIn("if (-not (Test-Path $to))", text)       # 無いものだけ入れる
-        self.assertNotIn("/MIR", text)                         # 設定・測定データを消さない
-        self.assertNotIn("/PURGE", text)
+    def test_exe_is_built_from_the_entry_file(self):
+        # nd287_app\\__main__.py を直接渡すと相対 import で落ちる exe になる
+        for name in ("配布セットを作る.bat", "exeを作る.bat"):
+            text = (REPO / name).read_text(encoding="utf-8")
+            self.assertIn("nd287_exe_entry.py", text, name)
+            self.assertNotIn("__main__.py", text, name)
 
-    def test_ps1_takes_over_old_settings_and_data(self):
-        text = (REPO / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("Find-OldInstall", text)
-        # 新しい場所にまだ設定が無いときだけ引き継ぐ（2回目以降に古い設定で上書きしない）
-        self.assertIn("if (-not (Test-Path (Join-Path $dst 'settings.json')))", text)
-        for sub in ("測定データ", "機械バックアップ", "マスタ"):
-            self.assertIn(f"'{sub}'", text)
-        self.assertNotIn("Remove-Item", text)                  # 元のフォルダは消さない
+    def test_entry_file_imports_the_package(self):
+        text = (REPO / "nd287_exe_entry.py").read_text(encoding="utf-8")
+        self.assertIn("from nd287_app.__main__ import main", text)
 
 
 class TestFwlib(TempDir):
@@ -102,7 +100,8 @@ class TestBundle(TempDir):
     def _make(self, **kw):
         exe = touch(self.tmp / "dist" / "nd287_bunkatsu.exe")
         masters = self.tmp / "マスタ"
-        for n in ("測定条件.csv", "ユーザー回転条件.csv", "FOCAS書込ログ.csv", "FOCAS機械台帳.csv"):
+        for n in ("測定条件.csv", "ユーザー回転条件.csv", "FOCAS書込ログ.csv", "FOCAS機械台帳.csv",
+                  "パラメータ作成ログ.csv"):
             touch(masters / n)
         py = self.tmp / "py32"
         touch(py / "python.exe")
@@ -119,14 +118,14 @@ class TestBundle(TempDir):
 
     def test_layout(self):
         out, lines = self._make()
-        for rel in ("インストール.bat", "install.ps1", "はじめにお読みください.txt",
+        for rel in ("インストール.bat", "はじめにお読みください.txt",
                     "app/nd287_bunkatsu.exe", "app/focas_helper.py", "app/focas/python32/python.exe",
                     "app/focas/python32/Lib/os.py", "app/focas/Fwlib32.dll", "app/focas/fwlibe1.dll",
                     "app/マスタ/測定条件.csv"):
             self.assertTrue((out / rel).is_file(), rel)
         # PC ごとのもの（利用者の条件・書込ログ・台帳）は配らない
         for rel in ("app/マスタ/ユーザー回転条件.csv", "app/マスタ/FOCAS書込ログ.csv",
-                    "app/マスタ/FOCAS機械台帳.csv"):
+                    "app/マスタ/FOCAS機械台帳.csv", "app/マスタ/パラメータ作成ログ.csv"):
             self.assertFalse((out / rel).exists(), rel)
         self.assertTrue(any("Fwlib32.dll" in ln for ln in lines))
 

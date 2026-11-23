@@ -9,11 +9,15 @@
 # - 初めて入れるとき、前のやり方（ND287分割測定.bat や exe を置いたフォルダ）で使っていた
 #   設定・測定データ・控え・利用者のマスタを探して、新しい場所へ写す（元のフォルダは消さない）。
 
+# -Quiet: 窓を出さずに文字で知らせる（動作確認・まとめて入れるとき用）
+param([switch]$Quiet)
+
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 $title = 'ND287 分割測定アプリ インストール'
 
 function Say($text, $icon = 'Information') {
+    if ($Quiet) { Write-Output "[$icon] $text"; return }
     [void][System.Windows.Forms.MessageBox]::Show($text, $title, 'OK', $icon)
 }
 
@@ -65,6 +69,7 @@ try {
 
     # アプリが開いていると上書きできない
     while (Get-Process -Name 'nd287_bunkatsu' -ErrorAction SilentlyContinue) {
+        if ($Quiet) { Say 'ND287 分割測定アプリが開いています。閉じてからやり直してください。' 'Error'; exit 1 }
         $r = [System.Windows.Forms.MessageBox]::Show(
             "ND287 分割測定アプリが開いています。`nアプリを閉じてから「OK」を押してください。",
             $title, 'OKCancel', 'Warning')

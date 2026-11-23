@@ -3,7 +3,7 @@
 ND287 分割測定アプリ（PySide6・Windows）。回転テーブルの割出精度を測り、
 FANUCの測定プログラムとパラメータファイルも作る。
 
-**作業ブランチ: `claude/stoic-euler-ayjt8s`**（mainへは出さない）
+**作業ブランチ: `claude/stoic-euler-ayjt8s`**（作業が終わるたびに `main` へも反映して、main を常に最新にしておく。2026-11-23 利用者の決定）
 
 ---
 

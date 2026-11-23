@@ -54,6 +54,15 @@ class TestInstallerFiles(unittest.TestCase):
         self.assertNotIn("/MIR", text)                         # 設定・測定データを消さない
         self.assertNotIn("/PURGE", text)
 
+    def test_ps1_takes_over_old_settings_and_data(self):
+        text = (REPO / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Find-OldInstall", text)
+        # 新しい場所にまだ設定が無いときだけ引き継ぐ（2回目以降に古い設定で上書きしない）
+        self.assertIn("if (-not (Test-Path (Join-Path $dst 'settings.json')))", text)
+        for sub in ("測定データ", "機械バックアップ", "マスタ"):
+            self.assertIn(f"'{sub}'", text)
+        self.assertNotIn("Remove-Item", text)                  # 元のフォルダは消さない
+
 
 class TestFwlib(TempDir):
     def test_collects_fwlib_dlls_only(self):

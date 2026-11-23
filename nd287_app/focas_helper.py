@@ -968,6 +968,9 @@ def main(argv=None):
     if path is None:
         hello["dll_error"] = f"{DLL_NAME} が見つかりません"
     else:
+        # Fwlib32.dll は、つなぐときに fwlibe1.dll などを名前だけで読む。同じフォルダから
+        # 見つかるよう PATH の先頭に足す（インストーラで focas フォルダにまとめて入れたとき用）。
+        os.environ["PATH"] = os.path.dirname(path) + os.pathsep + os.environ.get("PATH", "")
         try:
             lib = ctypes.WinDLL(path)           # フルパスで読む（試験スクリプトと同じ）
             hello["dll_ok"] = True

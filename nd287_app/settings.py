@@ -173,6 +173,12 @@ DEFAULTS = dict(
     focas_python32="",           # 32bit Python の場所（空なら既定の場所を探す）
     focas_dll_dir="",            # Fwlib32.dll のフォルダ（空なら SERVO GUIDE → SysWOW64）
     focas_helper_path="",        # focas_helper.py の場所（空なら exe の隣 → パッケージのフォルダ）
+    # 自動でつなぐ（focas_find）。auto_connect: FOCAS の画面を開いたら自動でつなぐ。
+    # auto_find: 入れた IP に居なければ同じ LAN の中を探す／アプリの下に「機械が見えます」を出す。
+    focas_auto_connect=True,
+    focas_auto_find=True,
+    # 台帳: 機械ごとの番号（CNC ID）→ 人が選んだ号機・最後の IP。次から号機を CNC ID で引く
+    focas_registry_csv=r"マスタ/FOCAS機械台帳.csv",
     focas_host="192.168.1.1",
     focas_port=8193,
     focas_timeout=10,            # 接続の時間切れ[秒]

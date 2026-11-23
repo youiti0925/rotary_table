@@ -17,3 +17,8 @@ settings.json
 focas_helper.log
 # FOCAS で機械へ書いた記録（機械の CNC ID が入る）
 マスタ/FOCAS書込ログ.csv
+
+# 配布セット（配布セットを作る.bat が作る）
+配布/
+# FOCAS の台帳（機械の CNC ID が入る。PCごと）
+マスタ/FOCAS機械台帳.csv

@@ -118,7 +118,7 @@ from . import fanuc_param
 from . import fanuc_pcorr
 from . import param_build
 from . import ftpserver
-from . import focas_backup, focas_client, focas_ops
+from . import focas_backup, focas_client, focas_ops, focas_find
 from . import controllers
 from . import seiban_flow
 from . import batch_build
@@ -2144,6 +2144,65 @@ class FtpServerDialog(QtWidgets.QDialog):
         super().reject()
 
 
+def _focas_pick_host(settings, host, port, progress, *, auto):
+    """つなぐ先の IP を決める（別スレッドで呼ぶ）。auto でなければ入れた IP のまま。
+
+    auto のとき: 入れた IP の窓口（ポート 8193）が開いていなければ、台帳の IP と
+    同じ LAN の中を探して、見つかった機械の IP を返す（focas_find。FOCAS の命令は送らない）。
+    見つからなければ FocasError（connect）。
+    """
+    if (not auto or not settings.get("focas_auto_find", True)
+            or focas_find.port_open(host, port, timeout=1.0)):
+        return host
+    progress(0, 1, "機械を探しています（同じ LAN の中）")
+    reg = focas_find.registry_path(settings)
+    try:
+        known = focas_find.known_ips(reg)
+    except Exception:
+        known = []
+    found = focas_find.find_machines(
+        focas_find.candidate_hosts([host] + known), port, first_only=True)
+    if not found:
+        raise focas_client.FocasError(
+            "connect",
+            f"{host} に機械が見つかりません。同じ LAN の中も探しましたが、"
+            f"FOCAS の窓口（ポート {port}）が開いている機械はありませんでした",
+            hint="LAN ケーブル・機械の電源・PC の IP アドレス（機械と同じ 192.168.1.x か）を確かめてください")
+    return found[0]
+
+
+def _focas_registry_unit(settings, ident, host):
+    """台帳に IP を残し、人が前に選んだ号機（CNC ID で引く）を返す。台帳が読めなくても止めない。"""
+    reg = focas_find.registry_path(settings)
+    cid = (ident or {}).get("cnc_id")
+    try:
+        unit = focas_find.unit_for(reg, cid)
+        focas_find.remember(reg, cid, ip=host)
+    except Exception:
+        return ""
+    return unit
+
+
+def _focas_registry_set_unit(settings, ident, unit, host=""):
+    """人が号機を選んだら、CNC ID と組にして台帳に残す（次から CNC ID で引ける）。"""
+    cid = (ident or {}).get("cnc_id")
+    if not cid or not unit:
+        return
+    try:
+        focas_find.remember(focas_find.registry_path(settings), cid, ip=host or None, unit=unit)
+    except Exception:
+        pass
+
+
+def _select_unit(cmb, unit):
+    """号機の選択肢から unit を選ぶ。候補に無ければ足して選ぶ（台帳の号機が号機マスタの候補外のとき）。"""
+    i = cmb.findData(unit)
+    if i < 0:
+        cmb.addItem(f"号機{unit}（台帳）", unit)
+        i = cmb.count() - 1
+    cmb.setCurrentIndex(i)
+
+
 class _FocasJob(QtCore.QThread):
     """機械への命令を別スレッドで行う（待っている間に画面が固まらないように）。"""
 
@@ -2175,9 +2234,13 @@ class FocasDialog(QtWidgets.QDialog):
 
     log_line = QtCore.Signal(str)
 
-    def __init__(self, parent, settings):
+    def __init__(self, parent, settings, *, auto=False):
         super().__init__(parent)
         self.settings = settings
+        # auto: 開いたら自動でつなぐ・入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う。
+        # アプリの画面から開くときだけ True（試験では False。勝手に LAN を探さない）
+        self._auto = bool(auto)
+        self._reg_unit = ""
         self.client = None
         self._job = None
         self._busy = False
@@ -2291,6 +2354,7 @@ class FocasDialog(QtWidgets.QDialog):
         self.cmb_unit.setToolTip(
             "号機番号は機械から読めません。号機マスタの候補から、人が選びます（黙って決めません）")
         bf.addRow("号機（フォルダ名に付く）", self.cmb_unit)
+        self.cmb_unit.activated.connect(self._unit_chosen)
         bb = QtWidgets.QHBoxLayout()
         self.b_backup = QtWidgets.QPushButton("控えを取る")
         self.b_backup.setObjectName("primary")
@@ -2385,8 +2449,21 @@ class FocasDialog(QtWidgets.QDialog):
         self._load_controllers()
         self._refresh_last_backup()
         self._refresh_enabled()
+        if self._auto and self.settings.get("focas_auto_connect", True) and self._ready_to_connect():
+            QtCore.QTimer.singleShot(0, self.connect_machine)
 
     # --- 下請け ----------------------------------------------------------------
+
+    def _ready_to_connect(self):
+        """32bit Python とヘルパーが見つかるか（見つからなければ自動ではつながない。はじめての設定へ）。"""
+        return bool(focas_client.resolve_python32(str(self.settings.get("focas_python32") or ""))
+                    and focas_client.resolve_helper(str(self.settings.get("focas_helper_path") or "")))
+
+    def _unit_chosen(self, _i):
+        """人が号機を選んだ。つながっていれば CNC ID と組で台帳に残す。"""
+        if self._auto and self._connected:
+            _focas_registry_set_unit(self.settings, self._ident, self.cmb_unit.currentData() or "",
+                                     self.e_host.text().strip())
 
     def _warn(self, title, text):
         QtWidgets.QMessageBox.warning(self, title, text)
@@ -2576,16 +2653,24 @@ class FocasDialog(QtWidgets.QDialog):
         port, timeout = self.sp_port.value(), focas_client.connect_timeout(self.settings)
         families = dict(self.settings.get("focas_families") or {})
         self._set_state("つないでいます…")
+        settings, auto = self.settings, self._auto
 
         def work(progress):
-            client.call("connect", {"host": host, "port": port, "timeout": timeout,
+            h = _focas_pick_host(settings, host, port, progress, auto=auto)
+            client.call("connect", {"host": h, "port": port, "timeout": timeout,
                                     "families": families})
-            return (client.call("identify"), client.call("status"), client.call("alarms"))
+            ident = client.call("identify")
+            unit = _focas_registry_unit(settings, ident, h) if auto else ""
+            return (ident, client.call("status"), client.call("alarms"), h, unit)
 
         self._run(work, self._connected_ok)
 
     def _connected_ok(self, res):
-        ident, status, alarms = res
+        ident, status, alarms = res[:3]
+        if len(res) > 3 and res[3] and res[3] != self.e_host.text().strip():
+            self.e_host.setText(res[3])            # 探して見つかった IP（次回もここから試す）
+            self._persist()
+        self._reg_unit = res[4] if len(res) > 4 else ""
         self._ident = ident
         self._set_connected(True)
         self._set_state(f"つながりました（{self.e_host.text().strip()}:{self.sp_port.value()}）",
@@ -2606,6 +2691,11 @@ class FocasDialog(QtWidgets.QDialog):
             ("号機マスタでは " + "・".join(f"号機{u}" for u in cands) + " とみられます"
              "（号機番号は機械から読めないので、合っているか確かめて、②で選んでください）")
             if cands else "号機マスタに当てはまる号機が見つかりません")
+        if self._reg_unit:
+            _select_unit(self.cmb_unit, self._reg_unit)
+            self.lbl_unit.setText(
+                f"<b>号機{self._reg_unit}</b>（この機械の CNC ID が台帳にありました。前に人が選んだ号機です。"
+                "違っていたら②で選び直してください）")
         self._session_backup = None
         self._refresh_last_backup()
         self._show_state(status, alarms)
@@ -2878,9 +2968,13 @@ class FocasWriteDialog(QtWidgets.QDialog):
     COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
-                 basic_text=None, product_axes=()):
+                 basic_text=None, product_axes=(), auto=False):
         super().__init__(parent)
         self.settings = settings
+        # auto: 入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う（FocasDialog と同じ）。
+        # 書く窓なので、開いただけでは つながない（「つなぐ」は人が押す）
+        self._auto = bool(auto)
+        self._reg_unit = ""
         self.plan_fn = plan_fn
         self._basic_text = basic_text            # BASIC の中身（前の製品の値が残っていないかの注意用）
         self._product_axes = tuple(product_axes or ())
@@ -2958,6 +3052,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.cmb_unit.addItem("（号機を決めない）", "")
         self.cmb_unit.setToolTip("号機番号は機械から読めません。号機マスタの候補から、人が選びます（黙って決めません）")
         self.cmb_unit.currentIndexChanged.connect(lambda _i: self._show_target())
+        self.cmb_unit.activated.connect(self._unit_chosen)
         bf.addRow("号機（記録に付く）", self.cmb_unit)
         brow = QtWidgets.QHBoxLayout()
         self.b_connect = QtWidgets.QPushButton("つなぐ")
@@ -3152,6 +3247,12 @@ class FocasWriteDialog(QtWidgets.QDialog):
     def _ctx(self):
         return {"unit": self.cmb_unit.currentData() or "", "seiban": self.seiban}
 
+    def _unit_chosen(self, _i):
+        """人が号機を選んだ。つながっていれば CNC ID と組で台帳に残す。"""
+        if self._auto and self._connected:
+            _focas_registry_set_unit(self.settings, self._ident, self.cmb_unit.currentData() or "",
+                                     self.e_host.text().strip())
+
     def _persist(self):
         self.settings["focas_host"] = self.e_host.text().strip()
         self.settings["focas_port"] = self.sp_port.value()
@@ -3278,16 +3379,24 @@ class FocasWriteDialog(QtWidgets.QDialog):
         port, timeout = self.sp_port.value(), focas_client.connect_timeout(self.settings)
         families = dict(self.settings.get("focas_families") or {})
         self._set_state("つないでいます…")
+        settings, auto = self.settings, self._auto
 
         def work(progress):
-            client.call("connect", {"host": host, "port": port, "timeout": timeout,
+            h = _focas_pick_host(settings, host, port, progress, auto=auto)
+            client.call("connect", {"host": h, "port": port, "timeout": timeout,
                                     "families": families})
-            return (client.call("identify"), client.call("status"), client.call("alarms"))
+            ident = client.call("identify")
+            unit = _focas_registry_unit(settings, ident, h) if auto else ""
+            return (ident, client.call("status"), client.call("alarms"), h, unit)
 
         self._run(work, self._connected_ok, mode="connect")
 
     def _connected_ok(self, res):
-        ident, status, alarms = res
+        ident, status, alarms = res[:3]
+        if len(res) > 3 and res[3] and res[3] != self.e_host.text().strip():
+            self.e_host.setText(res[3])            # 探して見つかった IP
+            self._persist()
+        reg_unit = res[4] if len(res) > 4 else ""
         old = (self._ident or {}).get("cnc_id")
         self._ident = ident
         self._set_connected(True)
@@ -3299,6 +3408,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.cmb_unit.addItem("（号機を決めない）", "")
         for u in cands:
             self.cmb_unit.addItem(f"号機{u}", u)
+        if reg_unit:                                     # 台帳の号機（前に人が選んだもの）を選んでおく
+            _select_unit(self.cmb_unit, reg_unit)
         self.cmb_unit.blockSignals(False)
         if old != ident.get("cnc_id"):                   # 別の機械につながったら、控えも結果も引き継がない
             self._backup, self._wplan, self._plan, self._raw = None, None, None, None
@@ -6618,6 +6729,7 @@ class ParamDialog(QtWidgets.QDialog):
         axes_shown = sorted(per_axis) if (split and len(split[0]) >= 2) else [axis]
         FocasWriteDialog(
             self, self.settings, plan_fn, seiban=seiban, basic_text=raw, product_axes=axes_shown,
+            auto=True,
             subtitle=f"{self.e_model.text().strip() or '—'}（{what}）／ BASIC {Path(master_path).name}"
                      " の製品値のうち、機械の今と違う所だけを書きます。").exec()
 
@@ -9483,6 +9595,8 @@ class _NoWheelFilter(QtCore.QObject):
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
+    # FOCAS の機械が LAN に見えたか（見えた IP。見えなくなったら ""）
+    _focas_seen = QtCore.Signal(str)
     # 通信診断スレッド完了通知（レポート文字列）
     _diag_done = QtCore.Signal(str)
     # SwitchBot Bot押下の経過通知
@@ -10230,6 +10344,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._command_signal.connect(self.on_command)
         # ウィンドウ表示後に接続（ポート探索はバックグラウンドで行うので画面は固まらない）
         QtCore.QTimer.singleShot(100, self.connect_device)
+
+        # FOCAS の機械の見張り（LAN をつないだら知らせる）。見るのは設定と台帳の IP だけ
+        # （窓口に声をかけてすぐ切るだけ。LAN 全体を探すのは「つなぐ」を押したときだけ）
+        self.b_machine = QtWidgets.QPushButton("")
+        self.b_machine.setVisible(False)
+        self.b_machine.setStyleSheet("color:#166534; font-weight:bold;")
+        self.b_machine.setToolTip("押すと「機械と直接つなぐ（FOCAS）」を開いて、自動でつなぎます")
+        self.b_machine.clicked.connect(self.show_focas)
+        self.statusBar().addPermanentWidget(self.b_machine)
+        self._focas_seen.connect(self._on_focas_seen)
+        self._focas_watch_busy = False
+        self._focas_watch_ips = None
+        self._focas_watch_n = 0
+        self._focas_watch_host = ""
+        if self.settings.get("focas_auto_find", True):
+            self.focas_watch_timer = QtCore.QTimer(self)
+            self.focas_watch_timer.timeout.connect(self._focas_watch_tick)
+            self.focas_watch_timer.start(10000)
+            QtCore.QTimer.singleShot(3000, self._focas_watch_tick)
 
         # ND287側から送られてくるデータの受信ループ
         self.rx_timer = QtCore.QTimer(self)
@@ -11265,9 +11398,56 @@ class MainWindow(QtWidgets.QMainWindow):
         """このPCをFTPサーバーにして、制御装置に直接ファイルを取りに来させる。"""
         FtpServerDialog(self, self.settings).exec()
 
+    def _focas_watch_tick(self):
+        """10秒ごと。PC の LAN の口が変わったとき（LAN をつないだ等）と、30秒ごとに、機械を見る。"""
+        if self._focas_watch_busy:
+            return
+        ips = tuple(focas_find.local_ipv4s())
+        self._focas_watch_n += 1
+        changed = ips != self._focas_watch_ips
+        self._focas_watch_ips = ips
+        if not (changed or self._focas_watch_n % 3 == 0):
+            return
+        settings = self.settings
+        hosts = [str(settings.get("focas_host") or "")]
+        try:
+            hosts += focas_find.known_ips(focas_find.registry_path(settings))[:4]
+        except Exception:
+            pass
+        port = int(settings.get("focas_port", 8193) or 8193)
+        self._focas_watch_busy = True
+
+        def work():
+            try:
+                found = focas_find.find_machines([h for h in hosts if h], port, timeout=0.5)
+                self._focas_seen.emit(found[0] if found else "")
+            except Exception:
+                self._focas_seen.emit("")
+            finally:
+                self._focas_watch_busy = False
+        threading.Thread(target=work, daemon=True).start()
+
+    @QtCore.Slot(str)
+    def _on_focas_seen(self, host):
+        if host == self._focas_watch_host:
+            return
+        self._focas_watch_host = host
+        if not host:
+            self.b_machine.setVisible(False)
+            return
+        try:
+            unit = focas_find.unit_for_ip(focas_find.registry_path(self.settings), host)
+        except Exception:
+            unit = ""
+        self.b_machine.setText(f"機械が見えます {host}" + (f"（前回 号機{unit}）" if unit else "")
+                               + " ▶ つなぐ")
+        self.b_machine.setVisible(True)
+        self.statusBar().showMessage(
+            f"LAN に機械が見えました（{host}）。右下のボタンで FOCAS につなげます", 8000)
+
     def show_focas(self):
         """PCから機械を直接読む（FOCAS）。つなぐ・状態・控え・自己診断。"""
-        FocasDialog(self, self.settings).exec()
+        FocasDialog(self, self.settings, auto=True).exec()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
@@ -12989,6 +13169,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cmd_timer.stop()
         if getattr(self, "web", None) is not None:
             self.web.stop()
+        if getattr(self, "focas_watch_timer", None) is not None:
+            self.focas_watch_timer.stop()
         self.dev.close()
         super().closeEvent(event)
 

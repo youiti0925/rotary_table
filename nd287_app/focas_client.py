@@ -145,10 +145,20 @@ def _from_dict(err):
 # 設定からの場所の解決
 # ---------------------------------------------------------------------------
 
+def bundled_dir():
+    """インストーラで入れた FOCAS 一式の場所（アプリの隣の focas フォルダ）。"""
+    from . import settings as S
+    return S.app_dir() / "focas"
+
+
 def resolve_python32(setting=""):
-    """32bit Python の場所。設定 → LOCALAPPDATA\\Python\\*-32 → C:\\Python*-32 の順。無ければ ''。"""
+    """32bit Python の場所。設定 → 一緒に入れたもの（focas\\python32）→ LOCALAPPDATA\\Python\\*-32
+    → C:\\Python*-32 の順。無ければ ''。"""
     if setting:
         return setting if os.path.isfile(setting) else ""
+    bundled = bundled_dir() / "python32" / "python.exe"
+    if bundled.is_file():
+        return str(bundled)
     pats = []
     la = os.environ.get("LOCALAPPDATA")
     if la:
@@ -159,6 +169,15 @@ def resolve_python32(setting=""):
         found = sorted(glob.glob(pat))
         if found:
             return found[-1]
+    return ""
+
+
+def resolve_dll_dir(setting=""):
+    """Fwlib32.dll のフォルダ。設定 → 一緒に入れたもの（focas）→ ''（ヘルパーが SERVO GUIDE・SysWOW64 を探す）。"""
+    if setting:
+        return setting
+    if (bundled_dir() / "Fwlib32.dll").is_file():
+        return str(bundled_dir())
     return ""
 
 
@@ -516,7 +535,7 @@ def make_client(settings, log_path=None):
     return FocasClient(
         resolve_python32(str(settings.get("focas_python32") or "")),
         resolve_helper(str(settings.get("focas_helper_path") or "")),
-        dll_dir=str(settings.get("focas_dll_dir") or ""),
+        dll_dir=resolve_dll_dir(str(settings.get("focas_dll_dir") or "")),
         timeouts={"connect": t + CONNECT_MARGIN},
         log_path=log_path,
         env=None,

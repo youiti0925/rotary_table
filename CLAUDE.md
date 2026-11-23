@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1154件**。1件でも落ちたら先に進まない。
+- 現在 **1190件**。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -81,6 +81,20 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   **自前で実装している理由がこれ。**
 - ユーザー名・パスワードは**大文字小文字を区別しない**。
   FANUCのISOコードに小文字が無く、機械は `USER CNC` と大文字で送ってくる。
+
+### FOCAS の自動接続（`focas_find.py`）
+- アプリの画面から開いた FOCAS の窓だけ `auto=True`（試験で作る窓は False。勝手に LAN を探さない）。
+- 入れた IP に居なければ、台帳の IP → 同じ網（/24）の順に**ポート 8193 に声をかけてすぐ切るだけ**で探す。
+  LAN 全体を探すのは「つなぐ」を押したとき（自動でつなぐときも含む）だけ。アプリ下の見張り（10秒ごと）は
+  設定と台帳の IP しか見ない（会社の LAN を何度も探し回らない）。
+- 号機は機械から読めない。**人が一度選んだ号機**を CNC ID と組で `マスタ/FOCAS機械台帳.csv` に残し、
+  次から CNC ID で引いて選んでおく（画面に「台帳」と出す）。最初の1回は今までどおり人が選ぶ。
+
+### 配布（`配布セットを作る.bat` → `installer/` → `deploy.py`）
+- 各PCは配布セットの「インストール.bat」をダブルクリックするだけ。`%LOCALAPPDATA%\ND287分割測定` に入る（管理者不要）。
+- 32bit Python と fwlib*.dll はアプリの隣の `focas\` に入り、`focas_client.resolve_python32 / resolve_dll_dir` が
+  設定の次に見る。更新しても settings.json・測定データ・控えは消さない。マスタは**無いファイルだけ**入れる。
+- `install.ps1` は **UTF-8 BOM 付き・CRLF**（Windows PowerShell 5 が日本語を読み違えないため）。bat は英数字だけ。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

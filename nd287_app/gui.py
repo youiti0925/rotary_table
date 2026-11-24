@@ -1341,10 +1341,11 @@ class ProgramDialog(QtWidgets.QDialog):
         pf.addRow("送信先フォルダ", self.e_ftp_dir)
         # ページ2: 機械へ直接（FOCAS）
         zpage = QtWidgets.QLabel(
-            "<b>FOCAS</b>（PC から機械を直接読み書きする FANUC の仕組み）で、機械のメモリへ直接書きます。"
+            "FOCAS（PC から機械を直接読み書きする FANUC の仕組み）で、機械のメモリへ直接書きます。"
             "「機械へ送信」を押すと、機械につなぐ画面が開きます。書く前に控えを取り、確認の窓で承認したときだけ書きます。")
         zpage.setWordWrap(True)
-        zpage.setTextFormat(QtCore.Qt.RichText)
+        zpage.setTextFormat(QtCore.Qt.PlainText)           # 折り返しの長い文は、横幅の最小値を大きくしやすい
+        zpage.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.send_stack.addWidget(fpage)
         self.send_stack.addWidget(ppage)
         self.send_stack.addWidget(zpage)
@@ -3047,6 +3048,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._zero_all = False
         self._keep_motor = bool(keep_motor)
         self._motor_id = str(motor_id or "").strip()
+        self._unit_note = ""
         self._expect_unit = str(expect_unit or "").strip()   # かんたん作成で選んだ号機（つないだ機械と照らし合わせる）
         self._auto_backup = bool(auto_backup)               # つないだら、控えを自動で取る（読むだけ）
         self._stage1 = None              # DGPR の1段目（2020 と DGPR だけ書く）のとき、その説明。通常は None
@@ -3516,6 +3518,14 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.cmb_unit.addItem(f"号機{u}", u)
         if reg_unit:                                     # 台帳の号機（前に人が選んだもの）を選んでおく
             _select_unit(self.cmb_unit, reg_unit)
+        elif self._expect_unit and self._expect_unit in cands and ident.get("cnc_id"):
+            # 台帳に無い機械（初めてつないだ）: かんたん作成で選んだ号機を、この機械の号機として台帳に残す。
+            # 人が選んだ号機なので、違っていれば号機の欄で直せる（直すと台帳も直る）
+            _select_unit(self.cmb_unit, self._expect_unit)
+            if self._auto:
+                _focas_registry_set_unit(self.settings, ident, self._expect_unit, self.e_host.text().strip())
+            self._unit_note = (f"この機械を {self._expect_unit}号機として台帳に残しました"
+                               "（かんたん作成で選んだ号機です。違うときは号機の欄で直してください）")
         self.cmb_unit.blockSignals(False)
         if old != ident.get("cnc_id"):                   # 別の機械につながったら、控えも結果も引き継がない
             self._backup, self._wplan, self._plan, self._raw = None, None, None, None
@@ -3570,7 +3580,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
                      + " とみられます。合っているか確かめて、選んでください）")
         elif cands is not None:
             extra = "　（号機マスタに当てはまる号機が見つかりません）"
-        self.lbl_target.setText("書き込む相手: " + self._machine_name() + extra)
+        self.lbl_target.setText("書き込む相手: " + self._machine_name() + extra
+                                + (("\n" + self._unit_note) if self._unit_note else ""))
         self._refresh_enabled()
 
     def _show_state(self, status, alarms):
@@ -5951,6 +5962,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_motor_id.setToolTip("機械に付けた仮モーターの番号（パラメータ 2020）。入れると、機械の今の値と照らし合わせて、"
                                    "違えば書く前に警告します（この番号は書きません）")
         self.e_motor_id.setEnabled(False)
+        self.e_motor_id.editingFinished.connect(self._update_candidates)
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
@@ -6478,7 +6490,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
             # 仮モーターは製品のモーターと別物なので、製品の容量・電圧では号機を外さない。
             # 軸は容量で決められないので、号機×軸の組を全部出して人が選ぶ（つながっている機械が先頭）
             voltage = ""
-            if len(sel) == 1:
+            if len(sel) == 1 and self.e_motor_id.text().strip():
+                # 仮モーターの番号が入っているので、軸はつないだあと機械の 2020 から決まる。号機だけ選ぶ
+                self._cand = [(c, [c.axes()[0]]) for c in self._controllers if c.axes()]
+            elif len(sel) == 1:
                 self._cand = [(c, [a]) for c in self._controllers for a in c.axes()]
             else:
                 self._cand = seiban_flow.capable_controllers(self._controllers, [""] * len(sel), "")
@@ -6527,7 +6542,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         unit = ""
         try:
             reg = focas_find.registry_path(self.settings)
-            for ip in focas_find.known_ips(reg)[:4]:
+            ips = focas_find.known_ips(reg)[:4]
+            host = str(self.settings.get("focas_host") or "").strip()
+            if host and host not in ips:
+                ips.append(host)
+            for ip in ips:
                 if focas_find.port_open(ip, timeout=0.3):
                     unit = focas_find.unit_for_ip(reg, ip)
                     if unit:

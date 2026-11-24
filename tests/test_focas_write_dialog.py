@@ -536,6 +536,21 @@ class TestExpectUnitAndAutoBackup(WriteDialogBase):
         self.assertIsNone(d._axis_from_motor_id("N02020Q1A1P1\n"))           # 一致なし
 
 
+class TestFirstContactRegistersExpectedUnit(WriteDialogBase):
+    VALUES = {"20": "4"}
+
+    def test_unknown_machine_gets_the_unit_chosen_in_the_wizard(self):
+        from nd287_app import focas_find
+        d = self.dialog(expect_unit="23", auto=True)
+        d.b_connect.click()
+        self.wait(d)
+        cands = [d.cmb_unit.itemData(i) for i in range(d.cmb_unit.count())]
+        if "23" not in cands:
+            self.skipTest("偽機械の CNC ID では号機23が候補に出ない")
+        self.assertEqual(d.cmb_unit.currentData(), "23")
+        self.assertIn("台帳に残しました", d.lbl_target.text())
+
+
 class TestZeroScope(WriteDialogBase):
     VALUES = {"20": "4"}
 

@@ -97,6 +97,63 @@ class WizardBase(unittest.TestCase):
             w.write_to_machine()
 
 
+class TestSimpleSteps(WizardBase):
+    """1つずつ進む画面（かんたん表示）。部品は同じで、出し入れだけ。"""
+
+    def test_starts_simple_and_shows_only_step1(self):
+        w = self.wizard()
+        self.assertEqual(w._mode, "simple")
+        self.assertFalse(w.box2.isHidden() is False and w.box2.isVisibleTo(w))
+        self.assertTrue(w.box1.isVisibleTo(w))
+        self.assertFalse(w.box2.isVisibleTo(w))
+        self.assertFalse(w.box3.isVisibleTo(w))
+        self.assertFalse(w.b_next.isEnabled())
+
+    def test_step1_needs_motor_then_step2_shows_controllers(self):
+        w = self.wizard()
+        w.e_seiban.setText("50014984")
+        w.search()
+        for f in w._files:
+            f["chk"].setChecked(True)
+        w._update_candidates()
+        self.assertTrue(w.box_motor.isVisibleTo(w))
+        self.assertFalse(w.b_next.isEnabled())               # モーター未選択
+        self.assertIn("モーター", w.lbl_decided.text())
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
+        self.assertTrue(w.b_next.isEnabled())
+        w.b_next.click()
+        self.assertEqual(w._step, 2)
+        self.assertTrue(w.box2.isVisibleTo(w))
+        self.assertFalse(w.box1.isVisibleTo(w))
+        self.assertTrue(w.b_back.isVisibleTo(w))
+        w.b_back.click()
+        self.assertEqual(w._step, 1)
+
+    def test_step3_embeds_the_writer_and_back_closes_it(self):
+        w = self.ready(self.wizard(), motor="product")
+        w._step = 2
+        w._apply_mode()
+        self.assertTrue(w.b_next.isEnabled())
+        w.b_next.click()
+        self.assertEqual(w._step, 3)
+        self.assertIsNotNone(w._writer)
+        self.assertTrue(w.panel.isVisibleTo(w))
+        self.assertFalse(w._writer.isWindow())                # 別の窓ではなく、この画面の中
+        self.assertEqual(w._writer._expect_unit, "23")
+        w.b_back.click()
+        self.assertEqual(w._step, 2)
+        self.assertIsNone(w._writer)
+
+    def test_toggle_to_full_shows_everything(self):
+        w = self.wizard()
+        w._toggle_mode()
+        self.assertEqual(w._mode, "full")
+        for b in (w.box1, w.box2, w.box3, w.box_motor):
+            self.assertTrue(b.isVisibleTo(w))
+        self.assertTrue(w.b_machine.isVisibleTo(w))
+        self.assertFalse(w.b_next.isVisibleTo(w))
+
+
 class TestWizardMachineWrite(WizardBase):
     def test_button_exists_next_to_create(self):
         w = self.wizard()

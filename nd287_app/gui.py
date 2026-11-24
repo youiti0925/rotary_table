@@ -119,6 +119,7 @@ from . import fanuc_pcorr
 from . import param_build
 from . import ftpserver
 from . import focas_backup, focas_client, focas_ops, focas_find
+from . import wizard_steps as W
 from . import controllers
 from . import seiban_flow
 from . import batch_build
@@ -5041,8 +5042,20 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         title = QtWidgets.QLabel("受注番号から かんたん作成")
         title.setStyleSheet("font-size:16px; font-weight:bold;")
-        v.addWidget(title)
-        flow = QtWidgets.QLabel("① 受注番号で探す → ② 号機を選ぶ → ③ 作成。"
+        hrow = QtWidgets.QHBoxLayout()
+        hrow.addWidget(title, 1)
+        self.b_mode = QtWidgets.QPushButton("全部表示")
+        self.b_mode.setToolTip("今の全部の項目が見える画面に切り替えます（もう一度押すと、1つずつ進む画面に戻ります）")
+        self.b_mode.clicked.connect(self._toggle_mode)
+        hrow.addWidget(self.b_mode)
+        v.addLayout(hrow)
+        self.lbl_steps = QtWidgets.QLabel("")
+        self.lbl_steps.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(self.lbl_steps)
+        self.lbl_decided = QtWidgets.QLabel("")
+        self.lbl_decided.setStyleSheet("color:#475569;")
+        v.addWidget(self.lbl_decided)
+        flow = self.lbl_flow = QtWidgets.QLabel("① 受注番号で探す → ② 号機を選ぶ → ③ 作成。"
                                 "（特注/DD・登録(DB)は『型式で探す』でも出ます）")
         flow.setStyleSheet("color:#475569;")
         v.addWidget(flow)
@@ -5052,7 +5065,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_guide)
 
         # --- 場所（最初に一度だけ。設定済みなら折りたためる） ---
-        box0 = QtWidgets.QGroupBox("場所（共有サーバ・最初に一度だけ／クリックで開閉）")
+        box0 = self.box0 = QtWidgets.QGroupBox("場所（共有サーバ・最初に一度だけ／クリックで開閉）")
         box0.setCheckable(True)
         b0v = QtWidgets.QVBoxLayout(box0)
         inner0 = QtWidgets.QWidget(); b0v.addWidget(inner0)
@@ -5098,7 +5111,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addLayout(mid, 1)
 
         # --- ① 受注伝票番号 ---
-        box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
+        box1 = self.box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
         f1 = QtWidgets.QVBoxLayout(box1)
         srow = QtWidgets.QHBoxLayout()
         self.e_seiban = QtWidgets.QLineEdit()
@@ -5132,9 +5145,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.found_scroll.setWidget(self.found_box)
         f1.addWidget(self.found_scroll, 1)
         col_left.addWidget(box1, 1)
+        self.box_motor = QtWidgets.QGroupBox("機械に付いているモーターは？")
+        self.fm = QtWidgets.QFormLayout(self.box_motor)
+        col_left.addWidget(self.box_motor)
 
         # --- ② 制御装置 ---
-        box2 = QtWidgets.QGroupBox("② 作れる制御装置（号機）を選ぶ")
+        box2 = self.box2 = QtWidgets.QGroupBox("② 作れる制御装置（号機）を選ぶ")
         f2 = QtWidgets.QFormLayout(box2)
         self.cmb_cap = QtWidgets.QComboBox()
         self.cmb_cap.addItem("（自動：製品データから判定）", "")
@@ -5163,7 +5179,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         col_right.addWidget(box2)
 
         # --- ③ 出力 ---
-        box3 = QtWidgets.QGroupBox("③ 出力先を確認して「作成」")
+        box3 = self.box3 = QtWidgets.QGroupBox("③ 出力先を確認して「作成」")
         f3 = QtWidgets.QFormLayout(box3)
         self.e_basic = QtWidgets.QLineEdit()
         self.e_basic.setPlaceholderText("使うBASIC（制御装置を選ぶと自動で入ります）")
@@ -5190,7 +5206,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "機械に付いているのが製品のモーターか、社内の仮モーターかを選びます。\n"
             "仮モーターなら 2020（モーター番号）は書かず、機械の値のままにします。\n"
             "製品のモーターに替えるなら、DGPR（2000 の #1）を 0 にして電源を入れ直す必要があります。")
-        f3.addRow("モーター", self.cmb_motor)
+        self.fm.addRow("モーター", self.cmb_motor)
         self.e_motor_id = QtWidgets.QLineEdit()
         self.e_motor_id.setPlaceholderText("仮モーターの番号（2020）。空でも進めます")
         self.e_motor_id.setToolTip("機械に付けた仮モーターの番号（パラメータ 2020）。入れると、機械の今の値と照らし合わせて、"
@@ -5198,7 +5214,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_motor_id.setEnabled(False)
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
-        f3.addRow("仮モーターの番号", self.e_motor_id)
+        self.fm.addRow("仮モーターの番号", self.e_motor_id)
         op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
         self.cmb_origin = QtWidgets.QComboBox()
         self.cmb_origin.addItem("変更しない", "")
@@ -5227,13 +5243,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_basic_dir)
 
         row = QtWidgets.QHBoxLayout()
-        b_adv = QtWidgets.QPushButton("詳細設定（フォルダ/CSV/手動）…")
+        b_adv = self.b_adv = QtWidgets.QPushButton("詳細設定（フォルダ/CSV/手動）…")
         b_adv.setToolTip("BASICや製品データの場所、変更表CSV、軸の手動指定などの従来画面を開く")
         b_adv.clicked.connect(self._open_advanced)
-        b_view = QtWidgets.QPushButton("パラメータを見る/比較…")
+        b_view = self.b_view = QtWidgets.QPushButton("パラメータを見る/比較…")
         b_view.setToolTip("BASIC・製品・作成した.prm の中身を番地ごとに一覧。2つ選んで差分比較も")
         b_view.clicked.connect(self._open_viewer)
-        b_make = QtWidgets.QPushButton("作成 → 出力先")
+        b_make = self.b_make = QtWidgets.QPushButton("作成 → 出力先")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.create)
         self.b_machine = QtWidgets.QPushButton("機械へ直接書く…")
         self.b_machine.setToolTip(
@@ -5242,8 +5258,23 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "上の ①②③ は「作成 → 出力先」と同じ（出力先は使いません）")
         self.b_machine.clicked.connect(self.write_to_machine)
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
-        row.addWidget(b_adv); row.addWidget(b_view)
-        row.addStretch(1); row.addWidget(b_make); row.addWidget(self.b_machine); row.addWidget(b_close)
+        self.b_back = QtWidgets.QPushButton("← 戻る")
+        self.b_back.clicked.connect(self._on_back)
+        self.b_file = QtWidgets.QPushButton("ファイルを作る…")
+        self.b_file.setToolTip("LAN でつながずに、パラメータのファイル（.prm）を作って出力先へ置きます")
+        self.b_file.clicked.connect(self._make_file_simple)
+        self.b_next = QtWidgets.QPushButton("次へ ▶")
+        self.b_next.setObjectName("primary")
+        self.b_next.setMinimumHeight(36)
+        self.b_next.clicked.connect(self._on_next)
+        row.addWidget(b_adv); row.addWidget(b_view); row.addWidget(self.b_back)
+        row.addStretch(1); row.addWidget(self.b_file); row.addWidget(self.b_next)
+        row.addWidget(b_make); row.addWidget(self.b_machine); row.addWidget(b_close)
+        self.panel = QtWidgets.QWidget()           # 段③: 機械につないで送る（FocasWriteDialog を入れる）
+        QtWidgets.QVBoxLayout(self.panel).setContentsMargins(0, 0, 0, 0)
+        self.panel.setVisible(False)
+        self._writer = None
+        v.addWidget(self.panel, 1)
         v.addWidget(hscroll_buttons(row))
         # 文字サイズを上げても画面に収まるよう、中身をスクロールへ入れる
         # （ボタン列だけ外に残して常に押せるようにする）
@@ -5257,7 +5288,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_seiban.setFocus()
         self._refresh_basic_dir_note()
         self._refresh_cidx_note()
+        self._step = 1
+        self._mode = "full" if str(settings.get("wizard_mode", "simple")) == "full" else "simple"
         self._update_guide()
+        self._apply_mode()
 
     # ----- 補助 -----
     def _with_browse(self, line, slot):
@@ -5347,6 +5381,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "padding:6px; border-radius:4px; "
             + ("background:#dcfce7; color:#166534; font-weight:bold;" if ok
                else "background:#eff6ff; color:#1d4ed8;"))
+        if hasattr(self, "_mode"):
+            self._apply_mode()
 
     def _zero_params(self):
         return zero_params_for(self.settings, getattr(self, "chk_zero_indiv", None))
@@ -5879,20 +5915,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
         return dict(sel=sel, asg=asg, ctl=ctl, master=master, out=out, seiban=seiban, raw=raw,
                     axis_values=axis_values, per_meta=per_meta)
 
-    def write_to_machine(self):
-        """機械へ直接書く（FOCAS）。かんたん作成と同じ入力（受注番号・号機・BASIC）から作る中身を決め、
-        土台だけを「いま取った機械の控え」に替える。機械には、控えと作成結果の差だけを、
-        確認して1件ずつ書く（つなぐ → 控え → 差の一覧 → 確認 → 書く → 読み戻し → アラーム確認）。
-        作る中身の決め方は「作成 → 出力先」と同じ（_gather と plan_prepare）。
-        """
+    def _machine_job(self):
+        """機械へ直接書く窓に渡す (引数のタプル, キーワード引数の辞書)。作れないときは None（理由は画面に出す）。"""
         title = "機械へ直接書く"
         g = self._gather(need_out=False, title=title)
         if g is None:
-            return
+            return None
         sel, ctl, master, seiban, raw, axis_values = (
             g[k] for k in ("sel", "ctl", "master", "seiban", "raw", "axis_values"))
         if not self._basic_ok(master):
-            return
+            return None
 
         def plan_fn(foc_raw, zero_scope="product", keep_motor=False, axis=None):
             # 土台は機械の控え（BASIC ではない）。reference="" と 0にする範囲は plan_prepare が決める
@@ -5908,15 +5940,180 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self, "機械へ直接書く",
                 "モーターを選んでください（『製品のモーター』か『社内の仮モーター』）。\n"
                 "仮モーターのときは、モーター番号（2020）を機械の値のまま書きません。")
-            return
+            return None
         shown = "＋".join(nc_param.axis_name(ax) for ax in sorted(axis_values))
-        FocasWriteDialog(
-            self, self.settings, plan_fn, seiban=seiban, basic_text=raw,
-            product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"), expect_unit=str(ctl.unit), auto_backup=True,
+        kw = dict(
+            seiban=seiban, basic_text=raw,
+            product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"),
+            expect_unit=str(ctl.unit), auto_backup=True,
             motor_id=(self.e_motor_id.text().strip() if motor == "temp" else ""),
             subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
                      f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
-                     " の製品値のうち、機械の今と違う所だけを書きます。").exec()
+                     " の製品値のうち、機械の今と違う所だけを書きます。")
+        return (self.settings, plan_fn), kw
+
+    def write_to_machine(self):
+        """機械へ直接書く（FOCAS）。かんたん作成と同じ入力（受注番号・号機・BASIC）から作る中身を決め、
+        土台だけを「いま取った機械の控え」に替える。機械には、控えと作成結果の差だけを、
+        確認して1件ずつ書く（つなぐ → 控え → 差の一覧 → 確認 → 書く → 読み戻し → アラーム確認）。
+        作る中身の決め方は「作成 → 出力先」と同じ（_gather と plan_prepare）。
+        """
+        job = self._machine_job()
+        if job is None:
+            return
+        (settings, plan_fn), kw = job
+        FocasWriteDialog(self, settings, plan_fn, **kw).exec()
+
+    # ----- かんたん表示（1つずつ進む）-----
+    def _toggle_mode(self):
+        if self._writer is not None and not self._close_writer():
+            return
+        self._mode = "full" if self._mode == "simple" else "simple"
+        self._step = 1
+        self.settings["wizard_mode"] = self._mode
+        try:
+            from .settings import save_settings
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._apply_mode()
+
+    def _step_inputs(self):
+        sel = self._selected_files()
+        idx = self.cmb_ctrl.currentData()
+        return dict(
+            found=bool(self._files), selected=len(sel),
+            non_fanuc=any(f["meta"].get("system", "FANUC") != "FANUC" for f in sel),
+            motor=self.cmb_motor.currentData() or "", seiban=self.e_seiban.text(),
+            ctrl_chosen=idx is not None and 0 <= idx < len(self._cand),
+            basic_ok=bool(self.e_basic.text().strip() and Path(self.e_basic.text().strip()).is_file()))
+
+    def _apply_mode(self):
+        """表示を、いまのモード・段に合わせる（部品は作り直さない。出し入れするだけ）。"""
+        simple = self._mode == "simple"
+        step = self._step
+        self.b_mode.setText("全部表示" if simple else "かんたん表示")
+        for wd in (self.lbl_steps, self.lbl_decided, self.b_back, self.b_next):
+            wd.setVisible(simple)
+        for wd in (self.b_adv, self.b_view, self.b_make, self.b_machine):
+            wd.setVisible(not simple)
+        if not simple:
+            self.lbl_flow.setVisible(True)
+            for wd in (self.box0, self.box1, self.box2, self.box3, self.lbl_basic_dir):
+                wd.setVisible(True)
+            self.box_motor.setVisible(True)
+            self.panel.setVisible(False)
+            self.b_file.setVisible(False)
+            self.lbl_guide.setVisible(True)
+            return
+        st = W.step_state(step, **self._step_inputs())
+        self.lbl_flow.setVisible(False)
+        self.lbl_guide.setVisible(False)
+        self.lbl_basic_dir.setVisible(False)
+        places_missing = not (self._abs_dir("param_product_dir") and Path(self._abs_dir("param_product_dir")).is_dir())
+        self.box0.setVisible(step == 1 and places_missing)
+        self.box1.setVisible(step == 1)
+        self.box_motor.setVisible(step == 1 and bool(self._files) and bool(self._selected_files()))
+        self.box2.setVisible(step == 2)
+        basic_missing = not self.e_basic.text().strip()
+        self.box3.setVisible(step == 2 and basic_missing and self.cmb_ctrl.currentData() not in (None, -1))
+        self.panel.setVisible(step == 3)
+        self.b_file.setVisible(step == 2)
+        self.b_back.setVisible(step > 1)
+        self.b_next.setVisible(step < 3)
+        self.b_next.setEnabled(st["can_next"])
+        self.b_next.setText("次へ: 制御装置を選ぶ ▶" if step == 1 else "次へ: 機械につなぐ ▶")
+        names = []
+        for n in W.STEPS:
+            t = W.STEP_TITLES[n]
+            if n < step:
+                names.append(f"<span style='color:#166534;'>✓ {t}</span>")
+            elif n == step:
+                names.append(f"<b style='color:#1d4ed8;'>▶ {t}</b>")
+            else:
+                names.append(f"<span style='color:#94a3b8;'>{t}</span>")
+        self.lbl_steps.setText("　─　".join(names))
+        ctl = ""
+        i = self.cmb_ctrl.currentData()
+        if i is not None and 0 <= i < len(self._cand):
+            ctl = self._cand[i][0].label()
+        sel = self._selected_files()
+        self.lbl_decided.setText("決めたこと: " + (W.summary(
+            seiban=self.e_seiban.text().strip(), model=self.e_model.text().strip(),
+            kinds="＋".join(f["kind"] for f in sel), motor=self.cmb_motor.currentData() or "",
+            motor_id=self.e_motor_id.text().strip(), ctrl=ctl) or "（まだありません）"))
+        if st["missing"] and step < 3:
+            self.lbl_decided.setText(self.lbl_decided.text() + "\n▶ あと: " + st["missing"][0])
+
+    def _on_next(self):
+        st = W.step_state(self._step, **self._step_inputs())
+        if not st["can_next"]:
+            return
+        if self._step == 2:
+            job = self._machine_job()
+            if job is None:
+                return
+            (settings, plan_fn), kw = job
+            self._open_writer(settings, plan_fn, kw)
+        self._step += 1
+        self._apply_mode()
+
+    def _on_back(self):
+        if self._step <= 1:
+            return
+        if self._step == 3 and self._writer is not None and not self._close_writer():
+            return
+        self._step -= 1
+        self._apply_mode()
+
+    def _open_writer(self, settings, plan_fn, kw):
+        """段③: 機械へ直接書く窓を、この画面の中に入れる（別の窓を開かない）。"""
+        self._close_writer(force=True)
+        d = FocasWriteDialog(self, settings, plan_fn, **kw)
+        d.setWindowFlags(QtCore.Qt.Widget)
+        self.panel.layout().addWidget(d)
+        d.show()
+        self._writer = d
+
+    def _close_writer(self, force=False):
+        """入れた窓を片づける。書いている最中は、今の窓と同じ確認をする。片づけたら True。"""
+        d = self._writer
+        if d is None:
+            return True
+        if not force:
+            try:
+                if not d._confirm_close():
+                    return False
+            except Exception:
+                pass
+        try:
+            d._shutdown()
+        except Exception:
+            pass
+        d.setParent(None)
+        d.deleteLater()
+        self._writer = None
+        return True
+
+    def reject(self):
+        if self._writer is not None and not self._close_writer():
+            return
+        super().reject()
+
+    def accept(self):
+        if self._writer is not None and not self._close_writer():
+            return
+        super().accept()
+
+    def _make_file_simple(self):
+        """かんたん表示から「ファイルを作る」。出力先が無ければ、先に選んでもらう。"""
+        out = self.e_out.text().strip()
+        if not out or not Path(out).is_dir():
+            self._browse_out()
+            out = self.e_out.text().strip()
+            if not out or not Path(out).is_dir():
+                return
+        self.create()
 
     def create(self):
         g = self._gather(need_out=True)

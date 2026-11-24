@@ -134,7 +134,10 @@ class TestSimpleSteps(WizardBase):
         w._step = 2
         w._apply_mode()
         self.assertTrue(w.b_next.isEnabled())
-        w.b_next.click()
+        import nd287_app.gui as G
+        with mock.patch.object(G.QtWidgets.QMessageBox, "question",
+                               lambda *a, **k: G.QtWidgets.QMessageBox.Yes):
+            w.b_next.click()
         self.assertEqual(w._step, 3)
         self.assertIsNotNone(w._writer)
         self.assertTrue(w.panel.isVisibleTo(w))

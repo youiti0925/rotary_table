@@ -6080,12 +6080,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d = self._writer
         if d is None:
             return True
-        if not force:
-            try:
-                if not d._confirm_close():
-                    return False
-            except Exception:
-                pass
+        if not force and d._busy and d._mode in ("write", "undo"):
+            if not d._confirm_close():          # 書いている最中だけ、今の窓と同じ確認をする
+                return False
         try:
             d._shutdown()
         except Exception:

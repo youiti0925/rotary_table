@@ -84,6 +84,7 @@ DEFAULTS = dict(
     fanuc_use_subprogram=True,  # True: 再現をサブプロ / False: 1本に展開
     fanuc_main_number=100,
     fanuc_rep_sub_number=1000,  # O8000〜O9999は保護領域で転送が弾かれることがある
+    wizard_prog_choice="one",   # かんたん作成 段④の前回の分け方（one/two/division/repeat）
     fanuc_return_to_start=True,
     fanuc_counter_reset=True,   # 先頭にカウンターリセット（M00）を入れる
     # クランプ分割: 各測定点でクランプ→読取→アンクランプ（軸ロックして測る）

@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1307件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
+- 現在 **1351件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -118,6 +118,13 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   部品は全部表示と同じものを出し入れするだけ（`_apply_mode`）。③は `FocasWriteDialog` を画面の中に入れる。
 - モーター番号が機械と違う製品のモーターは2段階: 1段目で 2020 と DGPR=0 だけ書く→人が電源を入れ直す→2段目で残り
   （DGPR は標準のサーボ値で上書きするので、製品のサーボ値は電源入れ直しのあとに書く）。実機は未確認。
+- 段④「測定プログラムを送る」（2026-11-24。`wizard_programs.py`＝Qt なし・`FocasProgramSendDialog(wizard=True)` を画面の中に入れる）。
+  案内は③の書込＋読み戻しが成功したあと／②から（パラメータを送らない流れ）。型式→測定条件（回転は登録条件→測定条件.csv・傾斜は登録の傾斜条件だけ）→
+  `batch_build.program_for_model` 系で作り、`fanuc.nc_bytes()` の形のまま送る。分け方4択（1本／別々に2本／分割だけ／再現性だけ）・番号は
+  `fanuc_main_number`、再現性用は「その次」（再現性サブ・保護領域 O8000〜9999 を避ける。`repeat_number`）。人が押すのは「送る」1回。
+  機械の中を読んで1行ずつ出す（無い→送ります／同じ中身→もう入っています／違う→入れ替えますか？＝既定は飛ばす・チェックの行だけ入れ替え）。
+  本体とサブは組で扱い、片方だけは送らない（`plan_set_send`）。送ったものは `送ったプログラム記録.csv`（PC側・マスタ外）に残し、同じ型式で同じ中身なら「前回と同じ」と出す。
+  **LF CR CR のまま FOCAS で入るかは実機未確認。** 読み戻しが違えば「ここが違う」と出し、人が押したときだけ LF のみで送り直す（自動ではやらない）。
 - 初めての制御装置: 控えを「機械から取ったBASIC」（BASICフォルダの外）へ F<号機>BASIC.dat として登録（`first_unit.py`）。
 
 - 測定プログラムの FOCAS 送信（`focas_helper.prog_write`・`focas_ops.run_program_send`・ProgramDialog の送り方「機械へ直接（FOCAS）」）。

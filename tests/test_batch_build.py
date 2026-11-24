@@ -224,6 +224,36 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.ParamWizardDialog(None, s)), [])
 
+    def test_param_wizard_dialog_step4(self):
+        """かんたん作成の段④（測定プログラムを送る）。分け方・一覧・Gコード・長い文でも収まる。"""
+        import nd287_app.gui as G
+
+        def make(s):
+            w = G.ParamWizardDialog(None, s)
+            w._prog_auto = False
+            w._p_masters = {}
+            w._step = 4
+            w._p_choice = None
+            for k in ("one", "two"):
+                w.rad_p[k].setEnabled(True)
+            w.lbl_p_kind.setText("製品から回転か傾斜か分かりませんでした。回転として作ります。違うときは下で選び直してください。" * 2)
+            w.cmb_p_kind.setVisible(True)
+            w.lbl_p_why.setText("分割と再現性を別々に2本で作ります。" * 3)
+            w.lbl_p_prev.setText("前回と同じプログラムです（2026-11-24 10:00:00・号機23で送りました）。" * 2)
+            w.lbl_p_prev.setVisible(True)
+            w.lbl_p_problem.setText("O100 が分割用と再現性用で重なっています" * 3)
+            w.lbl_p_problem.setVisible(True)
+            w.lbl_p_done.setText("機械の前で O0100・O0101 を選んでサイクルスタートしてください。運転はPCからは始めません。")
+            w.lbl_p_done.setVisible(True)
+            w.b_p_lf.setVisible(True)
+            w.tbl_p.setRowCount(3)
+            w.txt_p_code.setPlainText("O0100\n" * 50)
+            w.b_p_detail.setChecked(True)
+            w.b_prog.setVisible(True)
+            w._apply_mode()
+            return w
+        self.assertEqual(self._check(make), [])
+
     def test_batch_program_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.BatchProgramDialog(None, s)), [])
@@ -266,6 +296,18 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
             d.lbl_estop.setText("今は書けません。\n" + "\n".join(["運転中または停止中です（運転: 運転中・生の値 3）"] * 4))
             d.lbl_estop.setVisible(True)
             d.lbl_backup.setText("点検の指摘があります: " + "x" * 200)
+            d.txt_result.setPlainText("結果の行\n" * 10)
+            return d
+        self.assertEqual(self._check(make), [])
+
+    def test_focas_program_send_dialog_in_wizard_mode(self):
+        import nd287_app.gui as G
+        from nd287_app import fanuc
+
+        def make(s):
+            d = G.FocasProgramSendDialog(None, s, b"", fanuc.EOB_PUNCH, wizard=True)
+            d.lbl_estop.setText("今は書けません。\n" + "\n".join(["運転中または停止中です"] * 4))
+            d.lbl_estop.setVisible(True)
             d.txt_result.setPlainText("結果の行\n" * 10)
             return d
         self.assertEqual(self._check(make), [])

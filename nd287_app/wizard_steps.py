@@ -2,11 +2,12 @@
 """かんたん作成（段階表示）で「いまどの段か・次へ進めるか・足りないものは何か」を決める（Qt なし）。
 
 画面の部品は触らず、値だけから決めるので、画面なしで試験できる。
-段: 1=受注番号とモーター  2=制御装置  3=機械につないで送る
+段: 1=受注番号とモーター  2=制御装置  3=機械につないで送る  4=測定プログラムを送る
 """
 
-STEP_TITLES = {1: "① 受注番号とモーター", 2: "② 制御装置", 3: "③ 機械につないで送る"}
-STEPS = (1, 2, 3)
+STEP_TITLES = {1: "① 受注番号とモーター", 2: "② 制御装置", 3: "③ 機械につないで送る",
+               4: "④ 測定プログラムを送る"}
+STEPS = (1, 2, 3, 4)
 
 
 def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seiban="",
@@ -29,7 +30,19 @@ def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seib
             missing.append("制御装置（号機）を選んでください")
         elif not basic_ok:
             missing.append("その号機の BASIC が見つかりません。『使うBASIC』を指定してください")
+    # 段③・④は「次へ」で進む段ではない（③は書き終えたあとの案内、④は最後の段）
     return {"can_next": not missing, "missing": missing}
+
+
+def program_offer(step, *, params_ok=False):
+    """段④（測定プログラムを送る）への案内ボタンを出すか。(出すか, ボタンの文字)。
+    段③: パラメータの書き込みと読み戻しが成功したあとだけ。
+    段②: パラメータは送らず、プログラムだけ送る人のため（いつでも出す）。"""
+    if step == 3 and params_ok:
+        return True, "続けてプログラムを送る ▶"
+    if step == 2:
+        return True, "パラメータは送らず、プログラムだけ送る ▶"
+    return False, ""
 
 
 def summary(*, seiban="", model="", kinds="", motor="", motor_id="", ctrl=""):

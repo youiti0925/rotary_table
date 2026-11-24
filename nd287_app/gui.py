@@ -120,6 +120,7 @@ from . import param_build
 from . import ftpserver
 from . import focas_backup, focas_client, focas_ops, focas_find
 from . import wizard_steps as W
+from . import wizard_programs as WP
 from . import controllers
 from . import wizard_probe
 from . import seiban_flow
@@ -3007,6 +3008,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
     """
 
     item_done = QtCore.Signal(int, object)
+    write_finished = QtCore.Signal(bool)     # 書込が終わった。True=全部書けて読み戻しも合った（かんたん作成の段④への案内用）
     COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
@@ -4216,6 +4218,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.lbl_power.setVisible(True)
         self._refresh_enabled()
         self._after_stopped_for_close(res)
+        # 2段階（DGPR）の1段目だけでは「成功」にしない（電源の入れ直しと2段目が残っている）
+        self.write_finished.emit(bool(res.state == "done" and res.items and not self._stage1
+                                      and all(it["status"] == "ok" for it in res.items)))
 
     def _write_failed(self, err):
         if isinstance(err, focas_ops.WriteRefused):
@@ -4612,8 +4617,20 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
     書く中身は fanuc.nc_bytes() の出力のまま（1バイトも変えない）。
     """
 
-    def __init__(self, parent, settings, nc, eob, *, machine="", client_factory=None, auto=False):
+    sent = QtCore.Signal(object)          # 送り終わった（かんたん作成の段④が結果を行ごとに出すため）
+    inspected = QtCore.Signal(object)     # 機械の中を読んで確かめた {番号: new/same/differs/unknown}
+
+    def __init__(self, parent, settings, nc, eob, *, machine="", client_factory=None, auto=False,
+                 wizard=False, auto_connect=False):
+        """wizard=True はかんたん作成の段④の中に入れる形。人が押すのは「送る」1回だけ（確認の窓は出さない）。
+        同じ番号が機械にあれば書かずに飛ばし（「もうあります」）、上書きは set_job の overwrite_fn が
+        返した番号だけ。auto_connect=True は、画面が出たとき自動でつなぐ（つないだら控えも自動）。"""
         super().__init__(parent)
+        self._wizard = bool(wizard)
+        self._auto_connect = bool(auto_connect)
+        self._auto_connect_done = False
+        self._overwrite_fn = None
+        self._groups = []                  # 必ずセットで送る番号の組（本体とサブ）
         self.settings = settings
         self._nc = bytes(nc or b"")
         self._eob = eob or fanuc.DEFAULT_EOB
@@ -4651,6 +4668,7 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
             "<b>起動（スタート）は機械側で押してください。</b>")
         lead.setWordWrap(True)
         lead.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_lead = lead
         v.addWidget(lead)
         self.lbl_programs = QtWidgets.QLabel(
             f"書くプログラム: {names}（{len(self._nc)} バイト・区切りは実機と同じ形で、1バイトも変えません）"
@@ -4658,6 +4676,9 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         self.lbl_programs.setTextFormat(QtCore.Qt.RichText)
         self.lbl_programs.setWordWrap(True)
         v.addWidget(self.lbl_programs)
+        if self._wizard:                    # 説明と一覧は、かんたん作成の段④の側に出す
+            lead.setVisible(False)
+            self.lbl_programs.setVisible(False)
 
         box = QtWidgets.QGroupBox("① 機械につなぐ")
         bf = QtWidgets.QFormLayout(box)
@@ -4709,7 +4730,7 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         f2.addWidget(self.bar)
-        self.b_write = QtWidgets.QPushButton("確認して書く…")
+        self.b_write = QtWidgets.QPushButton("送る" if self._wizard else "確認して書く…")
         self.b_write.setObjectName("primary")
         self.b_write.clicked.connect(self.start_check)
         f2.addWidget(hscroll_buttons(self._row(self.b_write)))
@@ -4739,6 +4760,49 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
             r.addWidget(w)
         r.addStretch(1)
         return r
+
+    def set_job(self, nc, eob, overwrite_fn=None, groups=(), inspect=True):
+        """送る中身を差し替える（かんたん作成の段④で、分け方や番号を変えたとき）。機械には書かない
+        （つながっていれば、機械の中を読んで確かめ直す）。"""
+        self._groups = [list(g) for g in groups]
+        self._nc = bytes(nc or b"")
+        self._eob = eob or fanuc.DEFAULT_EOB
+        self._overwrite_fn = overwrite_fn
+        try:
+            self._programs = focas_ops.split_programs(self._nc, self._eob)
+            self._split_err = ""
+        except focas_ops.ProgramSplitError as e:
+            self._programs = []
+            self._split_err = str(e)
+        names = "・".join(f"O{p['number']}" for p in self._programs) or "（読み取れません）"
+        self.lbl_programs.setText(
+            f"書くプログラム: {names}（{len(self._nc)} バイト・区切りは実機と同じ形で、1バイトも変えません）"
+            + (f"<br><span style='color:#b91c1c'>{self._split_err}</span>" if self._split_err else ""))
+        self._refresh_enabled()
+        if inspect:
+            self.start_inspect()
+
+    def start_inspect(self):
+        """機械の中を読んで、プログラムごとに「送ります／もう入っています／中身が違います」を確かめる（読むだけ）。"""
+        if (not self._wizard or not self._connected or self.client is None or self._busy
+                or not self._programs or self._backup is None):
+            return
+        client, nc, eob, folder = self.client, self._nc, self._eob, self._folder()
+
+        def work(progress):
+            return focas_ops.inspect_programs(client, nc, eob, folder=folder)
+
+        self._run(work, lambda st: self.inspected.emit(st))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._auto_connect and not self._auto_connect_done:
+            self._auto_connect_done = True
+            QtCore.QTimer.singleShot(0, self._auto_connect_now)
+
+    def _auto_connect_now(self):
+        if not self._closed and not self._connected and not self._busy and self.e_host.text().strip():
+            self.connect_machine()
 
     # --- 下請け ----------------------------------------------------------------
 
@@ -5015,6 +5079,7 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         if res.complete:
             self.lbl_backup.setText(f"控え: 取りました（{res.folder}）")
             self.lbl_backup.setStyleSheet("color:#166534;")
+            QtCore.QTimer.singleShot(0, self.start_inspect)
         else:
             self.lbl_backup.setText("点検の指摘があります（控えは不完全です。この控えでは書けません）:<br>・"
                                     + "<br>・".join(res.problems[:8]))
@@ -5077,6 +5142,9 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         if chk["reasons"]:
             self.txt_result.setPlainText("今は書けません。\n・" + "\n・".join(chk["reasons"]))
             return
+        if self._wizard:                     # 「送る」を押したことが承認（確認の窓は出さない）
+            self._write(chk)
+            return
         if not self._confirm(chk):
             self.txt_result.setPlainText("やめました（機械には何も書いていません）")
             return
@@ -5088,6 +5156,17 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         info = self._backup[1]
         nc, eob = self._nc, self._eob
         overwrite = bool(chk["overwrite_needed"])         # 確認の窓で、上書きと分かった上で承認された
+        if self._wizard:
+            ow = {int(n) for n in (self._overwrite_fn() if self._overwrite_fn else ())}
+
+            groups = [list(g) for g in self._groups]
+
+            def work_wiz(progress):
+                return focas_ops.run_programs_send(
+                    client, nc, eob, approved=True, overwrite_numbers=ow, groups=groups, folder=folder,
+                    cnc_id=cid, backup_info=info, progress=progress)
+            self._run(work_wiz, self._written)
+            return
 
         def work(progress):
             return focas_ops.run_program_send(
@@ -5098,10 +5177,14 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
 
     def _written(self, res):
         self._result = res
-        head = ("書けました。読み戻しも一致しました。機械でこのプログラムを選んで、スタートは機械で押してください。"
-                if res["ok"] else "書けていない、または読み戻しが一致しません。下の結果を確認してください。")
+        if self._wizard:
+            head = ("送り終わりました。" if res["ok"] else "書けていない、または読み戻しが一致しません。")
+        else:
+            head = ("書けました。読み戻しも一致しました。機械でこのプログラムを選んで、スタートは機械で押してください。"
+                    if res["ok"] else "書けていない、または読み戻しが一致しません。下の結果を確認してください。")
         self.txt_result.setPlainText(head + "\n" + "\n".join(focas_ops.describe_program_send(res)))
         self.bar.setFormat("終わりました")
+        self.sent.emit(res)
 
     # --- 閉じる ------------------------------------------------------------------------
 
@@ -6083,14 +6166,21 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.b_next.setObjectName("primary")
         self.b_next.setMinimumHeight(36)
         self.b_next.clicked.connect(self._on_next)
+        self.b_prog = QtWidgets.QPushButton("続けてプログラムを送る ▶")   # 段④への案内（段③の成功後／段②）
+        self.b_prog.setObjectName("primary")
+        self.b_prog.setMinimumHeight(36)
+        self.b_prog.setVisible(False)
+        self.b_prog.clicked.connect(self._on_prog)
         row.addWidget(b_adv); row.addWidget(b_view); row.addWidget(self.b_back)
-        row.addStretch(1); row.addWidget(self.b_file); row.addWidget(self.b_next)
+        row.addStretch(1); row.addWidget(self.b_file); row.addWidget(self.b_prog); row.addWidget(self.b_next)
         row.addWidget(b_make); row.addWidget(self.b_machine); row.addWidget(b_close)
         self.panel = QtWidgets.QWidget()           # 段③: 機械につないで送る（FocasWriteDialog を入れる）
         QtWidgets.QVBoxLayout(self.panel).setContentsMargins(0, 0, 0, 0)
         self.panel.setVisible(False)
         self._writer = None
         v.addWidget(self.panel, 1)
+        self._build_program_panel()
+        v.addWidget(self.panel4, 1)
         v.addWidget(hscroll_buttons(row))
         # 文字サイズを上げても画面に収まるよう、中身をスクロールへ入れる
         # （ボタン列だけ外に残して常に押せるようにする）
@@ -6105,6 +6195,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._refresh_basic_dir_note()
         self._refresh_cidx_note()
         self._step = 1
+        self._params_ok = False          # 段③でパラメータを書き終えて、読み戻しも合った
         self._mode = "full" if str(settings.get("wizard_mode", "simple")) == "full" else "simple"
         self._update_guide()
         self._apply_mode()
@@ -7001,6 +7092,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _toggle_mode(self):
         if self._writer is not None and not self._close_writer():
             return
+        self._close_prog()
+        self._params_ok = False
         self._mode = "full" if self._mode == "simple" else "simple"
         self._step = 1
         self.settings["wizard_mode"] = self._mode
@@ -7039,6 +7132,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if hasattr(self, "_mid"):          # かんたん表示では、見せている側が横いっぱいを使う
             self._mid.setStretch(0, 3 if not simple else (1 if step == 1 else 0))
             self._mid.setStretch(1, 2 if not simple else (0 if step == 1 else 1))
+        self.panel4.setVisible(simple and step == 4)
+        offer, offer_text = W.program_offer(step, params_ok=self._params_ok) if simple else (False, "")
+        self.b_prog.setVisible(offer)
+        if offer:
+            self.b_prog.setText(offer_text)
         if not simple:
             self.lbl_flow.setVisible(True)
             for wd in (self.box0, self.box1, self.box2, self.box3, self.lbl_basic_dir):
@@ -7069,7 +7167,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         names = []
         for n in W.STEPS:
             t = W.STEP_TITLES[n]
-            if n < step:
+            if n == 3 and step == 4 and not self._params_ok:
+                names.append(f"<span style='color:#94a3b8;'>{t}（送らない）</span>")
+            elif n < step:
                 names.append(f"<span style='color:#166534;'>✓ {t}</span>")
             elif n == step:
                 names.append(f"<b style='color:#1d4ed8;'>▶ {t}</b>")
@@ -7104,6 +7204,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _on_back(self):
         if self._step <= 1:
             return
+        if self._step == 4:
+            self._close_prog()
+            self._step = 2                 # ③のパラメータ送信は、②から「次へ」でもう一度できる
+            self._apply_mode()
+            return
         if self._step == 3 and self._writer is not None and not self._close_writer():
             return
         self._step -= 1
@@ -7115,6 +7220,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d = FocasWriteDialog(self, settings, plan_fn, **kw)
         d.setWindowFlags(QtCore.Qt.Widget)
         self.panel.layout().addWidget(d)
+        self._params_ok = False
+        d.write_finished.connect(self._on_writer_finished)
         d.show()
         self._writer = d
 
@@ -7135,15 +7242,361 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._writer = None
         return True
 
+    def _on_writer_finished(self, ok):
+        """段③の書込が終わった。全部書けて読み戻しも合ったときだけ、段④への案内を出す。"""
+        self._params_ok = bool(ok)
+        self._apply_mode()
+
     def reject(self):
         if self._writer is not None and not self._close_writer():
             return
+        self._close_prog()
         super().reject()
 
     def accept(self):
         if self._writer is not None and not self._close_writer():
             return
+        self._close_prog()
         super().accept()
+
+    # ----- 段④: 測定プログラムを送る -----
+    def _build_program_panel(self):
+        """段④の部品。分け方（4択）・番号と結果の一覧・送る窓（FocasProgramSendDialog を入れる）。"""
+        self.panel4 = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(self.panel4)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.lbl_p_intro = QtWidgets.QLabel(
+            "続けて、<b>測定プログラム</b>（回転テーブルを少しずつ回して測るための、機械の動きの手順）を機械に入れます。"
+            "製品の型式から測る条件を引いて、自動で作ります。"
+            "下の「送る」を押すと、機械のメモリに書いて、書けたか読み戻して確かめます。"
+            "<b>機械は動かしません。測定の開始（スタート）は機械側で押してください。</b>")
+        self.lbl_p_intro.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_p_intro.setWordWrap(True)
+        lay.addWidget(self.lbl_p_intro)
+        krow = QtWidgets.QHBoxLayout()
+        self.lbl_p_kind = QtWidgets.QLabel("")
+        self.lbl_p_kind.setWordWrap(True)
+        self.cmb_p_kind = QtWidgets.QComboBox()
+        self.cmb_p_kind.addItem("回転として作る", False)
+        self.cmb_p_kind.addItem("傾斜として作る", True)
+        self.cmb_p_kind.setVisible(False)
+        self.cmb_p_kind.activated.connect(self._p_kind_chosen)
+        krow.addWidget(self.lbl_p_kind, 1)
+        krow.addWidget(self.cmb_p_kind)
+        lay.addLayout(krow)
+        box = QtWidgets.QGroupBox("分け方")
+        bl = QtWidgets.QVBoxLayout(box)
+        self.grp_p = QtWidgets.QButtonGroup(self)
+        self.rad_p = {}
+        for key, label in WP.CHOICES:
+            r = QtWidgets.QRadioButton(label)
+            self.rad_p[key] = r
+            self.grp_p.addButton(r)
+            bl.addWidget(r)
+            r.toggled.connect(lambda on, k=key: on and self._p_choice_chosen(k))
+        self.lbl_p_why = QtWidgets.QLabel("")
+        self.lbl_p_why.setWordWrap(True)
+        bl.addWidget(self.lbl_p_why)
+        lay.addWidget(box)
+        self.lbl_p_prev = QtWidgets.QLabel("")
+        self.lbl_p_prev.setWordWrap(True)
+        self.lbl_p_prev.setStyleSheet("color:#166534; font-weight:bold;")
+        self.lbl_p_prev.setVisible(False)
+        lay.addWidget(self.lbl_p_prev)
+        self.tbl_p = QtWidgets.QTableWidget(0, 4)
+        self.tbl_p.setHorizontalHeaderLabels(["機械に入れるもの", "番号", "入れ替える", "いまの機械／結果"])
+        self.tbl_p.verticalHeader().setVisible(False)
+        self.tbl_p.horizontalHeader().setStretchLastSection(True)
+        self.tbl_p.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_p.setMinimumHeight(60)
+        self.tbl_p.setMaximumHeight(150)
+        lay.addWidget(self.tbl_p)
+        self.b_p_detail = QtWidgets.QPushButton("くわしく見る（Gコード）")
+        self.b_p_detail.setCheckable(True)
+        self.b_p_detail.toggled.connect(lambda on: self.txt_p_code.setVisible(bool(on)))
+        lay.addWidget(self.b_p_detail)
+        self.txt_p_code = QtWidgets.QPlainTextEdit()
+        self.txt_p_code.setReadOnly(True)
+        self.txt_p_code.setMaximumHeight(160)
+        self.txt_p_code.setVisible(False)
+        lay.addWidget(self.txt_p_code)
+        self.chk_p_numbers = QtWidgets.QCheckBox("番号を変える（ふつうは変えません）")
+        self.chk_p_numbers.toggled.connect(self._p_numbers_toggled)
+        lay.addWidget(self.chk_p_numbers)
+        self.lbl_p_problem = QtWidgets.QLabel("")
+        self.lbl_p_problem.setWordWrap(True)
+        self.lbl_p_problem.setStyleSheet("color:#b91c1c; font-weight:bold;")
+        self.lbl_p_problem.setVisible(False)
+        lay.addWidget(self.lbl_p_problem)
+        self.lbl_p_done = QtWidgets.QLabel("")
+        self.lbl_p_done.setWordWrap(True)
+        self.lbl_p_done.setStyleSheet("color:#166534; font-weight:bold;")
+        self.lbl_p_done.setVisible(False)
+        lay.addWidget(self.lbl_p_done)
+        self.b_p_lf = QtWidgets.QPushButton("うまく入らなかったとき: 区切りを LF のみにして送り直す…")
+        self.b_p_lf.setToolTip("読み戻しが違った番号だけを、行の区切りを LF（改行だけ）に変えて、もう一度書きます。"
+                               "自動ではやりません。押したときだけです")
+        self.b_p_lf.setVisible(False)
+        self.b_p_lf.clicked.connect(self._p_resend_lf)
+        lay.addWidget(self.b_p_lf)
+        self.panel4.setVisible(False)
+        self._prog_dlg = None
+        self._prog_client_factory = None        # 試験用: 偽クライアントを返す関数
+        self._prog_auto = True                  # 本番は True（入れた IP に居なければ探す）。試験は False
+        self._p_masters = None
+        self._p_plan = None
+        self._p_tilt = None                     # None=製品から自動
+        self._p_choice = None                   # None=自動
+        self._p_results = {}                    # 番号 → 送った結果の1行
+        self._p_spins = []
+        self._p_over = []
+        self._p_filling = False
+        self._p_resending = False
+        self._p_states = {}                     # 番号 → 機械の中を確かめた結果（new/same/differs/unknown）
+
+    def _p_log_path(self):
+        p = str(self.settings.get("prog_log_csv") or "")
+        return Path(p) if p else app_dir() / WP.LOG_NAME
+
+    def _p_model(self):
+        model = self.e_model.text().strip()
+        if not model:
+            for f in self._selected_files():
+                model = str((f.get("meta") or {}).get("model") or "").strip()
+                if model:
+                    break
+        return model
+
+    def _on_prog(self):
+        """「続けてプログラムを送る」。段③（パラメータの書込）が書き終わっていれば、その窓を片づけて段④へ。"""
+        if self._writer is not None and not self._close_writer():
+            return
+        self._enter_programs()
+        self._step = 4
+        self._apply_mode()
+
+    def _enter_programs(self):
+        self._close_prog()
+        try:
+            self._p_masters = load_masters(self.settings)
+        except Exception:
+            self._p_masters = {}
+        self._p_tilt, self._p_choice = None, None
+        self._p_results, self._p_states = {}, {}
+        self.lbl_p_done.setVisible(False)
+        d = FocasProgramSendDialog(self, self.settings, b"", fanuc.DEFAULT_EOB, wizard=True, auto=self._prog_auto,
+                                   client_factory=self._prog_client_factory)
+        d.setWindowFlags(QtCore.Qt.Widget)
+        d.sent.connect(self._p_on_sent)
+        d.inspected.connect(self._p_on_inspected)
+        self.panel4.layout().addWidget(d)
+        self._prog_dlg = d
+        self._p_refresh()
+        d.show()
+        QtCore.QTimer.singleShot(0, d._auto_connect_now)     # 基本自動: 開いたらつなぐ（控えと機械の中の確認も自動。書くのは「送る」を押したときだけ）
+
+    def _close_prog(self):
+        d = self._prog_dlg
+        if d is None:
+            return
+        try:
+            d._shutdown()
+        except Exception:
+            pass
+        d.setParent(None)
+        d.deleteLater()
+        self._prog_dlg = None
+        self.b_p_lf.setVisible(False)
+
+    def _p_kind_chosen(self, _i):
+        self._p_tilt = bool(self.cmb_p_kind.currentData())
+        self._p_results = {}
+        self._p_refresh()
+
+    def _p_choice_chosen(self, key):
+        if self._p_filling or key == self._p_choice:
+            return
+        self._p_choice = key
+        self._p_results = {}
+        self._p_refresh()
+
+    def _p_numbers_toggled(self, on):
+        for _role, sp in self._p_spins:
+            sp.setEnabled(bool(on))
+        if not on:
+            self._p_results = {}
+            self._p_refresh()
+
+    def _p_numbers(self):
+        if not self.chk_p_numbers.isChecked() or not self._p_spins:
+            return None
+        return {role: sp.value() for role, sp in self._p_spins}
+
+    def _p_number_edited(self, _v):
+        if not self._p_filling:
+            self._p_results = {}
+            self._p_refresh(rebuild_table=False)
+
+    def _p_refresh(self, rebuild_table=True):
+        """分け方・種別・番号から、作るものを決め直して画面と送る窓へ出す。機械には触らない。"""
+        self._p_filling = True
+        try:
+            kinds = [f["kind"] for f in self._selected_files()]
+            plan = WP.make_plan(self.settings, self._p_masters or {}, self._p_model(), kinds,
+                                tilt=self._p_tilt, choice=self._p_choice, numbers=self._p_numbers())
+            self._p_plan = plan
+            self.lbl_p_kind.setText(plan["kind_note"])
+            self.cmb_p_kind.setVisible(plan["ambiguous"])
+            self.cmb_p_kind.setCurrentIndex(1 if plan["tilt"] else 0)
+            for key, r in self.rad_p.items():
+                r.setEnabled(key in plan["allowed"])
+                r.setChecked(key == plan["choice"])
+            self.lbl_p_why.setText(plan["why"])
+            msgs = list(plan["problems"])
+            self.lbl_p_problem.setText("\n".join(msgs))
+            self.lbl_p_problem.setVisible(bool(msgs))
+            if rebuild_table:
+                self._p_fill_table(plan)
+            self._p_states = {}
+            self.lbl_p_done.setVisible(False)
+            self.txt_p_code.setPlainText("\n\n".join(p["text"] for p in plan["programs"]))
+            prev = None
+            if plan["programs"] and not plan["problems"]:
+                prev = WP.same_as_last(WP.read_log(self._p_log_path()), self._p_model(),
+                                       WP.fingerprints(plan["programs"]))
+            if prev:
+                self.lbl_p_prev.setText(f"前回と同じプログラムです（{prev['日時']}・号機{prev['号機'] or '未選択'}"
+                                        "で送りました）。")
+            self.lbl_p_prev.setVisible(bool(prev))
+            self._p_set_job()
+        finally:
+            self._p_filling = False
+
+    def _p_fill_table(self, plan):
+        self._p_spins, self._p_over = [], []
+        slots = plan["slots"] if plan["programs"] else []
+        lines = {}
+        for p in plan["programs"]:
+            lines.update(p.get("lines") or {})
+        self.tbl_p.setRowCount(len(slots))
+        for i, s in enumerate(slots):
+            it0 = QtWidgets.QTableWidgetItem(lines.get(s["number"]) or s["label"])
+            it0.setToolTip(s["label"])
+            self.tbl_p.setItem(i, 0, it0)
+            sp = QtWidgets.QSpinBox()
+            sp.setRange(1, 9999)
+            sp.setPrefix("O")
+            sp.setValue(int(s["number"]))
+            sp.setEnabled(self.chk_p_numbers.isChecked())
+            sp.valueChanged.connect(self._p_number_edited)
+            self.tbl_p.setCellWidget(i, 1, sp)
+            self._p_spins.append((s["role"], sp))
+            ck = QtWidgets.QCheckBox("入れ替える")
+            ck.setToolTip("機械に同じ番号があって中身が違うとき、消して入れ替えます。ふつうはチェックしません"
+                          "（チェックが無ければ書かずに飛ばします）。入れ替える前の古い方は、つないだときに取った控え"
+                          "（機械のプログラム一覧ごと）に入っています")
+            self.tbl_p.setCellWidget(i, 2, ck)
+            self._p_over.append((s, ck))
+            self.tbl_p.setItem(i, 3, QtWidgets.QTableWidgetItem(""))
+        self.tbl_p.resizeColumnsToContents()
+        self._p_show_results()
+
+    def _p_overwrite_numbers(self):
+        out = set()
+        for (_s, ck), (_r, sp) in zip(self._p_over, self._p_spins):
+            if ck.isChecked():
+                out.add(sp.value())
+        return out
+
+    def _p_nc(self):
+        plan = self._p_plan
+        if not plan or not plan["programs"] or plan["problems"]:
+            return b""
+        progs = []
+        for p in plan["programs"]:
+            progs += focas_ops.split_programs(p["nc"], fanuc.DEFAULT_EOB)
+        return focas_ops.join_programs(progs, fanuc.DEFAULT_EOB)
+
+    def _p_set_job(self):
+        d = self._prog_dlg
+        if d is not None:
+            groups = WP.groups_of(self._p_plan["programs"]) if self._p_plan and not self._p_plan["problems"] else []
+            d.set_job(self._p_nc(), fanuc.DEFAULT_EOB, overwrite_fn=self._p_overwrite_numbers, groups=groups)
+
+    def _p_show_results(self):
+        for i in range(len(self._p_over)):
+            num = self._p_spins[i][1].value()
+            text, kind = WP.row_status(self._p_results.get(num))
+            if kind == "none" and num in self._p_states:       # 送る前: 機械の中を確かめた結果
+                text, kind = WP.state_text(self._p_states[num]), \
+                    ("ok" if self._p_states[num] == "same" else "skip" if self._p_states[num] != "new" else "none")
+            cell = self.tbl_p.item(i, 3)
+            if cell is None:
+                continue
+            cell.setText(text)
+            color = {"ok": "#166534", "bad": "#b91c1c", "skip": "#92400e"}.get(kind, "#64748b")
+            cell.setForeground(QtGui.QBrush(QtGui.QColor(color)))
+        self.tbl_p.resizeColumnsToContents()
+
+    def _p_on_inspected(self, states):
+        self._p_states = dict(states)
+        self._p_show_results()
+
+    def _p_on_sent(self, res):
+        for it in res.get("items", []):
+            self._p_results[it["number"]] = it
+        self._p_show_results()
+        plan = self._p_plan or {}
+        if plan.get("programs"):                  # 送ったもの（番号・日時・号機・型式）を記録に残す
+            try:
+                unit = self._prog_dlg.cmb_unit.currentData() if self._prog_dlg is not None else ""
+                WP.append_log(self._p_log_path(), self._p_model(), unit or "", plan.get("choice", ""),
+                              res.get("items", []), WP.fingerprints(plan["programs"]))
+            except Exception:
+                pass
+        done = bool(plan.get("programs")) and all(
+            WP.row_status(self._p_results.get(n))[1] == "ok"
+            or (self._p_results.get(n) or {}).get("skip_reason") == "same"
+            for p in plan["programs"] for n in p["numbers"]) \
+            and not WP.mismatched_numbers(list(self._p_results.values())) and res.get("ok")
+        if done:
+            mains = "・".join(f"O{p['numbers'][0]:04d}" for p in plan["programs"])
+            self.lbl_p_done.setText(f"機械の前で {mains} を選んでサイクルスタートしてください。"
+                                    "運転はPCからは始めません。")
+        self.lbl_p_done.setVisible(bool(done))
+        if plan.get("choice"):
+            self.settings["wizard_prog_choice"] = plan["choice"]
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+        bad = WP.mismatched_numbers(list(self._p_results.values()))
+        self.b_p_lf.setVisible(bool(bad))
+        if self._p_resending:                   # 送り直しが終わったら、窓の中身を ふだんの形に戻す
+            self._p_resending = False
+            self._p_set_job()
+
+    def _confirm_lf(self, numbers):
+        r = QtWidgets.QMessageBox.question(
+            self, "LF のみで送り直す",
+            "読み戻しが違った " + "・".join(f"O{n}" for n in numbers) + " を、行の区切りを LF（改行だけ）にして、"
+            "もう一度書きます。\n機械にある同じ番号は消して入れ替えます。\nよろしいですか？")
+        return r == QtWidgets.QMessageBox.Yes
+
+    def _p_resend_lf(self):
+        """「うまく入らなかったとき」の補助。自動ではやらない。押したときだけ、読み戻しが違った番号を LF のみで書き直す。"""
+        d, plan = self._prog_dlg, self._p_plan
+        if d is None or not plan or not plan["programs"]:
+            return
+        nums = WP.mismatched_numbers(list(self._p_results.values()))
+        if not nums or not self._confirm_lf(nums):
+            return
+        nc = WP.lf_resend_nc(plan["programs"], nums)
+        if not nc:
+            return
+        self._p_resending = True
+        d.set_job(nc, fanuc.EOB_LF, overwrite_fn=lambda: set(nums), inspect=False)
+        d.start_check()
 
     def _make_file_simple(self):
         """かんたん表示から「ファイルを作る」。出力先が無ければ、先に選んでもらう。"""

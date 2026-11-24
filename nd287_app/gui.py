@@ -5974,6 +5974,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
+        self.cmb_motor_suggest = QtWidgets.QComboBox()
+        self.cmb_motor_suggest.setToolTip("仮モーターが決まっていないとき、この製品と同じ容量のモーターの候補です。選ぶと番号が入ります")
+        self.cmb_motor_suggest.activated.connect(self._pick_suggested_motor)
+        self.fm.addRow("どれを付ける？", self.cmb_motor_suggest)
         self.lbl_motor_info = QtWidgets.QLabel("")
         self.lbl_motor_info.setWordWrap(True)
         self.lbl_motor_info.setStyleSheet("color:#1d4ed8; font-weight:bold;")
@@ -6573,8 +6577,41 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._show_motor_info()
         self._update_candidates()
 
+    def _product_capacity(self):
+        sel = self._selected_files()
+        caps = {f["meta"].get("capacity") for f in sel if f["meta"].get("capacity")}
+        return caps.pop() if len(caps) == 1 else ""
+
+    def _fill_motor_suggestions(self):
+        """仮モーターが決まっていないとき: この製品と同じ容量のモーターを、番号表から候補に出す。"""
+        cmb = self.cmb_motor_suggest
+        cmb.blockSignals(True)
+        cmb.clear()
+        cap = self._product_capacity()
+        temp = self.cmb_motor.currentData() == "temp"
+        if temp and not self.e_motor_id.text().strip() and cap:
+            rows = sorted(((no, i) for no, i in self._motor_table.items() if i.get("cap") == cap),
+                          key=lambda x: (x[1].get("model", ""), x[0]))
+            cmb.addItem(f"（この製品と同じ容量 {cap} のモーター: {len(rows)}種類）", "")
+            for no, i in rows:
+                cmb.addItem(f"{no}　{i.get('model') or '（型式の登録なし）'}", no)
+            show = bool(rows)
+        else:
+            show = False
+        cmb.blockSignals(False)
+        self.cmb_motor_suggest.setVisible(show)
+        lab = self.fm.labelForField(cmb)
+        if lab is not None:
+            lab.setVisible(show)
+
+    def _pick_suggested_motor(self, _i):
+        no = self.cmb_motor_suggest.currentData()
+        if no:
+            self.e_motor_id.setText(str(no))
+
     def _show_motor_info(self):
         """入れたモーター番号の名前・容量を、すぐ下に出す（番号表から）。"""
+        self._fill_motor_suggestions()
         mid = self.e_motor_id.text().strip()
         if self.cmb_motor.currentData() != "temp" or not mid:
             self.lbl_motor_info.setText("")

@@ -251,6 +251,25 @@ class TestWizardMachineWrite(WizardBase):
         for c, a in w._cand:
             self.assertTrue(any(c.caps[x] == "20A" for x in a))
 
+    def test_suggests_same_capacity_motors_when_no_temp_motor_decided(self):
+        tbl = self.work / "モーター番号表.csv"
+        tbl.write_text("モーター番号,モーター型式,容量,別名,出典件数\n"
+                       "293,αiS8/4000,20A,,3\n299,αiF22/3000 HV,40A,,12\n"
+                       "300,αiS12/4000,40A,,5\n", encoding="utf-8-sig")
+        self.settings["motor_table_csv"] = str(tbl)
+        w = self.ready(self.wizard(), motor="temp")
+        w._show_motor_info()
+        cap = w._product_capacity()
+        self.assertTrue(cap)
+        items = [w.cmb_motor_suggest.itemData(i) for i in range(1, w.cmb_motor_suggest.count())]
+        self.assertTrue(items)
+        for no in items:                                  # 製品の容量と同じ容量だけ
+            self.assertEqual(w._motor_table[no]["cap"], cap)
+        w.cmb_motor_suggest.setCurrentIndex(1)
+        w._pick_suggested_motor(1)
+        self.assertEqual(w.e_motor_id.text(), items[0])
+        self.assertTrue(w.cmb_motor_suggest.isHidden())   # 番号が入ったら候補は隠す
+
     def test_connected_machine_unit_is_chosen_automatically(self):
         w = self.wizard()
         w._connected_unit = lambda: "23"

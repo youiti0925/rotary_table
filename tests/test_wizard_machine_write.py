@@ -224,6 +224,17 @@ class TestWizardMachineWrite(WizardBase):
         w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
         self.assertEqual(len(w._cand), n_product)
 
+    def test_temp_motor_with_number_lists_units_only(self):
+        w = self.ready(self.wizard(), motor="temp")
+        n_axes = len(w._cand)
+        w.e_motor_id.setText("299")
+        w._update_candidates()
+        units = [str(c.unit) for c, _a in w._cand]
+        self.assertEqual(len(units), len(set(units)))               # 号機ごとに1行
+        self.assertLess(len(w._cand), n_axes)
+        self.assertIn("号機を選んでください", w.lbl_need.text())
+        self.assertIn("自動", w.cmb_ctrl.itemText(1))
+
     def test_connected_machine_unit_is_chosen_automatically(self):
         w = self.wizard()
         w._connected_unit = lambda: "23"

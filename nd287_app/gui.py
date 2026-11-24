@@ -6490,7 +6490,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             # 仮モーターは製品のモーターと別物なので、製品の容量・電圧では号機を外さない。
             # 軸は容量で決められないので、号機×軸の組を全部出して人が選ぶ（つながっている機械が先頭）
             voltage = ""
-            if len(sel) == 1 and self.e_motor_id.text().strip():
+            by_unit = len(sel) == 1 and bool(self.e_motor_id.text().strip())
+            if by_unit:
                 # 仮モーターの番号が入っているので、軸はつないだあと機械の 2020 から決まる。号機だけ選ぶ
                 self._cand = [(c, [c.axes()[0]]) for c in self._controllers if c.axes()]
             elif len(sel) == 1:
@@ -6508,7 +6509,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         vtxt = f"・{voltage}" if voltage else ""
         if temp:
             self.lbl_need.setText(
-                f"{kinds}（{len(sel)}軸）仮モーターなので、製品の容量・電圧では絞りません。号機と軸を選んでください … {len(self._cand)}通り")
+                f"{kinds}（{len(sel)}軸）仮モーターなので、製品の容量・電圧では絞りません。"
+                + ("号機を選んでください（使う軸は、つないだあと、機械の 2020 が仮モーターの番号と同じ軸に自動で決まります）"
+                   f" … {len(self._cand)}台" if by_unit else
+                   f"号機と軸を選んでください … {len(self._cand)}通り"))
         else:
             self.lbl_need.setText(
                 f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
@@ -6520,6 +6524,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             for i, (c, asg) in enumerate(self._cand):
                 amap = "  ".join(f"{nc_param.axis_name(seiban_flow_axis(a))}:{c.caps[a]}"
                                  for a in asg)
+                if temp and by_unit:
+                    amap = "（軸は機械から自動）"
                 star = "★つながっている機械  " if conn_unit and str(c.unit) == conn_unit else ""
                 self.cmb_ctrl.addItem(f"{star}{c.label()}  →  {amap}", i)
                 if star and pick < 0:

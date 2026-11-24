@@ -1222,6 +1222,14 @@ def split_programs(nc, eob):
     return out
 
 
+def join_programs(progs, eob):
+    """split_programs の出力（の一部）を、また 1 本の nc（先頭・末尾が %）に戻す。
+    全部を渡せば、元の nc と 1 バイトも違わない。一部だけ渡せば、その分だけの nc になる。"""
+    eob = eob.encode("ascii") if isinstance(eob, str) else bytes(eob)
+    core = b"".join(p["wire"][len(eob):-1] for p in progs)
+    return b"%" + eob + core + b"%" + eob
+
+
 def _find_existing(client, folder, number):
     tree = client.call("prog_list", {"path": folder})
     if tree.get("ok") is False or tree.get("rc_all") != H.ALLDIR_END_RC:
@@ -1338,10 +1346,114 @@ def run_program_send(client, nc, eob, *, approved, overwrite=False, folder=DEFAU
     return {"items": items, "ok": ok, "folder": folder}
 
 
+def inspect_programs(client, nc, eob, *, folder=DEFAULT_PROG_FOLDER):
+    """機械の中を読んで確かめる（読むだけ。何も書かない）。戻り値 {番号: 状態}。
+      new      同じ番号が無い（送ります）
+      same     同じ番号があって、中身も同じ（もう入っています。送らなくて大丈夫）
+      differs  同じ番号があって、中身が違う（入れ替えますか？）
+      unknown  同じ番号はあるが、中身を読めなかった（違うものとして扱う）"""
+    out = {}
+    for p in split_programs(nc, eob):
+        ex = _find_existing(client, folder, p["number"])
+        if ex is None:
+            out[p["number"]] = "new"
+            continue
+        try:
+            back = C.FocasClient.decode_data(client.call("prog_read", {"path": folder + ex["name"]}))
+        except C.FocasError:
+            out[p["number"]] = "unknown"
+            continue
+        kind, _ = compare_readback(p["expect"], back)
+        out[p["number"]] = "same" if kind in ("exact", "padded") else "differs"
+    return out
+
+
+def plan_set_send(progs, states, groups, overwrite_numbers):
+    """段④の送り方を決める（機械には触らない）。戻り値 {番号: "send"/"replace"/"same"/"hold_differs"/"hold_set"}。
+    本体とサブは必ずセット（groups の1組）で扱う。片方だけ送らない。
+      組の全部が new                          → send（全部送る）
+      組に same があって他は new              → new だけ send（同じ中身が機械に入っているので、組は揃う）
+      組の全部が same                         → same（送らない）
+      組に differs/unknown がある:
+         その全部に上書きのチェックがある      → differs は replace、new は send
+         1つでも無い                          → 組ごと飛ばす（differs は hold_differs、new は hold_set）"""
+    ow = {int(n) for n in overwrite_numbers}
+    in_groups = {n for g in groups for n in g}
+    gs = [list(g) for g in groups] + [[p["number"]] for p in progs if p["number"] not in in_groups]
+    act = {}
+    for g in gs:
+        g = [n for n in g if n in states]
+        if not g:
+            continue
+        bad = [n for n in g if states[n] in ("differs", "unknown")]
+        if not bad:
+            for n in g:
+                act[n] = "send" if states[n] == "new" else "same"
+        elif all(n in ow for n in bad):
+            for n in g:
+                act[n] = {"new": "send", "same": "same"}.get(states[n], "replace")
+        else:
+            for n in g:
+                act[n] = {"new": "hold_set", "same": "same"}.get(states[n], "hold_differs")
+    return act
+
+
+SKIP_TEXT = {
+    "same": "もう入っています（送らなくて大丈夫）",
+    "hold_differs": "もうあります。中身が違います（入れ替えていません）",
+    "hold_set": "セットの片方が入れ替わらないので、送っていません",
+}
+
+
+def run_programs_send(client, nc, eob, *, approved, overwrite_numbers=(), groups=(),
+                      folder=DEFAULT_PROG_FOLDER, cnc_id=None, backup_info=None,
+                      allowed=DEFAULT_ALLOWED_ALARMS, progress=None):
+    """かんたん作成の段④用。複数本を順に送る。機械の中を確かめて（inspect_programs）から、
+    同じ番号があれば、中身が同じなら送らず、違えば既定で飛ばす。入れ替えるのは overwrite_numbers の番号だけ
+    （入れ替える前の古い方は、つないだときに取った控え＝機械のプログラム一覧ごとの控えに入っている）。
+    groups は「必ずセットで送るもの」の番号の組（本体とサブ）。plan_set_send を参照。
+    点検（状態・控え・容量・機械の取り違え）は run_program_send と同じで、通らなければ何も書かない。
+    戻り値 {"items": [...], "ok": bool, "folder": ..., "skipped": [番号…]}。
+    items は nc の並び順。飛ばしたものは {"skipped": True, "skip_reason": ...}。途中で止まったときは、止まった所までが並ぶ。"""
+    if approved is not True:
+        raise WriteRefused(["人の承認がありません。書きません"])
+    chk = check_program_send(client, nc, eob, folder=folder, cnc_id=cnc_id, backup_info=backup_info,
+                             allowed=allowed)
+    if chk["reasons"]:
+        raise WriteRefused(chk["reasons"])
+    progs = split_programs(nc, eob)
+    states = inspect_programs(client, nc, eob, folder=folder)
+    act = plan_set_send(progs, states, groups, overwrite_numbers)
+    todo = [p for p in progs if act.get(p["number"]) in ("send", "replace")]
+    skipped = [p["number"] for p in progs if act.get(p["number"]) not in ("send", "replace")]
+    done = {}
+    ok = True
+    if todo:
+        has_old = any(act[p["number"]] == "replace" for p in todo)
+        res = run_program_send(client, join_programs(todo, eob), eob, approved=True, overwrite=has_old,
+                               folder=folder, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed,
+                               progress=progress)
+        ok = bool(res["ok"])
+        done = {it["number"]: it for it in res["items"]}
+    items = []
+    for p, row in zip(progs, chk["programs"]):
+        n = p["number"]
+        if n in skipped:
+            reason = act.get(n, "hold_set")
+            items.append({"number": n, "name": row["name"], "existed": row["exists"], "written": False,
+                          "deleted": False, "match": None, "match_text": "", "skipped": True,
+                          "skip_reason": reason, "note": SKIP_TEXT.get(reason, "")})
+        elif n in done:
+            items.append(done[n])
+    return {"items": items, "ok": ok, "folder": folder, "skipped": skipped}
+
+
 def describe_program_send(res):
     out = []
     for it in res["items"]:
-        if it["written"]:
+        if it.get("skipped"):
+            out.append(f"{it['name']}: " + (it.get("note") or "もうあります（書いていません）"))
+        elif it["written"]:
             head = f"{it['name']}: 書きました" + ("（同じ番号を消して入れ替えました）" if it.get("deleted") else "")
             out.append(head + "・読み戻し: " + (it["match_text"] or "（未確認）"))
         else:

@@ -25,6 +25,16 @@ class TestSteps(unittest.TestCase):
         self.assertIn("BASIC", r["missing"][0])
         self.assertTrue(W.step_state(2, ctrl_chosen=True, basic_ok=True)["can_next"])
 
+    def test_four_steps_and_program_offer(self):
+        self.assertEqual(W.STEPS, (1, 2, 3, 4))
+        self.assertIn("測定プログラム", W.STEP_TITLES[4])
+        self.assertEqual(W.program_offer(3, params_ok=False), (False, ""))    # 書込が成功するまで案内しない
+        self.assertTrue(W.program_offer(3, params_ok=True)[0])
+        self.assertIn("続けて", W.program_offer(3, params_ok=True)[1])
+        self.assertTrue(W.program_offer(2)[0])                                # パラメータを送らない流れ
+        self.assertFalse(W.program_offer(1)[0])
+        self.assertFalse(W.program_offer(4, params_ok=True)[0])
+
     def test_summary_only_decided_things(self):
         self.assertEqual(W.summary(seiban="50014984", motor="temp", motor_id="299"),
                          "50014984 ／ 仮モーター（299）")

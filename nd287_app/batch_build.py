@@ -34,14 +34,15 @@ def safe_name(model: str) -> str:
 
 
 def program_for_model(cond: dict, cfg, *, rotary=True, repeats=0,
-                      blocks=None, title=None) -> str:
+                      blocks=None, title=None, include_division=True) -> str:
     """測定条件1件から測定プログラム（Gコード）を作る。
 
     分割のみが既定。再現も入れるなら blocks と repeats を渡す。
     条件に刻みが無い型式は ValueError（作れないものを黙って作らない）。
+    include_division=False なら再現性だけのプログラムを作る（刻みは使わないので要らない）。
     """
     p = condition_params(cond)
-    if not p.get("wheel_pitch"):
+    if include_division and not p.get("wheel_pitch"):
         raise ValueError("ホイール刻みが測定条件にありません")
     worm_pitch = p.get("worm_pitch") or 0.0
     worm_range = p.get("worm_range") or 0.0
@@ -50,10 +51,10 @@ def program_for_model(cond: dict, cfg, *, rotary=True, repeats=0,
     return fanuc.generate(
         cfg, rotary=rotary,
         title=title if title is not None else f"{model} {close}".strip(),
-        wheel_pitch=p["wheel_pitch"], wheel_start=0.0, wheel_end=360.0,
+        wheel_pitch=p.get("wheel_pitch") or 10.0, wheel_start=0.0, wheel_end=360.0,
         worm_pitch=worm_pitch, worm_range=worm_range, worm_start=0.0,
         blocks=list(blocks or []), repeats=int(repeats or 0),
-        include_division=True, include_repeat=bool(blocks and repeats))
+        include_division=bool(include_division), include_repeat=bool(blocks and repeats))
 
 
 def _out_path(base: Path, model: str, ext: str, layout: str, used: set) -> Path:

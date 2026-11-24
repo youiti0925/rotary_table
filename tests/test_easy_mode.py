@@ -26,15 +26,41 @@ class TestFlow(unittest.TestCase):
     def ids(self, st, ctx=None):
         return [s["id"] for s in F.STEPS if F.needed(s["id"], st, ctx or {})]
 
-    def test_already_ok_machine_skips_power_and_estop(self):
+    def test_already_ok_machine_skips_power(self):
         ids = self.ids(S(aut=3))
         self.assertNotIn("power", ids)
-        self.assertNotIn("estop", ids)
         self.assertIn("dial_mdi", ids)
 
+    def test_parameters_are_written_with_the_emergency_stop_pressed(self):
+        """利用者の決定（2026-11-24）: パラメータは非常停止がかかっているときだけ書ける。測定プログラムは解除してから。"""
+        ids = self.ids(S(emergency=0), {"param_estop": "estop_only"})
+        self.assertNotIn("estop", ids)                       # 先に解除する手順は出さない
+        self.assertLess(ids.index("estop_press"), ids.index("machine_in"))
+        # すでに押してあれば、押す手順は出さず、書いたあとに解除する手順が出る
+        ids = self.ids(S(emergency=1), {"param_estop": "estop_only"})
+        self.assertNotIn("estop_press", ids)
+        self.assertGreater(ids.index("estop_release"), ids.index("machine_in"))
+        # 解除してから書く設定（released_only）は、前の順
+        ids = self.ids(S(emergency=1), {"param_estop": "released_only"})
+        self.assertIn("estop", ids)
+        self.assertNotIn("estop_press", ids)
+        self.assertNotIn("estop_release", ids)
+        # どちらでもよい設定
+        ids = self.ids(S(emergency=0), {"param_estop": "either"})
+        self.assertNotIn("estop_press", ids)
+        self.assertNotIn("estop", ids)
+
+    def test_estop_detect(self):
+        self.assertTrue(F.is_done("estop_on", S(emergency=1)))
+        self.assertFalse(F.is_done("estop_on", S(emergency=0)))
+        self.assertEqual(F.watch_line("estop_press", S(emergency=0))[0], "wait")
+        self.assertEqual(F.watch_line("estop_press", S(emergency=1))[0], "ok")
+
     def test_offline_machine_starts_with_power_then_origin_return(self):
-        ids = self.ids(F.OFFLINE, {"powered_on": True})
+        ids = self.ids(F.OFFLINE, {"powered_on": True, "param_estop": "released_only"})
         self.assertEqual(ids[:3], ["intro", "power", "estop"])
+        ids = self.ids(F.OFFLINE, {"powered_on": True})
+        self.assertEqual(ids[:3], ["intro", "power", "dial_mdi"])
         self.assertIn("jog_origin", ids)
 
     def test_origin_return_only_after_power(self):
@@ -53,6 +79,8 @@ class TestFlow(unittest.TestCase):
 
     def test_detect_from_machine(self):
         self.assertTrue(F.done_now("estop", S(emergency=0), {}))
+        self.assertTrue(F.done_now("estop_press", S(emergency=1), {}))
+        self.assertTrue(F.done_now("estop_release", S(emergency=0), {}))
         self.assertFalse(F.done_now("estop", S(emergency=1), {}))
         self.assertTrue(F.done_now("dial_mdi", S(aut=0), {}))
         self.assertFalse(F.done_now("dial_mdi", S(aut=1), {}))
@@ -60,7 +88,7 @@ class TestFlow(unittest.TestCase):
         self.assertFalse(F.done_now("power", F.OFFLINE, {}))
 
     def test_offline_is_never_done_and_never_guessed(self):
-        for sid in ("estop", "dial_mdi", "dial_mem", "dial_ref", "start1"):
+        for sid in ("estop", "estop_press", "estop_release", "dial_mdi", "dial_mem", "dial_ref", "start1"):
             self.assertFalse(F.done_now(sid, F.OFFLINE, {}))
 
     def test_cycle_done_needs_the_machine_to_go_away_and_come_back(self):
@@ -125,7 +153,7 @@ class TestWizardBrief(unittest.TestCase):
             (dict(busy_mode="connect"), "機械につないでいます…"),
             (dict(busy_mode="backup"), "機械の中身を写しています…"),
             (dict(busy_mode="write"), "機械に書いています。さわらない"),
-            (dict(connected=True, estop="非常停止中です"), "非常停止がかかっています"),
+            (dict(connected=True, estop="非常停止中です"), "非常停止がかかっています。もどす"),
             (dict(connected=True, has_backup=True, plan_ready=True, n_items=12), "「機械に書く」を押す"),
             (dict(connected=True, has_backup=True, plan_ready=True, result_state="done", result_all_ok=True),
              "入りました ✓"),
@@ -139,6 +167,14 @@ class TestWizardBrief(unittest.TestCase):
             b = F.wizard_brief(3, g["kind"], g["text"])
             self.assertEqual(b["say"], want, g["text"])
             self.assertLessEqual(len(b["say"]), 30)
+        # 非常停止の向きを間違えない: 書くときは「押す」、プログラムを送るときは「もどす」
+        g = G.writer_guide(connected=True, has_backup=True, plan_ready=True, n_items=3, reasons=(
+            "パラメータは非常停止にして書きます（社内の手順）。機械の非常停止ボタンを押してください（いまの非常停止の値 0）",))
+        b = F.wizard_brief(3, g["kind"], g["text"])
+        self.assertEqual((b["say"], b["pic"]), ("非常停止を押す", "estop_press"))
+        g = G.program_guide(connected=True, estop="今は書けません。\n非常停止です（生の値 1）")
+        b = F.wizard_brief(4, g["kind"], g["text"])
+        self.assertEqual((b["say"], b["pic"]), ("非常停止がかかっています。もどす", "estop"))
         g = G.program_guide(connected=True, has_backup=True)
         self.assertEqual(F.wizard_brief(4, g["kind"], g["text"])["say"], "「送る」を押す")
 
@@ -161,7 +197,7 @@ class TestArt(unittest.TestCase):
     def test_svg_wellformed(self):
         import xml.dom.minidom as md
         pics = [easy_art.panel(p, 3, 0.5) for p in list(easy_art.PANEL_SPOTS) + ["none"]]
-        pics += [easy_art.dial(3, 5, False), easy_art.dial(2, 3, True), easy_art.estop(False), easy_art.estop(True),
+        pics += [easy_art.dial(3, 5, False), easy_art.dial(2, 3, True), easy_art.estop(False), easy_art.estop(True), easy_art.estop_press(False), easy_art.estop_press(True),
                  easy_art.power(False), easy_art.power(True, True), easy_art.knob(False), easy_art.knob(True),
                  easy_art.start(False), easy_art.start(True, True), easy_art.keys(False), easy_art.keys(True, "O0101"),
                  easy_art.jog(False), easy_art.counter(False), easy_art.counter(True), easy_art.scene(),
@@ -278,7 +314,13 @@ class TestDialog(unittest.TestCase):
     def test_walk_through_to_the_end(self):
         dlg, host, poller = self.make(S(aut=0))
         self.assertEqual(self.sid(dlg), "intro")
-        dlg._next()                                   # 用意するもの → （電源・非常停止・MDI は済んでいる）→ 機械に入れる
+        dlg._next()                                   # 用意するもの → （電源・MDI は済んでいる）→ 非常停止を押す
+        self.assertEqual(self.sid(dlg), "estop_press")
+        self.assertFalse(dlg.b_next.isEnabled())
+        poller.st = S(aut=0, emergency=1)              # 押した（パラメータは非常停止中に書く）
+        dlg._tick()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
         self.assertEqual(self.sid(dlg), "machine_in")
         self.assertIsNotNone(dlg._wiz)                # かんたん作成は、この画面の中に入っている
         self.assertFalse(dlg.embed.isHidden())
@@ -289,7 +331,13 @@ class TestDialog(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(poller.log, ["pause", "resume"])
         self.assertIsNone(dlg._wiz)
-        self.assertEqual(self.sid(dlg), "fields")      # 自動で次へ進む
+        self.assertEqual(self.sid(dlg), "estop_release")   # 書き終えたら、非常停止をもどす（プログラム・運転は解除してから）
+        self.assertFalse(dlg.b_next.isEnabled())
+        poller.st = S(aut=0, emergency=0)
+        dlg._tick()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "fields")
         self.assertFalse(dlg.b_next.isEnabled())
         host.e_machine.setText("266704")
         host.e_operator.setText("ゆう")
@@ -333,7 +381,7 @@ class TestDialog(unittest.TestCase):
         self.assertIn("stop", poller.log)
 
     def test_back_goes_to_the_step_before(self):
-        dlg, host, poller = self.make(S(aut=0))
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
         dlg._next()
         self.assertEqual(self.sid(dlg), "machine_in")
         dlg._back()
@@ -347,14 +395,14 @@ class TestDialog(unittest.TestCase):
         self.assertEqual(self.sid(dlg), "power")
         self.assertFalse(dlg.b_next.isEnabled())
         self.assertIn("さがして", dlg.lbl_watch.text())
-        poller.st = S(emergency=1, aut=0)
+        poller.st = S(emergency=0, aut=0)              # 電源が入った。非常停止はかかっていない
         dlg._tick()
         self.assertTrue(dlg.b_next.isEnabled())
         dlg._next()
-        self.assertEqual(self.sid(dlg), "estop")
-        self.assertIn("非常停止がかかっています", dlg.lbl_watch.text())
+        self.assertEqual(self.sid(dlg), "estop_press")  # パラメータは非常停止を押して書く
+        self.assertIn("解除されています", dlg.lbl_watch.text())
         self.assertFalse(dlg.b_next.isEnabled())
-        poller.st = S(emergency=0, aut=0)
+        poller.st = S(emergency=1, aut=0)
         dlg._tick()
         self.assertTrue(dlg.b_next.isEnabled())
         dlg.close()
@@ -372,7 +420,7 @@ class TestDialog(unittest.TestCase):
 
     def test_only_needed_buttons_are_shown(self):
         """見えるボタンは、もどる・次へと、その手順で要るものだけ。"""
-        dlg, host, poller = self.make(S(aut=0))
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
                              if not b.isHidden() and not dlg.embed.isAncestorOf(b))
         self.assertEqual(len(vis()), 2)

@@ -128,6 +128,21 @@ def estop(done, phase=0.0):
     return _zoom_frame(body, "非常停止ボタン。右に回してもどす")
 
 
+def estop_press(done, phase=0.0):
+    """非常停止を押す（パラメータを書くあいだ押したままにする）。押すと、ボタンがへこむ。"""
+    r_out = 66 if done else 74
+    r_in = 44 if done else 50
+    arrow = ""
+    if not done:
+        arrow = (f'<path d="M150 14 L150 54" stroke="{INK}" stroke-width="10" stroke-linecap="round"/>'
+                 f'<path d="M130 42 L150 66 L170 42 Z" fill="{INK}"/>' + _ring(150, 150, 96, phase))
+    body = (f'<circle cx="150" cy="150" r="104" fill="{YELLOW}" stroke="{INK}" stroke-width="3"/>'
+            f'<circle cx="150" cy="150" r="{r_out}" fill="{RED}" stroke="#7E1A14" stroke-width="4"/>'
+            f'<circle cx="150" cy="150" r="{r_in}" fill="#E2574C"/>' + arrow
+            + _t(150, 282, 14, "押しこまれました。そのまま" if done else "まっすぐ押しこむ"))
+    return _zoom_frame(body, "非常停止ボタンを押す")
+
+
 def power(done, cycle=False, phase=0.0):
     ring = "" if done else _ring(212 if cycle else 92, 130, 62, phase)
     note = (_t(212, 216, 15, "① 先に") + _t(92, 216, 15, "② 画面が消えたら")) if cycle else ""

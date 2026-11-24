@@ -14627,7 +14627,8 @@ class MainWindow(QtWidgets.QMainWindow):
             counter_reset = True
         return dict(missing=g["missing"], capturing=g["capturing"], count=g["count"], finished=g["finished"],
                     ng=g["ng"], has_spec=g["has_spec"], saved=g["saved"], saved_path=g["saved_path"],
-                    programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset)
+                    programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset,
+                    param_estop=focas_ops.estop_mode(True))
 
     def easy_start_capture(self):
         """取込開始（測定の画面の「取込開始」と同じ）。入っていない欄があれば、理由を投げる。"""

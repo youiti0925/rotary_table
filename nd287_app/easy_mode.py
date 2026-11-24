@@ -546,6 +546,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             svg = A.scene()
         elif pic == "estop":
             svg = A.estop(False, ph)
+        elif pic == "estop_press":
+            svg = A.estop_press(False, ph)
         elif pic == "auto_done":
             svg = A.auto(True, "入りました")
         else:
@@ -576,6 +578,8 @@ class EasyModeDialog(QtWidgets.QDialog):
                 svg = A.power(done, True, ph)
             elif z == "estop":
                 svg = A.estop(done, ph)
+            elif z == "estop_press":
+                svg = A.estop_press(done, ph)
             elif z == "dial":
                 svg = A.dial(A.MODE_INDEX[s["to"]], dial_now, done, ph)
             elif z == "knob":

@@ -38,11 +38,15 @@ STEPS = [
          lines=["赤い大きなボタンを右に回すと、手前に出ます。"], part="estop", zoom="estop", detect="estop_off"),
     dict(id="dial_mdi", ch=1, kind="machine", title="つまみを MDI に合わせる",
          lines=["操作モードのつまみを回します。"], part="dial", zoom="dial", to="MDI", detect="aut_mdi"),
+    dict(id="estop_press", ch=1, kind="machine", title="非常停止を押す",
+         lines=["設定を書くあいだは、押したままにします。"], part="estop", zoom="estop_press", detect="estop_on"),
     dict(id="machine_in", ch=2, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
          lines=["受注伝票番号を入れると、PC が機械を読んで自動で決めます。", "機械に書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
     dict(id="cycle_power", ch=2, kind="machine", title="電源を入れ直す",
          lines=["「切」を押して、画面が消えたら「入」を押します。"], part="power", zoom="power_cycle", detect="cycled"),
+    dict(id="estop_release", ch=2, kind="machine", title="非常停止をもどす",
+         lines=["書き終わりました。赤いボタンを右に回します。"], part="estop", zoom="estop", detect="estop_off"),
     dict(id="dial_ref", ch=2, kind="machine", title="つまみを原点復帰に合わせる",
          lines=["電源のあとは、原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
     dict(id="jog_origin", ch=2, kind="machine", title="「＋B」を押し続ける",
@@ -105,6 +109,8 @@ def is_done(detect, st, track=None):
         return False
     if detect == "estop_off":
         return st["emergency"] == 0
+    if detect == "estop_on":
+        return st["emergency"] == 1
     if detect == "aut_mdi":
         return st["aut"] == AUT_MDI
     if detect == "aut_mem":
@@ -122,7 +128,7 @@ def can_detect(detect, st):
     """この状態で「できた」を機械から読めるか。読めない値のとき、人が押す小さなボタンを出す。"""
     if not st["online"]:
         return detect == "online"
-    key = {"estop_off": "emergency", "aut_mdi": "aut", "aut_mem": "aut", "aut_ref": "aut", "running": "run"}.get(detect)
+    key = {"estop_off": "emergency", "estop_on": "emergency", "aut_mdi": "aut", "aut_mem": "aut", "aut_ref": "aut", "running": "run"}.get(detect)
     if key is None:
         return detect == "cycled"
     return st[key] is not None
@@ -136,8 +142,13 @@ def needed(step_id, st, ctx):
     d = s.get("detect")
     if step_id == "power":
         return not st["online"]
-    if step_id == "estop":
-        return not (st["online"] and st["emergency"] == 0)
+    mode = ctx.get("param_estop", "estop_only")     # パラメータを書くときの非常停止（focas_ops.estop_mode）
+    if step_id == "estop":                           # 先に解除する順（設定が released_only のときだけ）
+        return mode == "released_only" and not (st["online"] and st["emergency"] == 0)
+    if step_id == "estop_press":                     # パラメータは非常停止がかかっているときだけ書ける（利用者の決定 2026-11-24）
+        return mode == "estop_only" and not (st["online"] and st["emergency"] == 1)
+    if step_id == "estop_release":                   # 書き終えたあと、まだ非常停止なら解除する（プログラム送信・運転は解除してから）
+        return bool(st["online"] and st["emergency"] == 1) and mode != "released_only"
     if step_id in ("dial_mdi", "dial_mem"):
         return not (st["online"] and is_done(d, st))
     if step_id == "machine_in":
@@ -223,6 +234,8 @@ def watch_line(step_id, st, ctx=None, track=None):
         return ("wait", "機械が見えません。LAN ケーブルと電源を確かめてください")
     if d == "estop_off":
         return ("ok", "非常停止がもどりました") if done else ("stop", "非常停止がかかっています")
+    if d == "estop_on":
+        return ("ok", "非常停止がかかりました") if done else ("wait", "いまは解除されています")
     if d in ("aut_mdi", "aut_mem", "aut_ref"):
         want = {"aut_mdi": "MDI", "aut_mem": "メモリ運転", "aut_ref": "原点復帰"}[d]
         if done:
@@ -264,7 +277,9 @@ _MISSING_SHORT = (
     ("BASIC が見つかりません", "元の設定ファイルが見つかりません"),
 )
 _GUIDE_SHORT = (
-    ("非常停止", "非常停止がかかっています"),
+    ("非常停止にして書きます", "非常停止を押す"),          # パラメータを書くには、押す（社内の手順）
+    ("非常停止ボタンを押して", "非常停止を押す"),
+    ("非常停止", "非常停止がかかっています。もどす"),      # プログラムを送る・運転するときは、もどす
     ("機械につながりません", "機械につながりません。電源とケーブルを見る"),
     ("機械につないでいます", "機械につないでいます…"),
     ("控えています", "機械の中身を写しています…"),
@@ -313,6 +328,8 @@ def wizard_brief(step, kind="", text="", missing=(), done=False):
         pic = "power"
     elif "ケーブル" in say or "つなが" in say:
         pic = "scene"
+    elif "非常停止を押す" in say:
+        pic = "estop_press"
     elif "非常停止" in say:
         pic = "estop"
     return dict(title=title, say=say, pic=pic, kind=kind or "wait", detail=(t if kind == "stop" else ""))

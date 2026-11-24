@@ -2988,7 +2988,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
     COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
-                 basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id=""):
+                 basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id="",
+                 expect_unit="", auto_backup=False):
         super().__init__(parent)
         self.settings = settings
         # auto: 入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う（FocasDialog と同じ）。
@@ -3026,6 +3027,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._zero_all = False
         self._keep_motor = bool(keep_motor)
         self._motor_id = str(motor_id or "").strip()
+        self._expect_unit = str(expect_unit or "").strip()   # かんたん作成で選んだ号機（つないだ機械と照らし合わせる）
+        self._auto_backup = bool(auto_backup)               # つないだら、控えを自動で取る（読むだけ）
+        self._axis_by_motor = None                         # 機械の 2020 から決めた軸（番号）
         self._result = None              # 直近の書込の WriteResult
         self._undone = False
         self._rewrite_blocked = False    # この控えでは、もう書いた（もう一度書くなら控えを取り直す）
@@ -3470,6 +3474,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self._set_state("つながりました。ただし、機械ごとの番号（CNC ID）が読めないので、この機械には書きません"
                             "（どの機械か確かめられないため。読むだけはできます）",
                             "color:#b91c1c; font-weight:bold;")
+        elif self._auto_backup and not self._busy and self._backup is None and not self.lbl_estop.isVisible() \
+                and not self._unit_mismatch():
+            QtCore.QTimer.singleShot(0, self.take_backup)      # 読むだけ。号機の食い違い・非常停止のときは取らない
 
     def disconnect_machine(self):
         client = self.client
@@ -3648,14 +3655,28 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if self._backup is not None and self._raw is not None and not self._busy:
             self._build_plan()
 
+    def _axis_from_motor_id(self, raw):
+        """仮モーターの番号を入れてあるとき、機械の各軸の 2020 を読んで、同じ番号の軸を使う軸にする。
+        ちょうど1軸だけ一致したときだけ決める（0軸・2軸以上なら人が選んだ軸のまま）。"""
+        if not (self._keep_motor and self._motor_id) or len(self._product_axes) != 1:
+            return None
+        hit = [n for n in range(1, 9)
+               if str(fanuc_param.get_value(raw, MOTOR_ID_PARAM, f"A{n}") or "").strip() == self._motor_id]
+        return hit[0] if len(hit) == 1 else None
+
     def _show_motor_note(self):
         """機械の 2020 と製品の 2020 が違うことを、はっきり出す（黙って外さない）。"""
         it = next((x for x in (self._wplan or {}).get("items", []) if x["no"] == MOTOR_ID_PARAM), None)
         mach = None
         if self._raw is not None and self._product_axes:
-            mach = fanuc_param.value_on_axis(self._raw, MOTOR_ID_PARAM, self._product_axes[0])
+            mach = fanuc_param.value_on_axis(
+                self._raw, MOTOR_ID_PARAM,
+                self._axis_by_motor if self._axis_by_motor is not None else self._product_axes[0])
         if self._keep_motor:
             txt = "モーター番号（N02020）は書きません。機械のモーターのままです。"
+            if self._axis_by_motor is not None:
+                txt += (f"\n使う軸は、機械の 2020 が {self._motor_id} の {nc_param.axis_name(self._axis_by_motor)} 軸に"
+                        "決めました。")
             if self._motor_id and mach is not None and str(mach).strip() != self._motor_id:
                 txt += (f"\n⚠ 入力した仮モーターの番号 {self._motor_id} と、機械の今の 2020（{mach}）が違います。"
                         "付いているモーターを確かめてください。")
@@ -3678,6 +3699,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
             raw = (Path(folder) / "パラメータ.DAT").read_bytes().decode("cp932", errors="replace")
             self._types = focas_ops._backup_values(folder)[1]
             kw = {"keep_motor": True} if self._keep_motor else {}
+            self._axis_by_motor = self._axis_from_motor_id(raw)
+            if self._axis_by_motor is not None:
+                kw["axis"] = self._axis_by_motor
             plan = self.plan_fn(raw, zero_scope="all" if self._zero_all else "product", **kw)
             wplan = focas_ops.plan_writes(raw, plan, self._types, verified=self._verified())
             focas_ops.save_plan_file(folder, plan["newtext"])
@@ -3797,6 +3821,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if self._rewrite_blocked:
             reasons.append("この控えでは、もう書きました。もう一度書くなら、控えを取り直してください")
         reasons += self._wplan["blockers"]
+        mm = self._unit_mismatch()
+        if mm:
+            reasons.append(mm)
         if not self._wplan["items"]:
             reasons.append("書くものがありません（機械はすでに同じ値です）")
         info = self._backup[1] if self._backup else None
@@ -3808,6 +3835,16 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 backup_info=info, cnc_id=(self._ident or {}).get("cnc_id"))
             reasons += w["reasons"]
         return not reasons, reasons
+
+    def _unit_mismatch(self):
+        """かんたん作成で選んだ号機と、つないだ機械の号機（台帳・人が選んだもの）が違うときの文。違わなければ ''。"""
+        if not self._expect_unit:
+            return ""
+        have = str(self.cmb_unit.currentData() or "").strip()
+        if have and have != self._expect_unit:
+            return (f"号機が違います: かんたん作成では {self._expect_unit}号機を選びましたが、"
+                    f"つないだ機械は {have}号機です。つなぎ先か、選んだ号機を確かめてください")
+        return ""
 
     def _gate_only(self):
         """型の確認以外の条件（同じ値を書く確認の条件）。"""
@@ -5857,9 +5894,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if not self._basic_ok(master):
             return
 
-        def plan_fn(foc_raw, zero_scope="product", keep_motor=False):
+        def plan_fn(foc_raw, zero_scope="product", keep_motor=False, axis=None):
             # 土台は機械の控え（BASIC ではない）。reference="" と 0にする範囲は plan_prepare が決める
             av = drop_param_numbers(axis_values, [MOTOR_ID_PARAM]) if keep_motor else axis_values
+            if axis is not None and len(av) == 1:          # 機械の 2020 から決めた軸に付け替える（1軸のときだけ）
+                av = {int(axis): next(iter(av.values()))}
             return self._plan(foc_raw, axis_values=av, seiban=seiban, master_path="",
                               focas_base=True, zero_scope=zero_scope)
 
@@ -5873,7 +5912,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         shown = "＋".join(nc_param.axis_name(ax) for ax in sorted(axis_values))
         FocasWriteDialog(
             self, self.settings, plan_fn, seiban=seiban, basic_text=raw,
-            product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"),
+            product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"), expect_unit=str(ctl.unit), auto_backup=True,
             motor_id=(self.e_motor_id.text().strip() if motor == "temp" else ""),
             subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
                      f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
@@ -6957,9 +6996,11 @@ class ParamDialog(QtWidgets.QDialog):
             inputs = dict(values=values, axis=axis)
             what = f"{nc_param.axis_name(axis)} 軸"
 
-        def plan_fn(foc_raw, zero_scope="product", keep_motor=False):
+        def plan_fn(foc_raw, zero_scope="product", keep_motor=False, axis=None):
             # 土台は機械の控え（BASIC ではない）。reference="" と 0にする範囲は plan_prepare が決める
             kw = dict(inputs)
+            if axis is not None and "values" in kw:
+                kw["axis"] = int(axis)
             if keep_motor:
                 for name in ("values", "axis_values", "common"):
                     if kw.get(name):

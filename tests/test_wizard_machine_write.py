@@ -109,6 +109,8 @@ class TestWizardMachineWrite(WizardBase):
         self.assertEqual(w.warnings, [])
         self.assertEqual(len(self.opened), 1)
         self.assertFalse(self.opened[0][1]["keep_motor"])
+        self.assertEqual(self.opened[0][1]["expect_unit"], "23")      # 選んだ号機を窓へ渡す
+        self.assertTrue(self.opened[0][1]["auto_backup"])             # つないだら控えを自動で取る
         (args, kw) = self.opened[0]
         self.assertTrue(kw["auto"])                              # 自動接続・台帳を使う
         self.assertEqual(kw["seiban"], "50014984")

@@ -73,10 +73,11 @@ class WriteDialogBase(unittest.TestCase):
         from nd287_app import param_build as P
         values = values or self.VALUES
 
-        def plan_fn(raw, zero_scope="product", keep_motor=False):
+        def plan_fn(raw, zero_scope="product", keep_motor=False, axis=None):
             self.plan_calls.append((raw, zero_scope))
             self.keep_motor_calls = getattr(self, "keep_motor_calls", []) + [keep_motor]
-            return P.prepare(raw, values, axis=4, reference="", zero_params=zero_params,
+            self.axis_calls = getattr(self, "axis_calls", []) + [axis]
+            return P.prepare(raw, values, axis=axis or 4, reference="", zero_params=zero_params,
                              zero_scope=zero_scope)
         return plan_fn
 
@@ -496,6 +497,43 @@ class TestMotorIdCheck(WriteDialogBase):
         d._show_motor_note()
         self.assertIn("99999", d.lbl_motor.text())
         self.assertIn("違います", d.lbl_motor.text())
+
+
+class TestExpectUnitAndAutoBackup(WriteDialogBase):
+    VALUES = {"20": "4"}
+
+    def test_auto_backup_after_connect(self):
+        d = self.dialog(auto_backup=True)
+        d.b_connect.click()
+        self.wait(d)
+        self.wait(d)
+        self.assertIsNotNone(d._backup)               # 押さなくても控えを取った
+
+    def test_no_auto_backup_by_default(self):
+        d = self.dialog()
+        d.b_connect.click()
+        self.wait(d)
+        self.assertIsNone(d._backup)
+
+    def test_unit_mismatch_blocks_writing(self):
+        d = self.dialog(expect_unit="27")
+        self.go(d)
+        d.cmb_unit.addItem("号機23", "23")
+        d.cmb_unit.setCurrentIndex(d.cmb_unit.findData("23"))
+        ok, reasons = d._writable()
+        self.assertFalse(ok)
+        self.assertTrue(any("号機が違います" in r for r in reasons), reasons)
+        d.cmb_unit.setCurrentIndex(d.cmb_unit.findData("23"))
+        d._expect_unit = "23"
+        self.assertEqual(d._unit_mismatch(), "")
+
+    def test_axis_is_decided_from_motor_id_on_machine(self):
+        d = self.dialog(keep_motor=True, motor_id="299", product_axes=(4,))
+        self.go(d, backup=False)
+        raw = "N02020Q1A1P1A2P2A3P3A4P7A5P299\n"
+        self.assertEqual(d._axis_from_motor_id(raw), 5)
+        self.assertIsNone(d._axis_from_motor_id("N02020Q1A1P299A2P299\n"))   # 2軸一致なら決めない
+        self.assertIsNone(d._axis_from_motor_id("N02020Q1A1P1\n"))           # 一致なし
 
 
 class TestZeroScope(WriteDialogBase):

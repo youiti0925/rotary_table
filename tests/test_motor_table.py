@@ -5,6 +5,8 @@ from pathlib import Path
 
 from nd287_app import seiban_flow
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 class TestMotorTable(unittest.TestCase):
     def test_load_and_lookup(self):
@@ -75,3 +77,24 @@ class TestDDriveMotor(unittest.TestCase):
         ctls = controllers.load_controllers("マスタ/制御装置マスタ.csv")
         got = sorted(str(c.unit) for c, _a in sf.only_ib_generation([(c, []) for c in ctls]))
         self.assertEqual(got, ["20", "21", "22", "23", "31", "82", "84"])
+
+
+class TestAlphaDFromManual(unittest.TestCase):
+    """αi-D のアンプ容量は、サーボ説明書 B-65270JA の標準 2165 に合わせる（番手の表と食い違う型式が多かった）。"""
+
+    def test_standard_capacity_follows_the_manual_for_d_motors(self):
+        from nd287_app import seiban_flow as sf
+        self.assertEqual(sf.standard_capacity("αiS8/4000-D"), "80A")      # 2165=85（以前は番手の表で40A）
+        self.assertEqual(sf.standard_capacity("αiF12/4000-D"), "80A")
+        self.assertEqual(sf.standard_capacity("αiF4/5000-D"), "40A")      # 2165=45（以前は20A）
+        self.assertEqual(sf.standard_capacity("αiS2/5000HV-D"), "10A")
+        self.assertEqual(sf.standard_capacity("αiS8/4000"), "40A")        # -D でないものは今までどおり
+
+    def test_motor_table_is_overlaid_and_old_numbers_are_kept(self):
+        from nd287_app import seiban_flow as sf
+        t = sf.load_motor_table(str(ROOT / "マスタ" / "モーター番号表.csv"))
+        self.assertEqual(t["784"]["cap"], "80A")
+        self.assertEqual(t["784"]["cap_src"], "B-65270JA")
+        self.assertEqual(t["18"]["model"], "α12/2000")                   # 古いモーターと番号が重なる所は番号表を優先
+        self.assertNotIn("cap_src", t["18"])
+        self.assertIn("785", t)                                          # 番号表に無い番号は説明書から足す

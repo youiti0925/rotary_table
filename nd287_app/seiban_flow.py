@@ -187,7 +187,41 @@ def load_motor_table(path) -> dict:
             "model": (row.get("モーター型式") or "").strip(),
             "cap": _norm_cap_text((row.get("容量") or "").strip()) if (row.get("容量") or "").strip() else "",
             "alias": (row.get("別名") or "").strip()}
+    _overlay_alpha_id(out, Path(path).with_name(ALPHA_ID_CSV))
     return out
+
+
+ALPHA_ID_CSV = "αiD_モーターID_2165.csv"            # サーボ説明書 B-65270JA（p.12〜58）のモーターごとの標準 2165
+_AMP_BY_2165 = {"10": "10A", "25": "20A", "45": "40A", "85": "80A", "165": "160A"}   # 設定 amp_current_map の逆（10 はデータ）
+
+
+def _model_key(m):
+    return re.sub(r"[\s\-_]", "", str(m or "")).upper().replace("Α", "A")
+
+
+def _overlay_alpha_id(table, path):
+    """αi-D のモーターの容量を、サーボ説明書の標準 2165 で直す（番号表の容量が説明書と食い違う -D が74型式あった）。
+    ・同じ番号で型式が一致する行: 容量を説明書の 2165 から決める（"cap_src" に出どころを入れる）。
+    ・番号表に無い番号: 説明書の行を足す。番号が重なる（古いモーターと同じ番号）行は、番号表の型式を優先して触らない。
+    2165 が 10・25・45・85・165 以外（例 4・365）の行は容量にしない。"""
+    try:
+        if not Path(path).exists():
+            return
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return
+    for r in rows:
+        no = (r.get("モーターID(2020)") or "").strip().lstrip("0")
+        cap = _AMP_BY_2165.get((r.get("2165") or "").strip(), "")
+        if not no:
+            continue
+        cur = table.get(no)
+        if cur is None:
+            table[no] = {"model": (r.get("型式") or "").strip(), "cap": cap, "alias": "", "cap_src": "B-65270JA"}
+        elif _model_key(cur.get("model")) == _model_key(r.get("型式")) and cap:
+            cur["cap"] = cap
+            cur["cap_src"] = "B-65270JA"
 
 
 def motor_info(table: dict, motor_id) -> dict:
@@ -298,6 +332,45 @@ _STD_BANDS_200 = [(4, "20A"), (12, "40A"), (30, "80A"), (50, "160A")]
 _STD_BANDS_400 = [(4, "10A"), (12, "20A"), (30, "40A"), (50, "80A")]
 
 
+_ALPHA_D_CAPS = None
+
+
+def alpha_d_capacity(motor_model: str, csv_path=None):
+    """末尾 -D のモーター型式 → サーボ説明書（B-65270JA）の標準 2165 から出したアンプ容量。
+    「(40A)」などアンプ区分の付いた行は除き、標準の行の 2165 が1つに決まらないとき・載っていないときは None（呼び出し側が従来の番手の表を使う）。"""
+    global _ALPHA_D_CAPS
+    if csv_path is not None or _ALPHA_D_CAPS is None:
+        caps = {}
+        try:
+            path = Path(csv_path) if csv_path else _default_alpha_d_csv()
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                for r in csv.DictReader(f):
+                    if (r.get("アンプ区分") or "").strip():     # 「(40A)」などの付いた行は、別のアンプ用の番号。標準の行だけ使う
+                        continue
+                    k = _model_key(r.get("型式"))
+                    c = _AMP_BY_2165.get((r.get("2165") or "").strip(), "")
+                    caps.setdefault(k, set()).add(c)
+        except Exception:
+            caps = {}
+        if csv_path is not None:
+            return _alpha_d_lookup(caps, motor_model)
+        _ALPHA_D_CAPS = caps
+    return _alpha_d_lookup(_ALPHA_D_CAPS, motor_model)
+
+
+def _alpha_d_lookup(caps, motor_model):
+    got = caps.get(_model_key(motor_model))
+    if got and len(got) == 1 and "" not in got:
+        return next(iter(got))
+    return None
+
+
+def _default_alpha_d_csv():
+    from . import settings as _st
+    p = _st.app_dir() / "マスタ" / ALPHA_ID_CSV
+    return p if p.exists() else Path(__file__).resolve().parent.parent / "マスタ" / ALPHA_ID_CSV
+
+
 def standard_capacity(motor_model: str) -> str:
     """αiS/αiF モーター型式の「番手」から標準組合せのアンプ容量を返す。
 
@@ -311,6 +384,10 @@ def standard_capacity(motor_model: str) -> str:
     s = str(motor_model or "")
     if is_dd_motor(s):                              # DiS等は番手→容量が当てはまらない
         return ""
+    if is_d_motor(s):                               # -D は説明書の標準 2165 が先（番手の表と食い違う型式が多い）
+        cap_d = alpha_d_capacity(s)
+        if cap_d:
+            return cap_d
     # αiS/αiF の「i + S/F + 番手 + /」形だけを対象（誤ヒット防止のため '/' 必須）
     m = re.search(r"[iIＩ]\s*[SsFf]\s*(\d+)\s*/", s) \
         or re.search(r"[αＡ]\s*[iI]?\s*[SsFf]\s*(\d+)\s*/", s)       # 大文字の αIF8/3000 も読む（実データ183件）

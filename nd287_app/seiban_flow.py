@@ -220,6 +220,19 @@ def is_d_motor(motor_model: str) -> bool:
     return bool(re.search(r"-\s*D$", s, re.I)) and not is_dd_motor(s)
 
 
+def is_b_motor(motor_model: str) -> bool:
+    """型式の末尾が -B（αi-B世代のモーター。HV-B 含む）なら True。-Dは別（is_d_motor）。
+    番号表では -B は無印と同じ番号の別名だが、型式に -B と**明示**されたときだけ判定する。"""
+    return bool(re.search(r"-\s*B$", str(motor_model or "").strip(), re.I))
+
+
+def only_ib_generation(cands: list) -> list:
+    """CNCユニットが 30i/31i/32i/35i の B 系（35i-MB・31i-B など）の号機だけに絞る。
+    31i-MA（A系）や 0i-MD・18i は入らない。2026-11-24 利用者「-Bは新しい制御装置」。"""
+    pat = re.compile(r"^\s*(30|31|32|35)i-?M?B\b", re.I)
+    return [ca for ca in cands if pat.search(str(getattr(ca[0], "cnc", "") or ""))]
+
+
 def only_d_drive(cands: list) -> list:
     """制御装置マスタの「-D駆動」が ○ の号機だけに絞る（cands は [(controller, 軸...)]）。"""
     return [ca for ca in cands if str(getattr(ca[0], "d_drive", "") or "").strip() in ("○", "〇", "◯", "O", "o")]

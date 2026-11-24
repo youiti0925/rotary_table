@@ -7416,6 +7416,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._need_d_drive = any(seiban_flow.is_d_motor(m) for m in d_models)
         if self._need_d_drive:
             self._cand = seiban_flow.only_d_drive(self._cand)
+        self._need_ib = (not self._need_d_drive) and any(seiban_flow.is_b_motor(m) for m in d_models)
+        if self._need_ib:
+            self._cand = seiban_flow.only_ib_generation(self._cand)
         if temp and self._decided_axis:
             # 機械から決めた軸（2165 など）が書く先。仮モーターの容量で軸を選び直さない
             un = str((self._machine_probe or {}).get("unit") or "")
@@ -7457,6 +7460,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
         if self._need_d_drive:
             self.lbl_need.setText(self.lbl_need.text() + "　末尾が -D のモーターなので、-D駆動が○の号機だけを出しています。")
+        if self._need_ib:
+            self.lbl_need.setText(self.lbl_need.text() + "　末尾が -B のモーターなので、35i-MB など i-B 世代の号機だけを出しています。")
         if not self._cand:
             self.cmb_ctrl.addItem(f"（容量 {capstr}{vtxt} を満たす制御装置がありません）", -1)
         else:

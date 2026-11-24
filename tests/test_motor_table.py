@@ -65,3 +65,13 @@ class TestDDriveMotor(unittest.TestCase):
             self.skipTest("loader name differs")
         got = sorted(str(c.unit) for c, _a in sf.only_d_drive([(c, []) for c in ctls]))
         self.assertEqual(got, ["31", "82", "84"])
+
+    def test_b_motor_and_generation(self):
+        from nd287_app import seiban_flow as sf, controllers
+        for m in ("αiS2/5000-B", "αiS2/5000HV-B", "βiS8/3000-B"):
+            self.assertTrue(sf.is_b_motor(m), m)
+        for m in ("αiS2/5000", "αiF2/5000-D", ""):
+            self.assertFalse(sf.is_b_motor(m), m)
+        ctls = controllers.load_controllers("マスタ/制御装置マスタ.csv")
+        got = sorted(str(c.unit) for c, _a in sf.only_ib_generation([(c, []) for c in ctls]))
+        self.assertEqual(got, ["31", "82", "84"])

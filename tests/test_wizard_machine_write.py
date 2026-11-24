@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import unittest.mock as mock
 from pathlib import Path
+from nd287_app import seiban_flow
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -262,11 +263,16 @@ class TestWizardMachineWrite(WizardBase):
         cap = w._product_capacity()
         self.assertTrue(cap)
         items = [w.cmb_motor_suggest.itemData(i) for i in range(1, w.cmb_motor_suggest.count())]
+        items = [x for x in items if x]                   # 見出しの行は除く
         self.assertTrue(items)
-        for no in items:                                  # 製品の容量と同じ容量だけ
-            self.assertEqual(w._motor_table[no]["cap"], cap)
-        w.cmb_motor_suggest.setCurrentIndex(1)
-        w._pick_suggested_motor(1)
+        pv = {f["meta"].get("voltage") for f in w._selected_files()}.pop()
+        for no in items:                                  # 同じ電圧は同じ容量、別の電圧は読み替えた容量だけ
+            i = w._motor_table[no]
+            v = seiban_flow.motor_voltage(i["model"])
+            self.assertEqual(i["cap"], cap if v == pv else seiban_flow.equivalent_cap(cap, pv, v))
+        idx = [k for k in range(w.cmb_motor_suggest.count()) if w.cmb_motor_suggest.itemData(k) == items[0]][0]
+        w.cmb_motor_suggest.setCurrentIndex(idx)
+        w._pick_suggested_motor(idx)
         self.assertEqual(w.e_motor_id.text(), items[0])
         self.assertTrue(w.cmb_motor_suggest.isHidden())   # 番号が入ったら候補は隠す
 

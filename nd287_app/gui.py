@@ -6737,21 +6737,43 @@ class ParamWizardDialog(QtWidgets.QDialog):
         cap = self._product_capacity()
         temp = self.cmb_motor.currentData() == "temp"
         if temp and not self.e_motor_id.text().strip() and self._motor_table:
-            if cap:
-                rows = sorted(((no, i) for no, i in self._motor_table.items() if i.get("cap") == cap),
-                              key=lambda x: (x[1].get("model", ""), x[0]))
-                head = f"（この製品と同じ容量 {cap} のモーター: {len(rows)}種類。ここから選べます）"
-            else:
-                rows = sorted(self._motor_table.items(),
-                              key=lambda x: (x[1].get("cap", ""), x[1].get("model", ""), x[0]))
-                head = f"（この製品の容量が分からないので、全部のモーター {len(rows)}種類。ここから選べます）"
-            cmb.addItem(head, "")
-            for no, i in rows:
+            def lab(no, i):
                 m = i.get("model") or ""
-                cmb.addItem(f"{no}　{m or '（型式の登録なし）'}"
-                            + (f"（{seiban_flow.motor_voltage(m)}"
-                               + (f"・{i['cap']}" if i.get("cap") else "") + "）" if m else ""), no)
-            show = bool(rows)
+                return (f"{no}　{m or '（型式の登録なし）'}"
+                        + (f"（{seiban_flow.motor_voltage(m)}"
+                           + (f"・{i['cap']}" if i.get("cap") else "") + "）" if m else ""))
+            sel = self._selected_files()
+            volts = {f["meta"].get("voltage") for f in sel if f["meta"].get("voltage")}
+            pv = volts.pop() if len(volts) == 1 else ""
+            items = self._motor_table.items()
+            groups = []       # (見出し, [(番号, 情報)])
+            if cap and pv:
+                other = "200V" if pv == "400V" else "400V"
+                ocap = seiban_flow.equivalent_cap(cap, pv, other)
+                def pick(v, c):
+                    return sorted(((no, i) for no, i in items if i.get("cap") == c
+                                   and seiban_flow.motor_voltage(i.get("model") or "") == v),
+                                  key=lambda x: (x[1].get("model", ""), x[0]))
+                groups.append((f"{pv}のまま（{cap}）", pick(pv, cap)))
+                if ocap:
+                    groups.append((f"{other}にするなら（{ocap}）", pick(other, ocap)))
+                head = "（製品と同じ容量のモーター。ここから選べます）"
+            elif cap:
+                groups.append(("同じ容量", sorted(((no, i) for no, i in items if i.get("cap") == cap),
+                                                key=lambda x: (x[1].get("model", ""), x[0]))))
+                head = f"（この製品と同じ容量 {cap} のモーター。ここから選べます）"
+            else:
+                groups.append(("全部", sorted(items, key=lambda x: (x[1].get("cap", ""), x[1].get("model", ""), x[0]))))
+                head = "（この製品の容量が分からないので、全部のモーター。ここから選べます）"
+            cmb.addItem(head, "")
+            n = 0
+            for title, rows in groups:
+                if len(groups) > 1:
+                    cmb.addItem(f"── {title}: {len(rows)}種類 ──", "")
+                for no, i in rows:
+                    cmb.addItem(lab(no, i), no)
+                    n += 1
+            show = n > 0
         else:
             show = False
         cmb.blockSignals(False)

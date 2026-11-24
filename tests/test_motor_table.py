@@ -28,3 +28,12 @@ class TestMotorVoltage(unittest.TestCase):
         from nd287_app import seiban_flow
         self.assertEqual(seiban_flow.motor_voltage("αiF22/3000HV"), "400V")
         self.assertEqual(seiban_flow.motor_voltage("αiF12/4000"), "200V")
+
+
+class TestEquivalentCap(unittest.TestCase):
+    def test_400v_to_200v_doubles(self):
+        from nd287_app import seiban_flow as sf
+        self.assertEqual(sf.equivalent_cap("40A", "400V", "200V"), "80A")
+        self.assertEqual(sf.equivalent_cap("80A", "200V", "400V"), "40A")
+        self.assertEqual(sf.equivalent_cap("40A", "400V", "400V"), "40A")
+        self.assertEqual(sf.equivalent_cap("", "400V", "200V"), "")

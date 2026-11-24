@@ -414,6 +414,16 @@ def capable_controllers(controllers, needs: list, voltage: str = "") -> list:
     return out
 
 
-def motor_voltage(model: str) -> str:
-    """モーター型式から電圧クラスを言う。型式に HV が付けば 400V、それ以外は 200V（番号表に電圧の列が無いため）。"""
-    return "400V" if "HV" in str(model or "").upper() else "200V"
+
+def equivalent_cap(cap: str, from_v: str, to_v: str) -> str:
+    """電力が同じ400V⇔200Vのアンプ容量の読み替え（400Vの電流は約半分: 40A(400V)＝80A(200V)）。変えられなければ ''。"""
+    import re
+    m = re.fullmatch(r"\s*(\d+)\s*A\s*", str(cap or ""), re.I)
+    if not m or from_v == to_v:
+        return str(cap or "") if from_v == to_v else ""
+    n = int(m.group(1))
+    if from_v == "400V" and to_v == "200V":
+        return f"{n * 2}A"
+    if from_v == "200V" and to_v == "400V":
+        return f"{n // 2}A" if n % 2 == 0 else ""
+    return ""

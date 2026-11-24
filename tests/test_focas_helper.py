@@ -23,8 +23,7 @@ from fake_fwlib import FakeFwlib, FakeMachine    # noqa: E402
 
 # 書く関数で一覧に入れてよいのは cnc_wrparam（パラメータ1件）だけ。
 # 削除・プログラム書込・運転開始・PMC・マクロ書込・サーチ系は、一覧に入れない
-FORBIDDEN = ("cnc_start", "cnc_search", "cnc_wrmacro", "cnc_dwnstart4",
-             "cnc_download4", "cnc_dwnend4", "cnc_pdf_del", "cnc_delete", "cnc_wrpmcrng",
+FORBIDDEN = ("cnc_start", "cnc_search", "cnc_wrmacro", "cnc_delete", "cnc_wrpmcrng",
              "pmc_wrpmcrng", "pmc_wrpmcrng2", "cnc_wrtofs", "cnc_pdf_rename",
              "cnc_setpath", "cnc_cyclestart", "cnc_reset", "cnc_wrpitchdata")
 
@@ -73,11 +72,13 @@ class TestApi(unittest.TestCase):
             "cnc_statinfo", "cnc_rdalmmsg", "cnc_rdproginfo", "cnc_rdpdf_subdir",
             "cnc_rdpdf_alldir", "cnc_upstart4", "cnc_upload4", "cnc_upend4", "cnc_rdparainfo",
             "cnc_rdparam"}
-        # 許可一覧に足してよい書込系は cnc_wrparam だけ（増やすなら、この試験を直す前に利用者へ聞く）
-        self.assertEqual(set(H.ALLOWED_FUNCS) - read_funcs, {"cnc_wrparam"})
+        # 許可一覧に足してよい書込系は cnc_wrparam と、測定プログラム書込（2026-11-22 実機確認済みの手順）だけ
+        # （増やすなら、この試験を直す前に利用者へ聞く）
+        self.assertEqual(set(H.ALLOWED_FUNCS) - read_funcs,
+                         {"cnc_wrparam", "cnc_dwnstart4", "cnc_download4", "cnc_dwnend4", "cnc_pdf_del"})
         for bad in FORBIDDEN:
             self.assertNotIn(bad, H.ALLOWED_FUNCS)
-        for bad in ("cnc_wrparam2", "cnc_wrpmcrng", "cnc_pdf_del", "cnc_download4",
+        for bad in ("cnc_wrparam2", "cnc_wrpmcrng",
                     "cnc_wrmacro", "cnc_start", "pmc_wrpmcrng"):
             self.assertNotIn(bad, H.ALLOWED_FUNCS)
         self.assertEqual(sorted(H.ALLOWED_FUNCS), sorted(set(H.ALLOWED_FUNCS)))
@@ -94,8 +95,7 @@ class TestApi(unittest.TestCase):
     def test_unlisted_function_cannot_be_fetched(self):
         lib = FakeFwlib()
         api = H.Api(lib)
-        for name in ("cnc_start", "pmc_wrpmcrng", "cnc_search", "cnc_wrmacro", "cnc_pdf_del",
-                     "cnc_dwnstart4"):
+        for name in ("cnc_start", "pmc_wrpmcrng", "cnc_search", "cnc_wrmacro"):
             with self.assertRaises(AttributeError):
                 getattr(api, name)
         self.assertEqual(lib.called("cnc_start"), 0)
@@ -108,7 +108,7 @@ class TestApi(unittest.TestCase):
                           ("param_read", {"no": 20}), ("param_dump", {"kind": "param"}),
                           ("prog_read", {"path": "//CNC_MEM/USER/PATH1/O901"})):
             run(cmd, **args)
-        for bad in FORBIDDEN + ("cnc_wrparam",):
+        for bad in FORBIDDEN + ("cnc_wrparam", "cnc_dwnstart4", "cnc_download4", "cnc_dwnend4", "cnc_pdf_del"):
             self.assertEqual(lib.called(bad), 0, bad)            # 読む命令は、書く関数を呼ばない
 
     def test_missing_function_in_dll_is_not_fatal_until_used(self):
@@ -518,8 +518,8 @@ class TestRobustness(unittest.TestCase):
         for msg in ({}, {"cmd": 5}, {"cmd": "なにか"}, {"cmd": "status", "args": [1]}, [1, 2]):
             r = hp.handle(msg, lambda x: None)
             self.assertFalse(r["ok"], msg)
-        # 書く命令は param_write だけ。プログラム書込・削除・運転開始の命令名は存在しない
-        for cmd in ("prog_write", "prog_delete", "start", "cycle_start", "macro_write",
+        # 書く命令は param_write と prog_write だけ。削除・運転開始の命令名は存在しない
+        for cmd in ("prog_delete", "start", "cycle_start", "macro_write",
                     "pmc_write", "param_write_file"):
             r = hp.handle({"id": 1, "cmd": cmd}, lambda x: None)
             self.assertEqual(r["error"]["kind"], "bad_args", cmd)

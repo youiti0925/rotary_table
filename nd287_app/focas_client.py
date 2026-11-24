@@ -42,6 +42,7 @@ DEFAULT_TIMEOUTS = {
     "param_dump": 180,      # 控え（パラメータ全部）
     "prog_read": 75,        # ヘルパー側の上限（既定 60 秒）より長く待つ。短いとヘルパーの終わりを待たずに止めてしまう
     "prog_list": 60,
+    "prog_write": 90,       # ヘルパー側の上限（PROG_WRITE_LIMIT 60 秒）より長く待つ
     "param_info": 60,
     "param_read_many": 30,
     "param_write": 8,       # ヘルパー側の上限（PARAM_WRITE_LIMIT 5 秒）より長く待つ。短いとヘルパーの返事を待たずに止めてしまう

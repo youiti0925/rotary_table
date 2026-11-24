@@ -8,7 +8,9 @@
 PW0000 は見つけて「電源を入れ直してください」と言うところまで。電源待ちと自動再接続は作っていない（段6）。
 """
 
+import base64
 import csv
+import hashlib
 import json
 import re
 import time
@@ -1163,3 +1165,185 @@ def describe_result(res, *, undo=False):
     # 現場ではパラメータ書込は ON のままがふつうで、毎回出ると邪魔）。
     # 書けないとき（SW0100 が無い＝PWE が OFF）は writable_state が理由として出す。
     return lines
+
+
+# ---------------------------------------------------------------------------
+# 測定プログラムを機械へ直接書く（FOCAS。2026-11-24）
+# ---------------------------------------------------------------------------
+# 手順（2026-11-22 実機で確認した書込・削除。docs/FOCAS_実機確認と要件_20261122.md §3）:
+#   控えを取る（機械のプログラム一覧ごと）→ 点検（状態・同じ番号・容量）→ 人が承認 → 書く → 読み戻して照合。
+# 同じ番号が機械にあれば止まる。上書きは人が承認した（overwrite=True）ときだけ。
+# 書く中身は fanuc.nc_bytes() の出力（LF CR CR 区切りなど）のまま。1バイトも変えない。
+# 実機で通したのは LF 区切りの形だけ。LF CR CR のまま FOCAS で書いて入るかは未確認。
+
+DEFAULT_PROG_FOLDER = "//CNC_MEM/USER/PATH1/"
+
+
+class ProgramSplitError(ValueError):
+    pass
+
+
+def split_programs(nc, eob):
+    """nc_bytes の出力（先頭・末尾が %）を O 番号ごとに分ける。戻り値 [{number, wire, expect}]。
+
+    wire は機械へ渡す形（実機で通した形: 先頭が区切り・各ブロックは区切りで終わる・末尾が %）。
+    expect は読み戻しで返るはずの形（実機で「% ＋ 送ったもの」が 1 バイト一致した）。
+    各ブロックの中身は 1 バイトも変えない（分けるだけ）。
+    """
+    eob = eob.encode("ascii") if isinstance(eob, str) else bytes(eob)
+    nc = bytes(nc)
+    if not eob or not nc.startswith(b"%") or not nc.endswith(b"%" + eob):
+        raise ProgramSplitError("先頭と末尾が % のプログラムではありません")
+    body = nc[1:-len(eob) - 1]                       # 先頭の % と、末尾の「% ＋ 区切り」を除く
+    blocks = body.split(eob)
+    if blocks and blocks[0] == b"":
+        blocks = blocks[1:]
+    if blocks and blocks[-1] == b"":
+        blocks = blocks[:-1]
+    progs, cur = [], None
+    for b in blocks:
+        m = re.match(rb"O(\d{1,8})(?!\d)", b)
+        if m:
+            cur = {"number": int(m.group(1)), "blocks": []}
+            progs.append(cur)
+        if cur is None:
+            raise ProgramSplitError("O番号（プログラム番号）より前に行があります")
+        cur["blocks"].append(b)
+    if not progs:
+        raise ProgramSplitError("O番号（プログラム番号）の行がありません")
+    seen = set()
+    out = []
+    for p in progs:
+        if p["number"] in seen:
+            raise ProgramSplitError(f"O{p['number']} が2回出てきます")
+        seen.add(p["number"])
+        wire = eob + b"".join(b + eob for b in p["blocks"]) + b"%"
+        out.append({"number": p["number"], "wire": wire, "expect": b"%" + wire})
+    return out
+
+
+def _find_existing(client, folder, number):
+    tree = client.call("prog_list", {"path": folder})
+    if tree.get("ok") is False or tree.get("rc_all") != H.ALLDIR_END_RC:
+        raise WriteRefused(["機械のプログラム一覧を最後まで読めませんでした。同じ番号があるか確かめられないので書きません"])
+    for p in tree.get("programs", []):
+        m = re.fullmatch(r"[Oo]0*(\d+)", p["name"])
+        if m and int(m.group(1)) == number:
+            return p
+    return None
+
+
+def check_program_send(client, nc, eob, *, folder=DEFAULT_PROG_FOLDER, cnc_id=None, backup_info=None,
+                       allowed=DEFAULT_ALLOWED_ALARMS):
+    """書く前の点検（読むだけ）。戻り値 dict:
+      programs: [{number, name, size, exists, existing}]  機械に同じ番号があるか
+      reasons:  書けない理由（状態・控え・容量・機械の取り違え）。空なら書ける
+      overwrite_needed: 同じ番号があって、上書きの承認が要る
+    同じ番号があること自体は「書けない理由」にはしない（人が上書きを承認すれば書ける）。"""
+    progs = split_programs(nc, eob)
+    ident = client.call("identify")
+    st = client.call("status")
+    al = client.call("alarms")["alarms"]
+    reasons = []
+    if not cnc_id or not ident.get("cnc_id"):
+        reasons.append("機械ごとの番号（CNC ID）が読めていません。どの機械か確かめられないので、この機械には書きません")
+    elif ident.get("cnc_id") != cnc_id:
+        reasons.append("つながっている機械が控えを取ったときと違います（機械ごとの番号（CNC ID）が違います）")
+    if not ident.get("supported"):
+        reasons.append("この機種はまだ対応していません")
+    w = writable_state(st, al, allowed_alarms=allowed, backup_info=backup_info,
+                       cnc_id=ident.get("cnc_id"), for_params=False)
+    reasons += [r for r in w["reasons"] if r not in reasons]
+    info = client.call("prog_info")
+    rows = []
+    for p in progs:
+        ex = _find_existing(client, folder, p["number"])
+        rows.append({"number": p["number"], "name": f"O{p['number']}", "size": len(p["wire"]),
+                     "exists": ex is not None, "existing": ex})
+    new_count = sum(1 for r in rows if not r["exists"])
+    if new_count > info.get("remaining", 0):
+        reasons.append(f"登録できる残り本数が足りません（残り {info.get('remaining')} 本・新しく入れるのは {new_count} 本）。"
+                       "空きメモリがあっても、本数の枠が 0 だと 1 本も入りません")
+    need = sum(r["size"] for r in rows if not r["exists"])
+    if need > info.get("unused", 0):
+        reasons.append(f"空きメモリが足りません（空き {info.get('unused')}・必要 {need}）")
+    return {"programs": rows, "reasons": reasons, "overwrite_needed": any(r["exists"] for r in rows),
+            "folder": folder, "cnc_id": ident.get("cnc_id"), "ident": ident}
+
+
+def compare_readback(sent, got):
+    """読み戻しの比べ方（設計 §8.4）。(区分, 説明)。区分: exact / padded / differs"""
+    if got == sent:
+        return "exact", "完全に一致"
+    sa, sb = sent.split(b"\n"), got.split(b"\n")
+    a = [x.rstrip(b" ") for x in sa]
+    b = [x.rstrip(b" ") for x in sb]
+    if a == b:
+        n = sum(1 for x, y in zip(sa, sb) if x != y)
+        return "padded", f"空白の詰め物を除いて一致（{n}か所）"
+    for i, (x, y) in enumerate(zip(a, b), 1):
+        if x != y:
+            return "differs", f"違います（最初の違いは {i} 行目）"
+    return "differs", f"違います（長さが違います: 送った {len(sent)}・読み戻し {len(got)}）"
+
+
+def run_program_send(client, nc, eob, *, approved, overwrite=False, folder=DEFAULT_PROG_FOLDER,
+                     cnc_id=None, backup_info=None, allowed=DEFAULT_ALLOWED_ALARMS, progress=None):
+    """人が承認したあとに書く。approved が True でなければ何も書かない（WriteRefused）。
+    書く直前にもう一度点検する。同じ番号があって overwrite でなければ書かない。
+    1本ずつ「書く → 読み戻して照合」。戻り値 {"items": [...], "ok": bool}。"""
+    if approved is not True:
+        raise WriteRefused(["人の承認がありません。書きません"])
+    chk = check_program_send(client, nc, eob, folder=folder, cnc_id=cnc_id, backup_info=backup_info,
+                             allowed=allowed)
+    if chk["reasons"]:
+        raise WriteRefused(chk["reasons"])
+    if chk["overwrite_needed"] and overwrite is not True:
+        raise WriteRefused(["機械に同じ番号があります: "
+                            + "・".join(r["name"] for r in chk["programs"] if r["exists"])
+                            + "。上書きの承認がありません。書きません"])
+    progs = split_programs(nc, eob)
+    items = []
+    for i, p in enumerate(progs):
+        if progress:
+            progress(i, len(progs), f"O{p['number']}")
+        row = chk["programs"][i]
+        it = {"number": p["number"], "name": row["name"], "existed": row["exists"], "written": False,
+              "deleted": False, "match": None, "match_text": "", "note": ""}
+        items.append(it)
+        try:
+            res = client.call("prog_write", {
+                "folder": folder, "number": p["number"], "overwrite": bool(row["exists"]),
+                "data": base64.b64encode(p["wire"]).decode("ascii"),
+                "sha256": hashlib.sha256(p["wire"]).hexdigest()})
+        except C.FocasError as e:
+            it["note"] = f"書けませんでした: {e.message}"
+            if e.kind in ("lost", "timeout", "not_connected"):
+                it["note"] += "（途中で止まりました。機械に入ったかは、つなぎ直して一覧で確かめてください）"
+            return {"items": items, "ok": False, "folder": folder}
+        if not res.get("written"):
+            it["note"] = "書きませんでした（機械に同じ番号があります）"
+            return {"items": items, "ok": False, "folder": folder}
+        it["written"], it["deleted"] = True, bool(res.get("deleted"))
+        try:
+            back = C.FocasClient.decode_data(client.call("prog_read", {"path": res["path"]}))
+        except C.FocasError as e:
+            it["match_text"] = f"読み戻せませんでした: {e.message}"
+            continue
+        kind, text = compare_readback(p["expect"], back)
+        it["match"], it["match_text"] = kind != "differs", text
+    if progress:
+        progress(len(progs), len(progs), "終わりました")
+    ok = len(items) == len(progs) and all(x["written"] and x["match"] for x in items)
+    return {"items": items, "ok": ok, "folder": folder}
+
+
+def describe_program_send(res):
+    out = []
+    for it in res["items"]:
+        if it["written"]:
+            head = f"{it['name']}: 書きました" + ("（同じ番号を消して入れ替えました）" if it.get("deleted") else "")
+            out.append(head + "・読み戻し: " + (it["match_text"] or "（未確認）"))
+        else:
+            out.append(f"{it['name']}: {it['note']}")
+    return out

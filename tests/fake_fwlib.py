@@ -20,6 +20,7 @@
   rdparainfo_fail_at  N 回目の cnc_rdparainfo から戻り値 {rdparainfo_fail_rc}（既定 5）
   pwe_required / write_ignore / write_store / write_alarms / write_side / write_rc_at
                    cnc_wrparam の振る舞い（_cnc_wrparam の説明を見る）。書いた値は丸ごと吸い出し（param_dat）にも出る
+  dwn_rc / download_rc / pdf_del_rc / download_buffer_every  プログラム書込・削除の失敗（戻り値）の模擬
   alarms / status / cnc_id / remaining / cnc_type など
 実機の動き（2026-11-22 の focas_dirs.py の記録）: cnc_rdpdf_alldir は最後のページの後に戻り値 3 で終わり、
 cnc_rdpdf_subdir は戻り値 0・件数 0 で終わる。登録本数（cnc_rdproginfo）は「プログラム＋フォルダ」の数。
@@ -186,7 +187,9 @@ class FakeFwlib:
              "cnc_upend4", "cnc_rdparainfo", "cnc_rdparam",
              "cnc_wrparam",     # 書く関数はこれだけ（ヘルパーが呼べる）
              # 本物の DLL にはあるが、ヘルパーは呼べない（呼ばれたら試験が気づく）
-             "cnc_start", "cnc_dwnstart4", "cnc_pdf_del", "cnc_wrmacro",
+             # プログラム書込・削除（prog_write だけが使う。2026-11-22 実機で確認した手順）
+             "cnc_dwnstart4", "cnc_download4", "cnc_dwnend4", "cnc_pdf_del",
+             "cnc_start", "cnc_wrmacro",
              "cnc_search", "pmc_wrpmcrng")
 
     def __init__(self, machine=None, scenario=None, calls_log=None):
@@ -203,6 +206,8 @@ class FakeFwlib:
         self.rdparam_lengths = []
         self.axisname_buf_size = None
         self.calls_log = calls_log
+        self.dwn = None                 # 書込中 [フォルダ, 受けたバイト]
+        self.dwn_n = 0
         self.host = None
         self._hang = threading.Event()
         for name in self.FUNCS:
@@ -488,4 +493,56 @@ class FakeFwlib:
         for k, al in (sc.get("write_alarms") or {}).items():
             if int(k) == no:
                 self.m.alarms += [tuple(a) for a in al]
+        return 0
+
+    # --- プログラムの書込・削除（実機で動いた形: フォルダを渡して流し込む。2026-11-22）---------------
+    # 機械の中は「%」＋送ったもの（読み戻しが 1 バイト一致した【事実】）。名前は O<数字>（先頭の 0 なし）。
+    # 同じ名前があるときの戻り値は 5（偽物の仮定。実機では未確認。アプリは先に一覧で調べて書かない）。
+
+    def _cnc_dwnstart4(self, h, code, path):
+        if "dwn_rc" in self.sc:
+            return self.sc["dwn_rc"]
+        self.dwn = [bytes(path).decode("ascii"), bytearray()]
+        return 0
+
+    def _cnc_download4(self, h, ln, buf):
+        self.dwn_n += 1
+        if "download_rc" in self.sc:
+            return self.sc["download_rc"]
+        be = int(self.sc.get("download_buffer_every", 0))
+        if be and self.dwn_n % be == 0:
+            return EW_BUFFER
+        if self.dwn is None:
+            return 5
+        n = _val(ln)
+        self.dwn[1] += buf.raw[:n]
+        return 0
+
+    def _cnc_dwnend4(self, h):
+        if self.dwn is None:
+            return 0
+        folder, data = self.dwn
+        self.dwn = None
+        m = re.search(rb"O0*(\d+)", bytes(data))
+        if not m:
+            return 5
+        path = f"{folder}O{int(m.group(1))}"
+        if path in self.m.programs:
+            return 5
+        self.m.add_program(path, b"%" + bytes(data), "")
+        self.m.registered += 1
+        self.m.remaining = max(0, self.m.remaining - 1)
+        self.m.written_programs = getattr(self.m, "written_programs", []) + [path]
+        return 0
+
+    def _cnc_pdf_del(self, h, path):
+        if "pdf_del_rc" in self.sc:
+            return self.sc["pdf_del_rc"]
+        p = bytes(path).decode("ascii")
+        if p not in self.m.programs:
+            return 5
+        del self.m.programs[p]
+        self.m.registered -= 1
+        self.m.remaining += 1
+        self.m.deleted_programs = getattr(self.m, "deleted_programs", []) + [p]
         return 0

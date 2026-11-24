@@ -105,10 +105,10 @@ class TestRule(unittest.TestCase):
         self.assertTrue(S.convert(v, gear_header="1/180")["stop"])
 
     def test_cmr_other_than_2_not_converted(self):
-        for cmr in ("4", "1", "8"):
+        for cmr in ("4", "1", "8"):   # 2 と 20 は実データで合った（許す）
             r = S.convert(dict(FULL, **{"1820": cmr}), gear_header="1/180")
             self.assertTrue(r["stop"], cmr)
-            self.assertIn(f"CMR が 2 以外のため確かめていません（値: {cmr}）", r["stop"])
+            self.assertIn(f"CMR が 2・20 以外のため確かめていません（値: {cmr}）", r["stop"])
             self.assertEqual(r["values"]["1821"], "45000")
 
     def test_allowed_cmr_is_one_place(self):
@@ -474,7 +474,7 @@ class TestWizardSemi(WizardBase):
         w = self.open()
         self.assertTrue(w.cmb_semi.isVisibleTo(w))
         self.assertFalse(w.cmb_semi.model().item(1).isEnabled())
-        self.assertIn("CMR が 2 以外のため確かめていません（値: 4）", w.lbl_semi.text())
+        self.assertIn("CMR が 2・20 以外のため確かめていません（値: 4）", w.lbl_semi.text())
         w.cmb_semi.setCurrentIndex(1)                        # 無理に選んでも作れない
         w._update_candidates()
         self.assertEqual(w.cmb_semi.currentData(), "")

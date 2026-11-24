@@ -32,11 +32,31 @@ PWE_ALARM = "SW0100"
 # 書ける状態（§7.7）
 # ---------------------------------------------------------------------------
 
+# パラメータを書くときの非常停止の扱い（2026-11-24 利用者が決定: 社内の手順は「パラメータは、非常停止で変更。変更後は電源OFF-ON」）。
+#   estop_only    … 非常停止がかかっているときだけ書ける（既定）
+#   released_only … 非常停止を解除しているときだけ書ける（以前の動き）
+#   either        … どちらでも書ける（動いていなければ）
+# 測定プログラムを送るときは、この設定に関係なく「非常停止は解除」のまま（for_params=False）。
+ESTOP_MODES = ("estop_only", "released_only", "either")
+_ESTOP_MODE = "estop_only"
+
+
+def set_estop_mode(mode):
+    """設定 param_write_estop を反映する（不明な値は既定に戻す）。"""
+    global _ESTOP_MODE
+    _ESTOP_MODE = mode if mode in ESTOP_MODES else "estop_only"
+    return _ESTOP_MODE
+
+
+def estop_mode(for_params=True):
+    return _ESTOP_MODE if for_params else "released_only"
+
+
 def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, backup_info=None,
                    cnc_id=None, for_params=True):
     """いま機械に書けるか。戻り値 {"ok", "reasons", "pwe"}。理由は全部並べる。
 
-    - 運転: run==0（リセット）かつ motion==0。非常停止なし。
+    - 運転: run==0（リセット）かつ motion==0。非常停止: パラメータは既定で「非常停止がかかっているときだけ」（estop_mode）。
     - アラーム: 無い、または許したアラーム（既定は SW0100＝PWE が ON のしるし）だけ。
     - 控え: この回に取った控えが「完全」で、いまつながっている機械（機械ごとの番号 CNC ID）と同じ。
       CNC ID が取れない機械・控えに CNC ID が無いときは書かない（どの機械か確かめられないため）。
@@ -57,7 +77,12 @@ def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, bac
                            "リセットの状態にしてください")
         if v.get("motion") != 0:
             reasons.append(f"軸が動いています（動作: {t.get('motion')}・生の値 {v.get('motion')}）")
-        if v.get("emergency") != 0:
+        mode = estop_mode(for_params)
+        if mode == "estop_only":
+            if v.get("emergency") != 1:
+                reasons.append("パラメータは非常停止にして書きます（社内の手順）。機械の非常停止ボタンを押してください"
+                               f"（いまの非常停止の値 {v.get('emergency')}）")
+        elif mode == "released_only" and v.get("emergency") != 0:
             reasons.append(f"非常停止です（生の値 {v.get('emergency')}）")
     codes = [a.get("code") for a in (alarms or [])]
     others = [a for a in (alarms or []) if a.get("code") not in allowed_alarms]

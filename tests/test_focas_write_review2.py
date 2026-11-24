@@ -26,6 +26,18 @@ ARGS = {"host": "127.0.0.1", "port": 8193}
 OTHER = {"alarms": [PWE], "cnc_id": [1, 2, 3, 4]}
 
 
+
+def setUpModule():
+    # この試験は「非常停止を解除した機械」を前提に書かれている。新しい既定（非常停止のときだけ書く）は test_estop_mode で確かめる
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("released_only")
+
+
+def tearDownModule():
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("estop_only")
+
+
 class SlowClient(DirectClient):
     def call(self, cmd, args=None, timeout=None, on_event=None):
         if cmd == "param_write":

@@ -29,6 +29,18 @@ def stamp(t):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
 
 
+
+def setUpModule():
+    # この試験は「非常停止を解除した機械」を前提に書かれている。新しい既定（非常停止のときだけ書く）は test_estop_mode で確かめる
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("released_only")
+
+
+def tearDownModule():
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("estop_only")
+
+
 class JobBase(WriteBase):
     def write_stopped_job(self, folder=None):
         """3件目で止まった（機械に2件書いたままの）ジョブ。"""

@@ -31,6 +31,18 @@ PW_ALARM = {"20": [[0, 1, 0, "POWER MUST BE OFF"]]}
 # A-1 PW0000 が出ていても元に戻せる
 # ---------------------------------------------------------------------------
 
+
+def setUpModule():
+    # この試験は「非常停止を解除した機械」を前提に書かれている。新しい既定（非常停止のときだけ書く）は test_estop_mode で確かめる
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("released_only")
+
+
+def tearDownModule():
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("estop_only")
+
+
 class TestUndoWithPowerAlarm(WriteBase):
     def written_with_pw0000(self):
         _p, pl = self.plan({"20": "4", "21": "1", "22": "1"})

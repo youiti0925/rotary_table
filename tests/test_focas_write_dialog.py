@@ -25,6 +25,18 @@ from fake_client import DirectClient               # noqa: E402
 PWE = [100, 0, 0, "ﾊﾟﾗﾒｰﾀ書き込み可能です"]
 
 
+
+def setUpModule():
+    # この試験は「非常停止を解除した機械」を前提に書かれている。新しい既定（非常停止のときだけ書く）は test_estop_mode で確かめる
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("released_only")
+
+
+def tearDownModule():
+    from nd287_app import focas_ops as _fo
+    _fo.set_estop_mode("estop_only")
+
+
 class WriteDialogBase(unittest.TestCase):
     SCENARIO = {"alarms": [PWE]}
     VALUES = {"20": "4", "21": "1"}

@@ -3636,12 +3636,15 @@ class FocasWriteDialog(QtWidgets.QDialog):
     def _show_estop(self, v):
         """つないだ直後に、機械の状態で書けない理由（非常停止・運転中・許していないアラーム）を赤で最初に出す。"""
         reasons = []
-        if v.get("emergency") not in (None, 0):
+        mode = focas_ops.estop_mode(True)
+        if v.get("emergency") not in (None, 0) and mode == "released_only":
             reasons.append("非常停止がかかっています。非常停止を解除して、リセットの状態にしてください。")
+        elif v.get("emergency") == 0 and mode == "estop_only":
+            reasons.append("パラメータは非常停止にして書きます（社内の手順）。機械の非常停止ボタンを押してください。")
         try:
             st = focas_ops.writable_state(self._status, self._alarms, backup_info=None, cnc_id=None)
             for r in st["reasons"]:
-                if r.startswith("非常停止"):
+                if r.startswith(("非常停止", "パラメータは非常停止")):
                     continue
                 if r.startswith(("運転中", "軸が動いて", "許していないアラーム")):
                     reasons.append(r)

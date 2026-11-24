@@ -235,6 +235,22 @@ class TestWizardMachineWrite(WizardBase):
         self.assertIn("号機を選んでください", w.lbl_need.text())
         self.assertIn("自動", w.cmb_ctrl.itemText(1))
 
+    def test_motor_number_shows_name_and_filters_by_capacity(self):
+        tbl = self.work / "モーター番号表.csv"
+        tbl.write_text("モーター番号,モーター型式,容量,別名,出典件数\n"
+                       "293,αiS8/4000,20A,,3\n299,αiF22/3000 HV,40A,,12\n", encoding="utf-8-sig")
+        self.settings["motor_table_csv"] = str(tbl)
+        w = self.ready(self.wizard(), motor="temp")
+        w.e_motor_id.setText("9999")
+        self.assertIn("番号表にありません", w.lbl_motor_info.text())
+        n_all = len(w._cand)
+        w.e_motor_id.setText("293")
+        self.assertIn("αiS8/4000", w.lbl_motor_info.text())
+        self.assertIn("20A", w.lbl_motor_info.text())
+        self.assertLess(len(w._cand), n_all)                          # 20A の軸がある号機だけ
+        for c, a in w._cand:
+            self.assertTrue(any(c.caps[x] == "20A" for x in a))
+
     def test_connected_machine_unit_is_chosen_automatically(self):
         w = self.wizard()
         w._connected_unit = lambda: "23"

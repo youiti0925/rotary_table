@@ -161,6 +161,41 @@ def load_motor_caps(path) -> dict:
     return parse_motor_caps(raw.decode("cp932", errors="replace"))
 
 
+def load_motor_table(path) -> dict:
+    """モーター番号表（マスタ/モーター番号表.csv）→ {番号(2020の値): {"model","cap","alias"}}。無ければ空。
+
+    列: モーター番号,モーター型式,容量,別名,出典件数（製品データから作った表。人が直してよい）。
+    """
+    out = {}
+    if not path or not Path(path).exists():
+        return out
+    raw = Path(path).read_bytes()
+    text = None
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            text = raw.decode(enc, errors="strict")
+            break
+        except Exception:
+            continue
+    if text is None:
+        return out
+    for row in csv.DictReader(io.StringIO(text)):
+        no = (row.get("モーター番号") or "").strip()
+        if not no or no.startswith("#"):
+            continue
+        out[no.lstrip("0") or "0"] = {
+            "model": (row.get("モーター型式") or "").strip(),
+            "cap": _norm_cap_text((row.get("容量") or "").strip()) if (row.get("容量") or "").strip() else "",
+            "alias": (row.get("別名") or "").strip()}
+    return out
+
+
+def motor_info(table: dict, motor_id) -> dict:
+    """モーター番号（2020 の値）→ {"model","cap","alias"}。表に無ければ {}。"""
+    key = str(motor_id or "").strip()
+    return dict((table or {}).get(key.lstrip("0") or "0") or {}) if key else {}
+
+
 def capacity_for_motor(table: dict, motor_no="", motor_model="", motor_id="") -> str:
     """モーター→容量 対応表から容量を引く（番号→ID→型式の順で照合）。無ければ ""。"""
     if not table:

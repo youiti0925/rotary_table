@@ -5773,6 +5773,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if cpath and not Path(cpath).is_absolute():
             cpath = str(app_dir() / cpath)
         self._motor_caps = seiban_flow.load_motor_caps(cpath)
+        mtpath = settings.get("motor_table_csv", "マスタ/モーター番号表.csv")
+        if mtpath and not Path(mtpath).is_absolute():
+            mtpath = str(app_dir() / mtpath)
+        self._motor_table = seiban_flow.load_motor_table(mtpath)   # 2020 の番号 → モーター型式・容量
         # 特注パラ索引（型式で引く。再索引で更新。毎回フォルダを解析しないため）
         ipath = settings.get("param_custom_index_csv", "")
         if ipath and not Path(ipath).is_absolute():
@@ -5800,6 +5804,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_steps = QtWidgets.QLabel("")
         self.lbl_steps.setTextFormat(QtCore.Qt.RichText)
         v.addWidget(self.lbl_steps)
+        self.lbl_conn = QtWidgets.QLabel("")
+        v.addWidget(self.lbl_conn)
         self.lbl_decided = QtWidgets.QLabel("")
         self.lbl_decided.setStyleSheet("color:#475569;")
         self.lbl_decided.setWordWrap(True)
@@ -5885,6 +5891,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.found_box = QtWidgets.QWidget()
         self.found_lay = QtWidgets.QVBoxLayout(self.found_box)
         self.found_lay.setContentsMargins(0, 0, 0, 0)
+        self.found_lay.setAlignment(QtCore.Qt.AlignTop)       # 見つかった製品は上から並べる（下寄せにしない）
         self.lbl_found = QtWidgets.QLabel("製品データの場所から、傾斜(T)・回転(R)を探します。")
         self.lbl_found.setStyleSheet("color:#6b7280;")
         self.found_lay.addWidget(self.lbl_found)
@@ -5894,6 +5901,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.found_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.found_scroll.setWidget(self.found_box)
         f1.addWidget(self.found_scroll, 1)
+        self._f1 = f1
         col_left.addWidget(box1, 1)
         self.box_motor = QtWidgets.QGroupBox("機械に付いているモーターは？")
         self.fm = QtWidgets.QFormLayout(self.box_motor)
@@ -5962,10 +5970,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_motor_id.setToolTip("機械に付けた仮モーターの番号（パラメータ 2020）。入れると、機械の今の値と照らし合わせて、"
                                    "違えば書く前に警告します（この番号は書きません）")
         self.e_motor_id.setEnabled(False)
-        self.e_motor_id.editingFinished.connect(self._update_candidates)
+        self.e_motor_id.textChanged.connect(self._on_motor_id_changed)
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
+        self.lbl_motor_info = QtWidgets.QLabel("")
+        self.lbl_motor_info.setWordWrap(True)
+        self.lbl_motor_info.setStyleSheet("color:#1d4ed8; font-weight:bold;")
+        self.fm.addRow("", self.lbl_motor_info)
         op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
         self.cmb_origin = QtWidgets.QComboBox()
         self.cmb_origin.addItem("変更しない", "")
@@ -6468,6 +6480,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
     # ----- ② 候補制御装置 -----
     def _update_candidates(self, *_):
         sel = self._selected_files()
+        prev = None                                   # いま選んでいる号機（作り直しても、あれば選び直す）
+        pi = self.cmb_ctrl.currentData()
+        if pi is not None and 0 <= pi < len(self._cand):
+            prev = (str(self._cand[pi][0].unit), tuple(self._cand[pi][1]))
         self.cmb_ctrl.blockSignals(True)
         self.cmb_ctrl.clear()
         self._cand = []
@@ -6491,7 +6507,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
             # 軸は容量で決められないので、号機×軸の組を全部出して人が選ぶ（つながっている機械が先頭）
             voltage = ""
             by_unit = len(sel) == 1 and bool(self.e_motor_id.text().strip())
-            if by_unit:
+            mcap = seiban_flow.motor_info(self._motor_table, self.e_motor_id.text()).get("cap", "") if by_unit else ""
+            if by_unit and mcap:
+                # 番号表で仮モーターの容量が分かったので、その容量の軸がある号機だけにする（電圧では絞らない）
+                self._cand = [(c, a) for c, a in seiban_flow.capable_controllers(self._controllers, [mcap], "")]
+            elif by_unit:
                 # 仮モーターの番号が入っているので、軸はつないだあと機械の 2020 から決まる。号機だけ選ぶ
                 self._cand = [(c, [c.axes()[0]]) for c in self._controllers if c.axes()]
             elif len(sel) == 1:
@@ -6533,11 +6553,36 @@ class ParamWizardDialog(QtWidgets.QDialog):
             # つながっている機械は自動で選ぶ。仮モーターで軸が何通りもあるときは、軸は人が選ぶ
             if pick >= 0 and not temp:
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(pick))
+            if prev is not None:
+                same = [i for i, (c, a) in enumerate(self._cand)
+                        if (str(c.unit), tuple(a)) == prev] or \
+                       [i for i, (c, a) in enumerate(self._cand) if str(c.unit) == prev[0]]
+                if same:
+                    self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(same[0]))
             if conn_unit:
                 self.lbl_need.setText(self.lbl_need.text()
                                       + f"\n機械につながっています: {conn_unit}号機（台帳）")
         self.cmb_ctrl.blockSignals(False)
         self._on_ctrl_changed()
+
+    def _on_motor_id_changed(self, *_):
+        self._show_motor_info()
+        self._update_candidates()
+
+    def _show_motor_info(self):
+        """入れたモーター番号の名前・容量を、すぐ下に出す（番号表から）。"""
+        mid = self.e_motor_id.text().strip()
+        if self.cmb_motor.currentData() != "temp" or not mid:
+            self.lbl_motor_info.setText("")
+            return
+        info = seiban_flow.motor_info(self._motor_table, mid)
+        if info:
+            self.lbl_motor_info.setText(
+                f"モーター {mid} → {info.get('model') or '（型式の登録なし）'}"
+                + (f"　容量 {info['cap']}" if info.get("cap") else "　（容量の登録なし）"))
+        else:
+            self.lbl_motor_info.setText(
+                f"モーター {mid} は番号表にありません。号機は全部出します（つないだあと、機械から確かめます）")
 
     def _connected_unit(self):
         """いま LAN でつながる機械の号機（台帳の IP に 8193 で声をかけるだけ。台帳に無ければ ''）。10秒は覚えておく。"""
@@ -6757,6 +6802,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
         simple = self._mode == "simple"
         step = self._step
         self.b_mode.setText("全部表示" if simple else "かんたん表示")
+        self.lbl_conn.setVisible(simple)
+        if simple:
+            cu = self._connected_unit()
+            self.lbl_conn.setText(
+                (f"● 機械につながっています: {cu}号機（台帳）" if cu else "○ 機械は、まだつながっていません（③でつなぎます）"))
+            self.lbl_conn.setStyleSheet("color:#166534; font-weight:bold;" if cu else "color:#64748b;")
+        if hasattr(self, "_f1"):
+            self._f1.setStretchFactor(self.found_scroll, 0 if simple else 1)
+        self.found_scroll.setMaximumHeight(150 if simple else 16777215)
         for wd in (self.lbl_steps, self.lbl_decided, self.b_back, self.b_next):
             wd.setVisible(simple)
         for wd in (self.b_adv, self.b_view, self.b_make, self.b_machine):
@@ -6781,6 +6835,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.box0.setVisible(step == 1 and places_missing)
         self.box1.setVisible(step == 1)
         self.box_motor.setVisible(step == 1 and bool(self._files) and bool(self._selected_files()))
+        self._show_motor_info()
         self.box2.setVisible(step == 2)
         basic_missing = not self.e_basic.text().strip()
         self.box3.setVisible(step == 2 and basic_missing and self.cmb_ctrl.currentData() not in (None, -1))

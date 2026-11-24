@@ -42,6 +42,83 @@ class TestDecide(unittest.TestCase):
         self.assertEqual(P.conn_text({"unit": "23", "axes": {}}, str), "● 機械につながっています: 23号機")
 
 
+class TestAxisByMatches(unittest.TestCase):
+    PROD = {1420: "7771", 1421: "7772", 1422: "7773", 1423: "7774", 2020: "299"}
+    BASIC = {1420: ["1.0", "1.0"], 1421: ["1.0"], 1422: ["1.0"], 1423: ["1.0"], 2020: ["255", "293"], 9999: ["5"]}
+
+    def test_pick_numbers_only_axis_specific_and_distinctive(self):
+        prod = {**self.PROD, 1424: "1.0", 1425: "9", 2165: "40"}
+        basic = {**self.BASIC, 1424: ["1"], 1425: None}      # 1424=BASICと同じ値(数で比べる)・1425=軸別でない
+        self.assertEqual(P.pick_numbers(prod, basic), [1420, 1421, 1422, 1423])   # 2020/2165 は対象外
+
+    def test_pick_numbers_has_upper_limit(self):
+        prod = {n: "7" for n in range(3000, 3100)}
+        basic = {n: ["1"] for n in range(3000, 3100)}
+        self.assertEqual(len(P.pick_numbers(prod, basic)), P.MAX_AXIS_NUMBERS)
+
+    def test_one_axis_matching_decides_that_axis(self):
+        m = {1: {1420: "1.0"}, 5: {1420: "7771", 1421: "7772", 1422: "7773", 1423: "7774"}, 6: {1420: "7771"}}
+        c = P.count_matches(self.PROD, m)
+        self.assertEqual(c, {1: 0, 5: 4, 6: 1})
+        self.assertEqual(P.decide_axis(c), 5)
+
+    def test_tie_decides_nothing(self):
+        row = {1420: "7771", 1421: "7772", 1422: "7773"}
+        self.assertEqual(P.decide_axis(P.count_matches(self.PROD, {4: row, 5: dict(row)})), 0)
+
+    def test_no_product_values_decides_nothing(self):
+        self.assertEqual(P.count_matches({}, {5: {1420: "7771"}}), {5: 0})
+        self.assertEqual(P.decide_axis({5: 0, 6: 0}), 0)
+        self.assertEqual(P.decide_axis({}), 0)
+
+    def test_few_or_close_matches_decide_nothing(self):
+        self.assertEqual(P.decide_axis({1: 2, 2: 0}), 0)            # 少なすぎる
+        self.assertEqual(P.decide_axis({1: 5, 2: 4}), 0)            # 2位との差が小さい
+        self.assertEqual(P.decide_axis({1: 5, 2: 3}), 1)
+
+    def test_unreadable_numbers_are_skipped(self):
+        m = {5: {1420: "7771", 1421: "7772", 1422: "7773"}, 6: {}}  # 6軸は何も読めなかった
+        self.assertEqual(P.count_matches(self.PROD, m), {5: 3, 6: 0})
+        self.assertEqual(P.decide_axis(P.count_matches(self.PROD, m)), 5)
+
+    AXES23 = {k: {"motor_id": m, "amr": a} for k, m, a in
+              zip(range(1, 7), ("255", "255", "273", "293", "293", "303"), ("25", "25", "45", "85", "85", "165"))}
+
+    def test_capacity_axes_unit_23_400v_40a_is_80a_axes_a_and_b(self):
+        r = P.capacity_axes("40A", "400V", "AC200V", self.AXES23)
+        self.assertEqual((r["cap"], r["axes"]), ("80A", [4, 5]))
+        self.assertIn("400V の 40A", r["note"])
+        self.assertIn("200V なので 80A", r["note"])
+        self.assertEqual(P.capacity_axes("40A", "200V", "AC200V", self.AXES23)["axes"], [3])
+
+    def test_capacity_axes_unknown_when_no_capacity_or_cannot_convert(self):
+        self.assertEqual(P.capacity_axes("", "400V", "AC200V", self.AXES23)["axes"], [])
+        self.assertEqual(P.capacity_axes("40A", "", "", self.AXES23)["axes"], [3])
+        self.assertIn("電圧が分からない", P.capacity_axes("40A", "", "", self.AXES23)["note"])
+        self.assertEqual(P.capacity_axes("45A", "200V", "AC400V", self.AXES23)["axes"], [])
+
+    def test_amr_axes_and_product_amr(self):
+        self.assertEqual(P.product_amr({2165: "85", 1420: "5"}), "85")
+        self.assertEqual(P.product_amr({"02165": "85.0"}), "85.0")
+        self.assertEqual(P.product_amr({1420: "5"}), "")
+        self.assertEqual(P.amr_axes("85", self.AXES23), [4, 5])
+        self.assertEqual(P.amr_axes("85.0", self.AXES23), [4, 5])
+        self.assertEqual(P.amr_axes("", self.AXES23), [])
+
+    def test_narrow_by_motor_id_only_narrows_candidates(self):
+        axes = {4: {"motor_id": "293"}, 5: {"motor_id": "300"}}
+        self.assertEqual(P.narrow_by_motor_id([4, 5], axes, "300"), ([5], True))
+        self.assertEqual(P.narrow_by_motor_id([4, 5], axes, ""), ([4, 5], False))
+        self.assertEqual(P.narrow_by_motor_id([4, 5], axes, "999"), ([4, 5], False))
+        self.assertEqual(P.narrow_by_motor_id([4], axes, "300"), ([4], False))
+
+    def test_axis_choices_list_axes_with_motor_id(self):
+        axes = ax(a1="255", a2="", a5="293")
+        self.assertEqual(P.axis_choices(axes, lambda k: "XYZAB"[k - 1]),
+                         [("X軸（255）", 1, "255"), ("B軸（293）", 5, "293")])
+        self.assertEqual(P.axis_choices(axes, lambda k: "XYZAB"[k - 1], only=[5]), [("B軸（293）", 5, "293")])
+
+
 class TestWizardAutoProbe(WizardBase):
     def setUp(self):
         super().setUp()
@@ -97,12 +174,14 @@ class TestWizardAutoProbe(WizardBase):
         self.assertEqual(w.cmb_motor.currentData(), "temp")
         self.assertEqual(w.e_motor_id.text(), "1234")
 
-    def test_temp_motor_number_stays_empty_when_not_certain(self):
+    def test_temp_motor_number_comes_from_capacity_axis_not_from_motor_ids(self):
+        # 2020 が3軸ともバラバラでも、製品の容量（200V 40A）に合う軸は Z だけ → その軸の 2020
         w, _ = self.make({1: 293, 2: 7, 3: 8})
         self.run_probe(w)
         self.search(w)
         self.assertEqual(w.cmb_motor.currentData(), "temp")
-        self.assertEqual(w.e_motor_id.text(), "")
+        self.assertEqual(w.e_motor_id.text(), "8")
+        self.assertIn("Z軸", w.lbl_auto.text())
 
     def test_human_choice_is_not_overwritten(self):
         w, _ = self.make({1: 293, 2: 293, 3: 293, 5: 299})
@@ -149,6 +228,109 @@ class TestWizardAutoProbe(WizardBase):
         self.run_probe(w)
         self.assertIn("台帳にありません", w.lbl_conn.text())
 
+    NUMS = (1420, 1421, 1422, 1423)
+
+    def make_axes(self, b_hits, hv=True):
+        """23号機の実測どおり（2020 が 255,255,273,293,293,303）。B軸(5)に製品の値が付いている。
+        hv=True は 400V の製品（容量 40A → 200V の機械では 80A → A軸・B軸が候補）。"""
+        w, client = self.make({1: 255, 2: 255, 3: 273, 4: 293, 5: 293, 6: 303})
+        if hv:
+            f = Path(self.settings["param_product_dir"]) / "R50014984.prm"
+            f.write_text(f.read_text(encoding="cp932").replace("αiS8/4000-B", "αiS22/3000HV-B"),
+                         encoding="cp932")
+        m = client.machine
+        for k, v in zip(range(1, 7), (25, 25, 45, 85, 85, 165)):          # 23号機の 2165（20,20,40,80,80,160A）
+            m.params[(2165, f"A{k}")] = str(v)
+        for no in self.NUMS:
+            m.types[no] = m.types[2165]
+            for k in range(1, 7):
+                m.params[(no, f"A{k}")] = "1"
+        for no in b_hits:
+            m.params[(no, "A5")] = str(7000 + no)
+        prod = {no: str(7000 + no) for no in self.NUMS}
+        basic = {no: ["1"] for no in self.NUMS}
+        w._axis_probe_inputs = lambda f, pr: (prod, basic)
+        self.run_probe(w)
+        return w, client
+
+    def finish_axis(self, w):
+        job = w._axis_job
+        if job is not None:
+            job.wait(10000)
+        self.app.processEvents()
+
+    def test_axis_by_capacity_then_values_for_unit_23(self):
+        """400V 40A → 200V なら 80A → 機械の 2165 が 85 の軸は A・B → 製品の値が一致する B軸（293）。"""
+        w, client = self.make_axes(self.NUMS)
+        self.search(w)
+        self.finish_axis(w)
+        self.assertEqual(w.cmb_motor.currentData(), "temp")
+        self.assertEqual(w.e_motor_id.text(), "293")
+        t = w.lbl_auto.text()
+        for part in ("400V の 40A", "200V なので 80A", "2165 が 80A の軸は A・B軸", "4 個が一致", "293 が付いているB軸に決めました",
+                     "違えば直してください"):
+            self.assertIn(part, t)
+        self.assertTrue(w.cmb_axis_pick.isHidden())
+        self.assertEqual(client.machine.writes, [])                     # 読むだけ
+
+    def test_products_own_2165_has_priority_over_capacity(self):
+        """製品データ自身の N2165=85 → 機械の 2165 が 85 の軸 A・B（電圧の読み替えは使わない）→ 値の一致で B。"""
+        w, client = self.make_axes(self.NUMS, hv=False)                 # 容量だけなら Z になる製品
+        prod = {2165: "85", **{no: str(7000 + no) for no in self.NUMS}}
+        w._axis_probe_inputs = lambda f, pr: (prod, {no: ["1"] for no in self.NUMS})
+        self.search(w)
+        self.finish_axis(w)
+        self.assertEqual(w.e_motor_id.text(), "293")
+        self.assertIn("製品のアンプ最大電流 85 と同じ軸は A・B軸", w.lbl_auto.text())
+        self.assertIn("293 が付いているB軸に決めました", w.lbl_auto.text())
+
+    def test_capacity_alone_decides_when_one_axis_has_it(self):
+        w, _ = self.make_axes((), hv=False)                             # 200V 40A → Z軸だけ（273）
+        self.search(w)
+        self.finish_axis(w)
+        self.assertEqual(w.e_motor_id.text(), "273")
+        self.assertIn("2165 が 40A の軸は Z軸", w.lbl_auto.text())
+        self.assertTrue(w.cmb_axis_pick.isHidden())
+
+    def test_not_decided_shows_choice_of_candidate_axes_only(self):
+        w, client = self.make_axes(())                                  # 候補は A・B。どちらにも製品の値が無い
+        self.search(w)
+        self.finish_axis(w)
+        self.assertEqual(w.e_motor_id.text(), "")
+        self.assertFalse(w.cmb_axis_pick.isHidden())
+        texts = [w.cmb_axis_pick.itemText(i) for i in range(w.cmb_axis_pick.count())]
+        self.assertIn("A軸（293）", texts)
+        self.assertIn("B軸（293）", texts)
+        self.assertFalse(any(t.startswith(("X", "Y", "Z", "C")) for t in texts))     # 全軸は出さない
+        self.assertIn("軸を決められませんでした", w.lbl_auto.text())
+        i = texts.index("B軸（293）")
+        w.cmb_axis_pick.setCurrentIndex(i)
+        w.cmb_axis_pick.activated.emit(i)
+        self.assertEqual(w.e_motor_id.text(), "293")
+        self.assertEqual(client.machine.writes, [])
+
+    def test_read_numbers_are_limited_and_unreadable_ones_skipped(self):
+        w, client = self.make_axes(self.NUMS)
+        got = wizard_probe_read(w, client)
+        self.assertEqual(sorted(got), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(got[5][1420], "8420")
+        self.assertNotIn(99999, got[5])                                 # 機械に無い番号は飛ばす
+        self.assertEqual(client.machine.writes, [])
+
+    def test_axis_probe_inputs_from_db_product_and_basic(self):
+        w, _ = self.make({1: 293})
+        self.run_probe(w)
+        prod, basic_axes = w._axis_probe_inputs.__func__(w, {"source": "db", "values": {"1320": "5", ("1", "L2"): "1"}},
+                                                         {"unit": "23"})
+        self.assertEqual(prod, {"1320": "5"})
+        self.assertTrue(len(basic_axes[1320]) >= 6)
+        self.assertTrue(all(isinstance(k, int) for k in basic_axes))
+
+
+def wizard_probe_read(w, client):
+    return P.read_axis_params(w.settings, lambda st: client, "127.0.0.1", list(TestWizardAutoProbe.NUMS) + [99999], 6)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -69,6 +69,7 @@ from . import fanuc
 from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
 from . import controller_import
+from . import motor_rules
 from . import help_text
 from .export import (
     MODE_KEY,
@@ -3014,9 +3015,10 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
                  basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id="",
-                 expect_unit="", auto_backup=False, semi_note=""):
+                 expect_unit="", auto_backup=False, semi_note="", rule_ctx=None):
         super().__init__(parent)
         self.settings = settings
+        self._rule_ctx = dict(rule_ctx or {})     # 規則の結果記録に残す（モーター型式・使った規則）
         # auto: 入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う（FocasDialog と同じ）。
         # 書く窓なので、開いただけでは つながない（「つなぐ」は人が押す）
         self._auto = bool(auto)
@@ -4218,6 +4220,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.bar.setFormat("終わりました" if res.state == "done" else "止まりました")
         if res.written():
             self._rewrite_blocked = True
+            if self._rule_ctx:                  # 使った規則と結果を残す（規則が外れたとき見つけるため）
+                from . import rules
+                rules.append_result(rules.log_path(app_dir()),
+                                    dict(self._rule_ctx, unit=self.cmb_unit.currentData() or "",
+                                         seiban=self.seiban), res)
         self._show_items(res)
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(res)))
         if self._stage1 and res.state == "done" and res.items and all(it["status"] == "ok" for it in res.items):
@@ -5265,7 +5272,27 @@ class ControllerEditDialog(QtWidgets.QDialog):
                 j = cmb.findText(controller.caps[a]); cmb.setCurrentIndex(j if j >= 0 else 0)
             self.cmb_caps[a] = cmb
             form.addRow(f"{a}軸 容量", cmb)
-        v.addLayout(form)
+        # アンプ型式（任意）。空のまま保存すると、前に入っていた値が消えるので、今の値を出して残す
+        self.e_amps = {}
+        for a in controllers.AXES:
+            e = QtWidgets.QLineEdit(controller.amps.get(a, "") if controller else "")
+            e.setPlaceholderText("例 A06B-6114-H206（任意）")
+            self.e_amps[a] = e
+            form.addRow(f"{a}軸 アンプ型式", e)
+        self.cmb_bcorr = QtWidgets.QComboBox(); self.cmb_bcorr.addItems(self.YN)
+        self.cmb_dd = QtWidgets.QComboBox(); self.cmb_dd.addItems(self.YN)
+        for cmb, val in ((self.cmb_bcorr, controller.b_corr if controller else ""),
+                         (self.cmb_dd, controller.d_drive if controller else "")):
+            j = cmb.findText(val); cmb.setCurrentIndex(j if j >= 0 else 0)
+        self.cmb_bcorr.setToolTip("この制御装置で -Bなめらか補正 が使えるなら ○")
+        self.cmb_dd.setToolTip("この制御装置が末尾 -D（-D駆動）のモーターを動かせるなら ○")
+        form.addRow("-Bなめらか補正", self.cmb_bcorr)
+        form.addRow("-D駆動", self.cmb_dd)
+        holder = QtWidgets.QWidget(); holder.setLayout(form)         # 項目が多いので、縦に収まらないときは中だけ動かす
+        sc = QtWidgets.QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(holder)
+        sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setMinimumHeight(160)
+        v.addWidget(sc, 1)
         v.addWidget(QtWidgets.QLabel(
             "※ 容量を入れた軸だけ『その号機にある軸』として扱います。\n"
             "　 アンプ型式は空でOK（必要ならマスタCSVで記入）。"))
@@ -5288,7 +5315,8 @@ class ControllerEditDialog(QtWidgets.QDialog):
         self.result_controller = controllers.Controller(
             unit, cnc=self.e_cnc.text().strip(), ver=self.e_ver.text().strip(),
             voltage=self.cmb_volt.currentText(), servo=self.e_servo.text().strip(),
-            caps=caps)
+            caps=caps, amps={a: e.text().strip() for a, e in self.e_amps.items() if e.text().strip()},
+            b_corr=self.cmb_bcorr.currentText(), d_drive=self.cmb_dd.currentText())
         self.accept()
 
 
@@ -5401,6 +5429,78 @@ class BasicScanDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class MotorRulesDialog(QtWidgets.QDialog):
+    """モーター型式の末尾（-D・-B など）→ 使える制御装置の規則を編集する（マスタ/モーター規則.csv）。
+    行を足す・直す・消す。上の行から順に見て、最初に合った規則だけ使う。根拠が「推測」の規則は、
+    機械へ書いたとき規則の結果記録（規則の結果記録.csv）に使った規則が残る。"""
+
+    HEAD = motor_rules.FIELDS
+
+    def __init__(self, parent, path):
+        super().__init__(parent)
+        self.setWindowTitle("モーター末尾の規則")
+        fit_to_screen(self, 760, 420)
+        self.path = path
+        v = QtWidgets.QVBoxLayout(self)
+        lbl_h = QtWidgets.QLabel(
+            "モーター型式の末尾によって、使える制御装置を絞る規則です。上の行から順に見て、最初に合った1つだけを使います。\n"
+            "末尾: D や B（-D・-B の文字）／見る列: -D駆動・-Bなめらか補正（条件 ○）または CNCユニット（条件は正規表現）／"
+            "根拠: 利用者・マスタ・推測")
+        lbl_h.setWordWrap(True)
+        v.addWidget(lbl_h)
+        self.tbl = QtWidgets.QTableWidget(0, len(self.HEAD))
+        self.tbl.setHorizontalHeaderLabels(self.HEAD)
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(self.tbl, 1)
+        for r in motor_rules.load_rules(path):
+            self._add_row(r)
+        row = QtWidgets.QHBoxLayout()
+        b_add = QtWidgets.QPushButton("行を足す"); b_add.clicked.connect(lambda: self._add_row({}))
+        b_del = QtWidgets.QPushButton("選んだ行を消す"); b_del.clicked.connect(self._del_row)
+        b_ok = QtWidgets.QPushButton("保存"); b_ok.clicked.connect(self._save)
+        b_cl = QtWidgets.QPushButton("閉じる"); b_cl.clicked.connect(self.reject)
+        for b in (b_add, b_del):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(b_ok); row.addWidget(b_cl)
+        v.addLayout(row)
+
+    def _add_row(self, r):
+        i = self.tbl.rowCount()
+        self.tbl.insertRow(i)
+        for j, h in enumerate(self.HEAD):
+            self.tbl.setItem(i, j, QtWidgets.QTableWidgetItem(r.get(h, "")))
+
+    def _del_row(self):
+        i = self.tbl.currentRow()
+        if i >= 0:
+            self.tbl.removeRow(i)
+
+    def rows(self):
+        out = []
+        for i in range(self.tbl.rowCount()):
+            out.append({h: (self.tbl.item(i, j).text() if self.tbl.item(i, j) else "").strip()
+                        for j, h in enumerate(self.HEAD)})
+        return [r for r in out if r["末尾"]]
+
+    def _save(self):
+        rows = self.rows()
+        bad = [r["末尾"] for r in rows if r["見る列"] not in
+               list(motor_rules.FLAG_COLUMNS) + list(motor_rules.TEXT_COLUMNS)]
+        if bad:
+            QtWidgets.QMessageBox.warning(
+                self, "規則", "「見る列」は -D駆動・-Bなめらか補正・CNCユニット のどれかにしてください（" + "・".join(bad) + "）")
+            return
+        p = Path(self.path)
+        if p.exists():
+            try:
+                p.with_suffix(p.suffix + ".bak").write_bytes(p.read_bytes())
+            except Exception:
+                pass
+        motor_rules.save_rules(self.path, rows)
+        self.accept()
+
+
 class ControllerMasterDialog(QtWidgets.QDialog):
     """制御装置マスタ（号機の一覧）の管理。手入力で追加/編集/削除、BASICから取り込み。
 
@@ -5408,7 +5508,7 @@ class ControllerMasterDialog(QtWidgets.QDialog):
     かんたん作成の候補に出ないので、無い号機はここで登録する。
     """
 
-    COLS = ["号機", "CNC", "電圧", "容量", "軸数"]
+    COLS = ["号機", "CNC", "電圧", "容量", "軸数", "-Bなめらか補正", "-D駆動"]
 
     def __init__(self, parent, master_path, basic_dir="", settings=None):
         super().__init__(parent)
@@ -5438,6 +5538,8 @@ class ControllerMasterDialog(QtWidgets.QDialog):
             ("手入力で追加…", self.add, "号機・電圧・各軸容量を入れて登録"),
             ("編集…", self.edit, "選択した号機を編集"),
             ("削除", self.delete, "選択した号機を削除"),
+            ("モーター末尾の規則…", self.edit_rules,
+             "モーター型式の末尾（-D・-B など）と、使える制御装置の対応を編集"),
             ("BASICから取り込む…", self.import_basic, "BASICフォルダから軸数・容量を自動登録"),
             ("Webから取り込む…", self.import_web,
              "product-inspection（Webアプリ/Firestore）の制御装置データを取り込む"),
@@ -5454,7 +5556,7 @@ class ControllerMasterDialog(QtWidgets.QDialog):
         self._ctls = controllers.load_controllers(self.master_path)
         self.tbl.setRowCount(len(self._ctls))
         for r, c in enumerate(self._ctls):
-            vals = [c.unit, c.cnc, c.voltage, c.caps_text(), str(len(c.axes()))]
+            vals = [c.unit, c.cnc, c.voltage, c.caps_text(), str(len(c.axes())), c.b_corr, c.d_drive]
             for col, t in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(t)
                 it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
@@ -5515,6 +5617,12 @@ class ControllerMasterDialog(QtWidgets.QDialog):
         self._backup()
         controllers.delete_controller(self.master_path, sel.unit)
         self.reload()
+
+    def edit_rules(self):
+        rpath = self.settings.get("motor_rules_csv", "マスタ/モーター規則.csv")
+        if rpath and not Path(rpath).is_absolute():
+            rpath = str(app_dir() / rpath)
+        MotorRulesDialog(self, rpath).exec()
 
     def import_basic(self):
         if not self.basic_dir or not Path(self.basic_dir).is_dir():
@@ -7408,17 +7516,6 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self._cand = seiban_flow.capable_controllers(self._controllers, [""] * len(sel), "")
         else:
             self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
-        # 末尾 -D のモーター（仮モーターならその型式、製品のままなら製品のモーター）は -D駆動 ○ の号機だけ
-        if temp:
-            d_models = [seiban_flow.motor_info(self._motor_table, self.e_motor_id.text()).get("model", "")]
-        else:
-            d_models = [f["meta"].get("motor", "") for f in sel]
-        self._need_d_drive = any(seiban_flow.is_d_motor(m) for m in d_models)
-        if self._need_d_drive:
-            self._cand = seiban_flow.only_d_drive(self._cand)
-        self._need_ib = (not self._need_d_drive) and any(seiban_flow.is_b_motor(m) for m in d_models)
-        if self._need_ib:
-            self._cand = seiban_flow.only_ib_generation(self._cand)
         if temp and self._decided_axis:
             # 機械から決めた軸（2165 など）が書く先。仮モーターの容量で軸を選び直さない
             un = str((self._machine_probe or {}).get("unit") or "")
@@ -7441,6 +7538,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 fixed += [(c, letters[::-1]) for c, _a in list(fixed)]      # 傾斜と回転の入れ替えは人が選べる
                 self._cand = fixed + [(c, a) for c, a in self._cand if str(c.unit) != un]
                 fixed_multi = True
+        # 末尾 -D のモーター（仮モーターならその型式、製品のままなら製品のモーター）は -D駆動 ○ の号機だけ
+        if temp:
+            d_models = [seiban_flow.motor_info(self._motor_table, self.e_motor_id.text()).get("model", "")]
+        else:
+            d_models = [f["meta"].get("motor", "") for f in sel]
+        rpath = self.settings.get("motor_rules_csv", "マスタ/モーター規則.csv")
+        if rpath and not Path(rpath).is_absolute():
+            rpath = str(app_dir() / rpath)
+        self._cand, used_rules = motor_rules.apply(self._cand, d_models, motor_rules.load_rules(rpath))
+        self._need_d_drive = any(r.get("見る列") == "-D駆動" for r in used_rules)
+        self._need_ib = any(r.get("見る列") == "CNCユニット" for r in used_rules)
+        self._used_rule_notes = [f"末尾 -{r.get('末尾')} → {r.get('見る列')} {r.get('条件')}" for r in used_rules]
         conn_unit = self._connected_unit()
         if conn_unit:
             self._cand.sort(key=lambda ca: 0 if str(ca[0].unit) == conn_unit else 1)
@@ -7458,10 +7567,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         else:
             self.lbl_need.setText(
                 f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
-        if self._need_d_drive:
-            self.lbl_need.setText(self.lbl_need.text() + "　末尾が -D のモーターなので、-D駆動が○の号機だけを出しています。")
-        if self._need_ib:
-            self.lbl_need.setText(self.lbl_need.text() + "　末尾が -B のモーターなので、30i・31i・32i・35i 系の号機だけを出しています。")
+        if self._used_rule_notes:
+            self.lbl_need.setText(self.lbl_need.text() + "　モーターの末尾の規則（"
+                                  + "／".join(self._used_rule_notes) + "）で号機を絞っています。")
         if not self._cand:
             self.cmb_ctrl.addItem(f"（容量 {capstr}{vtxt} を満たす制御装置がありません）", -1)
         else:
@@ -7481,7 +7589,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(pick))
             elif len(self._cand) == 1:                 # 候補が1つなら、聞かずに選ぶ
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(0))
-            if prev is not None:
+            # 前の選択は「候補が1つだけで自動で選ばれたもの」なら引き継がない（つながっている機械の自動選択を消さない）
+            if prev is not None and not (getattr(self, "_ctrl_auto_pick", False) and pick >= 0):
                 same = [i for i, (c, a) in enumerate(self._cand)
                         if (str(c.unit), tuple(a)) == prev] or \
                        [i for i, (c, a) in enumerate(self._cand) if str(c.unit) == prev[0]]
@@ -7490,6 +7599,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             if conn_unit:
                 self.lbl_need.setText(self.lbl_need.text()
                                       + f"\n機械につながっています: {conn_unit}号機（台帳）")
+        self._ctrl_auto_pick = len(self._cand) == 1
         self.cmb_ctrl.blockSignals(False)
         self._on_ctrl_changed()
 
@@ -7784,12 +7894,32 @@ class ParamWizardDialog(QtWidgets.QDialog):
             product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"),
             expect_unit=str(ctl.unit), auto_backup=True,
             motor_id=(self.e_motor_id.text().strip() if motor == "temp" and len(axis_values) == 1 else ""),
+            rule_ctx=self._rule_context(motor, g),
             semi_note=(f"セミクロに変換して書きます（製品 {seiban} はフルクロ。モーターの中の検出器だけで位置を読む値に変えています）"
                        if g.get("semi") else ""),
             subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
                      f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
                      " の製品値のうち、機械の今と違う所だけを書きます。")
         return (self.settings, plan_fn), kw
+
+    def _rule_context(self, motor, g):
+        """規則の結果記録に残す: モーター型式と、この書込で使った規則の id（nd287_app/rules.py）。"""
+        sel = self._selected_files()
+        if motor == "temp":
+            model = seiban_flow.motor_info(self._motor_table, self.e_motor_id.text()).get("model", "") \
+                or self.e_motor_id.text().strip()
+        else:
+            model = "・".join(f["meta"].get("motor", "") for f in sel)
+        used = []
+        for note in getattr(self, "_used_rule_notes", []):       # モーター末尾の規則（マスタ/モーター規則.csv）
+            used.append("モーター規則[" + note + "]")
+        if self._decided_axis or self._decided_axes:
+            used.append("AXIS_2165")
+        if motor == "temp":
+            used.append("TEMP_MOTOR")
+        if g.get("semi"):
+            used.append("SEMI")
+        return {"motor": model, "rules": used}
 
     def write_to_machine(self):
         """機械へ直接書く（FOCAS）。かんたん作成と同じ入力（受注番号・号機・BASIC）から作る中身を決め、

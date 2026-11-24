@@ -302,6 +302,14 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         self.assertEqual(self._check(
             lambda s: G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None)), [])
 
+    def test_controller_edit_and_rules_dialogs(self):
+        import nd287_app.gui as G
+        from nd287_app import controllers
+        c = controllers.Controller("99", cnc="35i-MB", voltage="AC200V", caps={"X": "20A", "Y": "40A"},
+                                   amps={"X": "A06B-6240-H206"}, b_corr="○", d_drive="○")
+        self.assertEqual(self._check(lambda s: G.ControllerEditDialog(None, c)), [])
+        self.assertEqual(self._check(lambda s: G.MotorRulesDialog(None, "no_such_rules.csv")), [])
+
     def test_focas_program_send_dialog(self):
         import nd287_app.gui as G
         from nd287_app import fanuc

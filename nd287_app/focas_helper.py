@@ -7,8 +7,8 @@
 - 標準ライブラリだけ。**nd287_app のほかのファイルを import しない**
   （exe にしたとき、32bit Python から nd287_app は見えないため）。
 - import しただけでは DLL を読まない（試験が普通のモジュールとして読み込む）。
-- 書く DLL 関数は **cnc_wrparam（パラメータ1件の書込）だけ**。削除・プログラム書込・
-  運転開始・PMC・マクロ書込は ALLOWED_FUNCS に入れていない（一覧に無い名前は Api から
+- 書く DLL 関数は **cnc_wrparam（パラメータ1件の書込）と、測定プログラムの書込（prog_write）の
+  cnc_dwn*4・cnc_pdf_del だけ**。運転開始・PMC・マクロ書込は ALLOWED_FUNCS に入れていない（一覧に無い名前は Api から
   取り出せない）。cnc_wrparam は「確認済みの型」（verified）の番号にしか使わない。
 - 本番のヘルパーに試験用の抜け道（偽物を読む引数）は無い。偽物を差し込むのは
   tests/fake_focas_helper.py だけで、serve(lib=...) を直接呼ぶ。
@@ -32,8 +32,8 @@ from decimal import Decimal
 PROTO = 1
 
 # 呼べる DLL 関数の一覧。ここに無い名前は取り出せない。
-# 書く関数は cnc_wrparam だけ。cnc_start・pmc_wrpmcrng・cnc_search・cnc_wrmacro・
-# cnc_dwn*・cnc_pdf_del などは入れない（試験が見張る）。
+# 書く関数は cnc_wrparam と、プログラム書込の cnc_dwnstart4・cnc_download4・cnc_dwnend4・cnc_pdf_del だけ。
+# cnc_start・pmc_wrpmcrng・cnc_search・cnc_wrmacro などは入れない（試験が見張る）。
 ALLOWED_FUNCS = (
     "cnc_allclibhndl3", "cnc_freelibhndl",
     "cnc_sysinfo", "cnc_rdcncid", "cnc_rdaxisname",
@@ -42,6 +42,9 @@ ALLOWED_FUNCS = (
     "cnc_upstart4", "cnc_upload4", "cnc_upend4",
     "cnc_rdparainfo", "cnc_rdparam",
     "cnc_wrparam",
+    # 測定プログラムの書込（2026-11-22 実機で確認した手順: 書込 cnc_dwnstart4/cnc_download4/cnc_dwnend4、
+    # 削除 cnc_pdf_del）。使うのは prog_write だけ。削除は prog_write の overwrite=True のときだけ。
+    "cnc_dwnstart4", "cnc_download4", "cnc_dwnend4", "cnc_pdf_del",
 )
 
 # 戻り値の名前。実機で見たのは 0・6・10 だけで、残りは仕様の知識（未確認）。
@@ -62,6 +65,7 @@ SUBDIR_END_RC = 0
 DIR_BUSY_TRIES = 5          # 処理中(-1)のとき、短くあけて読み直す回数
 PROG_READ_LIMIT = 60        # プログラム1本を読む時間の上限[秒]（クライアントはこれより長く待つ）
 PARAM_DUMP_LIMIT = 150
+PROG_WRITE_LIMIT = 60       # プログラム1本を書く時間の上限[秒]
 PARAM_WRITE_LIMIT = 5       # 書込が EW_BUFFER（待って再送）を返し続けたとき、この秒数で抜ける
 
 DUMP_KINDS = {"param": 2, "pitch": 3, "macro": 4, "tool": 1, "workofs": 5}
@@ -605,6 +609,54 @@ class Family31i(Family):
             raise _fail("cnc_upload4", last if last != 0 else -99)
         return bytes(data), last, end_rc
 
+    def prog_name_exists(self, hp, folder, number):
+        """folder に O<number> があるか。あれば一覧の1件（名前・大きさ・日付）を返す。名前は数字で比べる
+        （機械の一覧は O901 のように先頭の 0 を落として出す【事実】）。一覧を最後まで読めなければ例外。"""
+        items, rc = self._entries(hp, folder)
+        if rc != ALLDIR_END_RC:
+            raise FocasError("incomplete", message=f"プログラムの一覧を最後まで読めませんでした（戻り値 {rc}）。"
+                                                   "同じ番号があるか確かめられないので書きません")
+        for it in items:
+            m = re.fullmatch(r"[Oo]0*(\d+)", it["name"])
+            if m and int(m.group(1)) == number:
+                return it
+        return None
+
+    def prog_delete(self, hp, folder, name):
+        """cnc_pdf_del で1本だけ消す。名前に / が入っていたら断る。"""
+        if not re.fullmatch(r"O\d{1,8}", name or ""):
+            raise FocasError("bad_args", message="消すプログラムの名前が正しくありません")
+        rc = hp.api.cnc_pdf_del(hp.h, (folder + name).encode("ascii"))
+        if rc != 0:
+            raise _fail("cnc_pdf_del", rc)
+
+    def download(self, hp, folder, data, limit, emit, note):
+        """cnc_dwnstart4 / cnc_download4 / cnc_dwnend4 で data をそのまま送る（1280 バイトずつ）。
+        cnc_dwnstart4 が失敗したら cnc_download4 は呼ばない。途中で失敗しても cnc_dwnend4 は呼ぶ。"""
+        rc = hp.api.cnc_dwnstart4(hp.h, ctypes.c_short(0), folder.encode("ascii"))
+        if rc != 0:
+            raise _fail("cnc_dwnstart4", rc)
+        pos, t0 = 0, hp.clock()
+        try:
+            while pos < len(data):
+                if hp.clock() - t0 > limit:
+                    raise FocasError("timeout", func="cnc_download4", seconds=limit)
+                chunk = data[pos:pos + 1280]
+                ln = ctypes.c_long(len(chunk))
+                rc = hp.api.cnc_download4(hp.h, ctypes.byref(ln),
+                                          ctypes.create_string_buffer(chunk, len(chunk)))
+                if rc == RC_BUFFER:                  # 待って同じ所を送り直す【仕様。実機では未確認】
+                    hp.sleep(0.02)
+                    continue
+                if rc != 0:
+                    raise _fail("cnc_download4", rc)
+                sent = ln.value if 0 < ln.value <= len(chunk) else len(chunk)
+                pos += sent
+                emit({"event": "progress", "done": pos, "total": len(data), "note": note})
+        finally:
+            end_rc = hp.api.cnc_dwnend4(hp.h)
+        return end_rc
+
 
 class Family0iD(Family):
     name = "0i-D"
@@ -792,6 +844,47 @@ class Helper:
                                         path.rsplit("/", 1)[-1])
         return _data_result(data, last, end_rc)
 
+    def cmd_prog_write(self, a, emit):
+        """測定プログラム1本を書く。**同じ番号があれば書かずに exists=True を返す**（人に確認するため）。
+        上書きは overwrite=True のときだけ（その1本だけを cnc_pdf_del で消してから書く）。
+        data は base64。1バイトも変えずに送る。運転中・動作中・非常停止中は書かない。"""
+        fam = self.need_family()
+        folder = _check_path(a.get("folder"))
+        if not folder.endswith("/") or folder.count("/") < 4:
+            raise FocasError("bad_args", message="書き込み先は //CNC_MEM/USER/PATH1/ のようなフォルダで指定してください")
+        number = a.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= 99999999:
+            raise FocasError("bad_args", message="プログラム番号が正しくありません")
+        try:
+            data = base64.b64decode(a.get("data") or "", validate=True)
+        except ValueError:
+            raise FocasError("bad_args", message="data は base64 で渡してください")
+        if not data or len(data) > 4 * 1024 * 1024:
+            raise FocasError("bad_args", message="書く中身が空か大きすぎます")
+        if a.get("sha256") and hashlib.sha256(data).hexdigest() != a["sha256"]:
+            raise FocasError("bad_args", message="中身の指紋が合いません（送る途中で壊れました）")
+        overwrite = a.get("overwrite") is True
+        name = f"O{number}"
+        # 状態の最終確認（アプリ側の確認とは別に、ヘルパーでも見る）
+        st = (ctypes.c_short * 16)()
+        self.check("cnc_statinfo", self.read_rc("cnc_statinfo", self.h, st))
+        v = parse_statinfo(list(st))["values"]
+        if v["run"] != 0 or v["motion"] != 0 or v["emergency"] != 0:
+            raise FocasError("refused", message="機械が運転中・動作中・非常停止中です。書きません",
+                             values=v)
+        exist = fam.prog_name_exists(self, folder, number)
+        if exist is not None and not overwrite:
+            return {"written": False, "exists": True, "name": name, "path": folder + name,
+                    "existing": exist}
+        deleted = False
+        if exist is not None:
+            fam.prog_delete(self, folder, exist["name"])
+            deleted = True
+        end_rc = fam.download(self, folder, data, float(a.get("limit", PROG_WRITE_LIMIT)), emit, name)
+        return {"written": True, "exists": exist is not None, "deleted": deleted, "name": name,
+                "path": folder + name, "size": len(data), "end_rc": end_rc,
+                "sha256": hashlib.sha256(data).hexdigest()}
+
     def cmd_param_info(self, a, emit):
         fam = self.need_family()
         count = max(1, min(int(a.get("count", 100)), 100))
@@ -847,6 +940,7 @@ class Helper:
         "connect": cmd_connect, "disconnect": cmd_disconnect, "identify": cmd_identify,
         "status": cmd_status, "alarms": cmd_alarms, "prog_info": cmd_prog_info,
         "prog_list": cmd_prog_list, "prog_read": cmd_prog_read,
+        "prog_write": cmd_prog_write,
         "param_info": cmd_param_info, "param_read": cmd_param_read,
         "param_read_many": cmd_param_read_many, "param_write": cmd_param_write,
         "param_dump": cmd_param_dump,

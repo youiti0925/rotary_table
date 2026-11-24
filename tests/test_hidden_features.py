@@ -59,7 +59,7 @@ class TestFtpHidden(unittest.TestCase):
 
     def test_send_method_has_no_ftp_by_default(self):
         methods, cur = self._send_methods(self._settings())
-        self.assertEqual(methods, ["folder"])
+        self.assertEqual(methods, ["folder", "focas"])
         self.assertEqual(cur, "folder")
 
     def test_saved_ftp_falls_back_to_folder_when_hidden(self):
@@ -69,7 +69,7 @@ class TestFtpHidden(unittest.TestCase):
     def test_send_method_shows_ftp_when_enabled(self):
         methods, cur = self._send_methods(
             self._settings(show_ftp=True, nc_send_method="ftp"))
-        self.assertEqual(methods, ["folder", "ftp"])
+        self.assertEqual(methods, ["folder", "ftp", "focas"])
         self.assertEqual(cur, "ftp")
 
     def test_help_text_drops_ftp_when_hidden(self):

@@ -256,6 +256,24 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         self.assertEqual(self._check(
             lambda s: G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None)), [])
 
+    def test_focas_program_send_dialog(self):
+        import nd287_app.gui as G
+        from nd287_app import fanuc
+
+        def make(s):
+            nc = fanuc.nc_bytes("%\nO0555(TEST)\nM30\n%\n", fanuc.EOB_PUNCH)
+            d = G.FocasProgramSendDialog(None, s, nc, fanuc.EOB_PUNCH)
+            d.lbl_estop.setText("今は書けません。\n" + "\n".join(["運転中または停止中です（運転: 運転中・生の値 3）"] * 4))
+            d.lbl_estop.setVisible(True)
+            d.lbl_backup.setText("点検の指摘があります: " + "x" * 200)
+            d.txt_result.setPlainText("結果の行\n" * 10)
+            return d
+        self.assertEqual(self._check(make), [])
+
+    def test_program_dialog_with_focas_send(self):
+        import nd287_app.gui as G
+        self.assertEqual(self._check(lambda s: G.ProgramDialog(None, s, {})), [])
+
     def test_focas_write_dialog_with_a_long_list_and_long_texts(self):
         """一覧が長くても・理由の文が長くても、最小サイズが画面を超えない。"""
         import nd287_app.gui as G

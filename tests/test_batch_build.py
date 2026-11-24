@@ -302,6 +302,18 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         self.assertEqual(self._check(
             lambda s: G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None)), [])
 
+    def test_focas_write_dialog_with_servo_entry_visible(self):
+        import nd287_app.gui as G
+
+        def make(s):
+            d = G.FocasWriteDialog(None, s, lambda raw, zero_scope="product": None,
+                                   rule_ctx={"motor": "αiF2/5000-D", "servo_req": ["90J0>=28.0"]})
+            d.servo_box.setVisible(True)
+            d.lbl_semi_band.setText("セミクロに変換して書きます" * 4)
+            d.lbl_semi_band.setVisible(True)
+            return d
+        self.assertEqual(self._check(make), [])
+
     def test_controller_edit_and_rules_dialogs(self):
         import nd287_app.gui as G
         from nd287_app import controllers

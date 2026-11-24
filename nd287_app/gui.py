@@ -3092,6 +3092,21 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if semi_note:
             self.lbl_semi_band.setText(str(semi_note))
         v.addWidget(self.lbl_semi_band)
+        # サーボソフトの版数（末尾 -D など、必要な版数がある製品のとき）。機械から読めるまでは人が入れる
+        self.servo_box = QtWidgets.QWidget()
+        sbl = QtWidgets.QVBoxLayout(self.servo_box)
+        sbl.setContentsMargins(0, 0, 0, 0)
+        lbl_sv = QtWidgets.QLabel(
+            "このモーターは、サーボソフトの版数が足りないと動きません。機械の SYSTEM 画面（ソフトウェア構成のページ）の"
+            "「SERVO」の行（例 90J0 28.0）を、下に入れてください。入れた版数が足りなければ、書き込みを止めます。")
+        lbl_sv.setWordWrap(True)
+        self.e_servo_manual = QtWidgets.QLineEdit()
+        self.e_servo_manual.setPlaceholderText("例 90J0 28.0（入れないときは、版数の点検はしません）")
+        self.e_servo_manual.textChanged.connect(lambda *_: self._refresh_enabled())
+        sbl.addWidget(lbl_sv)
+        sbl.addWidget(self.e_servo_manual)
+        self.servo_box.setVisible(False)
+        v.addWidget(self.servo_box)
 
         self.lbl_target = QtWidgets.QLabel("書き込む相手: まだ機械につながっていません")
         self.lbl_target.setWordWrap(True)
@@ -4000,6 +4015,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     # --- 書ける？ ----------------------------------------------------------------------
 
+    def _servo_text(self):
+        """サーボソフトの版数。機械から読めたもの（ident['servo']）を先に、無ければ人が入れたもの。"""
+        got = str((self._ident or {}).get("servo") or "")
+        return got or (self.e_servo_manual.text().strip() if hasattr(self, "e_servo_manual") else "")
+
     def _writable(self):
         """戻り値 (書けるか, 理由の並び)。確認ボタンの条件。理由は全部並べる。"""
         reasons = []
@@ -4016,8 +4036,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if not self._wplan["items"]:
             reasons.append("書くものがありません（機械はすでに同じ値です）")
         for req in (self._rule_ctx or {}).get("servo_req", []):
-            # 機械から読んだサーボソフトの版数が、このモーターに必要な版数より古ければ書かない（読めていないときは止めない）
-            ok_sv, msg_sv = servo_req.check((self._ident or {}).get("servo", ""), req)
+            # サーボソフトの版数（機械から読めたもの、無ければ人が入れたもの）が、このモーターに必要な版数より古ければ書かない
+            # （読めていない・入れていないときは止めない）
+            ok_sv, msg_sv = servo_req.check(self._servo_text(), req)
             if ok_sv is False:
                 reasons.append(msg_sv)
         info = self._backup[1] if self._backup else None
@@ -4136,6 +4157,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.chk_zero_all.setEnabled(idle and not self._rewrite_blocked)
         self.chk_keep_motor.setEnabled(idle and not self._rewrite_blocked)
         self._update_first_unit(idle)
+        self.servo_box.setVisible(bool((self._rule_ctx or {}).get("servo_req")) and c
+                                  and not (self._ident or {}).get("servo"))
         ok, reasons = self._writable()
         n = len(self._wplan["items"]) if self._wplan else 0
         self.b_write.setText(f"この {n} 件を機械に書く")
@@ -4264,7 +4287,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 from . import rules
                 rules.append_result(rules.log_path(app_dir()),
                                     dict(self._rule_ctx, unit=self.cmb_unit.currentData() or "",
-                                         servo=(self._ident or {}).get("servo", ""),
+                                         servo=self._servo_text(),
                                          seiban=self.seiban), res)
         self._show_items(res)
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(res)))

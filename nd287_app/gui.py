@@ -6429,7 +6429,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "つなぐ → 全部の控え（バックアップ）→ 機械の今の値と違う所の一覧 → 確認して書く → 読み戻し の順。\n"
             "上の ①②③ は「作成 → 出力先」と同じ（出力先は使いません）")
         self.b_machine.clicked.connect(self.write_to_machine)
-        b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
+        b_close = self.b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
         self.b_back = QtWidgets.QPushButton("← 戻る")
         self.b_back.clicked.connect(self._on_back)
         self.b_file = QtWidgets.QPushButton("ファイルを作る…")
@@ -14627,10 +14627,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_model_entered()
         self._flow_saved = False
 
-    def easy_open_wizard(self):
-        """かんたん作成を1回開く。戻り値 {"handoff": 機械に入れ終えた, "cycled": 電源の入れ直しが要った}。"""
-        dlg = ParamWizardDialog(self, self.settings, model=self.e_model.text().strip(), probe_machine=True)
-        dlg.exec()
+    def easy_make_wizard(self, parent):
+        """かんたん作成を作る（はじめてモードが、自分の画面の中に入れる）。"""
+        return ParamWizardDialog(parent, self.settings, model=self.e_model.text().strip(), probe_machine=True)
+
+    def easy_wizard_result(self, dlg):
+        """中のかんたん作成が終わった。測定の画面に型式と測り方を入れて、結果を返す。
+        {"handoff": 機械に入れ終えた, "cycled": 電源の入れ直しが要った}"""
         h = getattr(dlg, "handoff", None)
         self._apply_wizard_handoff(h)
         return {"handoff": bool(h and h.get("steps")), "cycled": bool(getattr(dlg, "power_cycled", False))}

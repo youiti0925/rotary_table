@@ -126,6 +126,23 @@ class TestArt(unittest.TestCase):
             self.assertIn(m, easy_art.MODES)
 
 
+class FakeWizard:
+    """かんたん作成の代わり（中身は別の試験）。"""
+    def __new__(cls, parent):
+        from PySide6 import QtWidgets
+
+        class W(QtWidgets.QDialog):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.handoff = None
+                self.power_cycled = False
+                self._writer = None
+                self.b_mode = QtWidgets.QPushButton("全部表示", self)
+                self.b_measure = QtWidgets.QPushButton("測定へ進む ▶", self)
+                self.b_measure.clicked.connect(self.accept)
+        return W(parent)
+
+
 class FakeHost:
     """測定の画面の代わり。機械は偽物。"""
 
@@ -159,9 +176,13 @@ class FakeHost:
     def easy_next_mode(self, mode):
         self.calls.append(("mode", mode))
 
-    def easy_open_wizard(self):
+    def easy_make_wizard(self, parent):
         self.calls.append("wizard")
-        return {"handoff": True, "cycled": False}
+        self.wiz = FakeWizard(parent)
+        return self.wiz
+
+    def easy_wizard_result(self, w):
+        return {"handoff": bool(w.handoff), "cycled": w.power_cycled}
 
     def on_model_entered(self):
         pass
@@ -208,12 +229,16 @@ class TestDialog(unittest.TestCase):
         self.assertEqual(self.sid(dlg), "intro")
         dlg._next()                                   # 用意するもの → （電源・非常停止・MDI は済んでいる）→ 機械に入れる
         self.assertEqual(self.sid(dlg), "machine_in")
-        self.assertFalse(dlg.b_next.isEnabled())      # 機械に入れるまで先へ進めない
-        dlg._run_wizard()
-        self.assertEqual(poller.log, ["pause", "resume"])     # 窓が機械に書く間、読む係は止まる
-        self.assertTrue(dlg.b_next.isEnabled())
-        dlg._next()
-        self.assertEqual(self.sid(dlg), "fields")
+        self.assertIsNotNone(dlg._wiz)                # かんたん作成は、この画面の中に入っている
+        self.assertFalse(dlg.embed.isHidden())
+        self.assertTrue(dlg.b_next.isHidden())        # 外側の「次へ」は出ない（中が案内する）
+        self.assertEqual(poller.log, ["pause"])       # 中が機械に書く間、読む係は止まる
+        host.wiz.handoff = {"steps": [{"mode": "回転分割", "programs": [100]}]}
+        host.wiz.accept()                              # 中の「測定へ進む」
+        self.app.processEvents()
+        self.assertEqual(poller.log, ["pause", "resume"])
+        self.assertIsNone(dlg._wiz)
+        self.assertEqual(self.sid(dlg), "fields")      # 自動で次へ進む
         self.assertFalse(dlg.b_next.isEnabled())
         host.e_machine.setText("266704")
         host.e_operator.setText("ゆう")
@@ -298,11 +323,12 @@ class TestDialog(unittest.TestCase):
         """見えるボタンは、もどる・次へと、その手順で要るものだけ。"""
         dlg, host, poller = self.make(S(aut=0))
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
-                             if not b.isHidden())
+                             if not b.isHidden() and not dlg.embed.isAncestorOf(b))
         self.assertEqual(len(vis()), 2)
         dlg._next()
         self.app.processEvents()
-        self.assertEqual(len(vis()), 4)               # もどる・次へ・機械に入れる・飛ばす
+        self.assertEqual(len(vis()), 2)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
+        self.assertTrue(dlg.b_next.isHidden())
         dlg.close()
 
     def test_fits_small_screens(self):

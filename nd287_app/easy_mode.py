@@ -5,7 +5,7 @@
 文字ばかりにせず、イラスト多め。今の画面のデザインにとらわれない。
 
 中身は新しく作らない。今ある機能を呼ぶだけ:
-  機械に入れる … かんたん作成（ParamWizardDialog）を1回開く（host.easy_open_wizard）
+  機械に入れる … かんたん作成（ParamWizardDialog）を、この画面の中に入れる（host.easy_make_wizard）
   取込開始・保存 … 測定の画面と同じ関数（host.start / host.save）
   機械の様子   … easy_machine.MachinePoller（読むだけ。非常停止・操作モード・運転中・アラーム）
 手順の決め方は easy_flow（Qt なし）。絵は easy_art（SVG。Qt なし）。
@@ -22,9 +22,8 @@ FALLBACK_SEC = 25        # 機械から「できた」を読めないまま、�
 
 QSS = """
 QDialog#easy { background:#EEF1F4; }
-QLabel { color:#17212B; }
-QLabel#title { font-size:26px; font-weight:900; }
-QLabel#line { font-size:17px; }
+QLabel#title { font-size:26px; font-weight:900; color:#17212B; }
+QLabel#line { font-size:17px; color:#17212B; }
 QLabel#who { font-size:13px; font-weight:bold; border-radius:11px; padding:3px 14px; }
 QLabel#watch { font-size:16px; font-weight:bold; border-radius:10px; padding:10px 14px; }
 QFrame#art { background:#F4F6F8; border-radius:14px; }
@@ -37,10 +36,10 @@ QPushButton#back:disabled { color:#B5BEC8; }
 QPushButton#act { background:#F0A400; color:#2A1E00; font-size:19px; font-weight:bold; border-radius:12px; padding:14px 22px; border:0; }
 QPushButton#act:disabled { background:#EBD9A8; }
 QPushButton#sub { background:transparent; color:#5A6876; font-size:13px; text-decoration:underline; border:0; padding:4px; text-align:left; }
-QLineEdit { font-size:21px; font-weight:bold; padding:7px 12px; border:2px solid #D5DBE1; border-radius:10px; background:#FFFFFF; color:#17212B; }
-QLineEdit:focus { border-color:#1560D4; }
-QProgressBar { border:0; border-radius:7px; background:#DCE2E8; height:14px; text-align:center; }
-QProgressBar::chunk { background:#1560D4; border-radius:7px; }
+QLineEdit#fld { font-size:21px; font-weight:bold; padding:7px 12px; border:2px solid #D5DBE1; border-radius:10px; background:#FFFFFF; color:#17212B; }
+QLineEdit#fld:focus { border-color:#1560D4; }
+QProgressBar#pbar { border:0; border-radius:7px; background:#DCE2E8; height:14px; text-align:center; }
+QProgressBar#pbar::chunk { background:#1560D4; border-radius:7px; }
 """
 
 
@@ -133,6 +132,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._shown_key = None
         self._notice = ""
         self._pending_next = False
+        self._wiz = None                 # 中に入れたかんたん作成
+        self._wiz_closing = False
         self.st = easy_flow.OFFLINE
         self._build()
         self._timer = QtCore.QTimer(self)
@@ -160,7 +161,9 @@ class EasyModeDialog(QtWidgets.QDialog):
         al.addWidget(self.v_map, 11)
         al.addWidget(self.v_main, 14)
         mid.addWidget(self.art, 6)
-        right = QtWidgets.QVBoxLayout()
+        self.right_w = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(self.right_w)
+        right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
         self.lbl_who = QtWidgets.QLabel("")
         self.lbl_who.setObjectName("who")
@@ -187,13 +190,23 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_manual.clicked.connect(self._manual_done)
         right.addWidget(self.b_manual)
         right.addStretch(1)
-        mid.addLayout(right, 5)
+        mid.addWidget(self.right_w, 5)
+        self.embed = QtWidgets.QWidget()           # 「機械に入れる」: かんたん作成を、この画面の中に入れる
+        QtWidgets.QVBoxLayout(self.embed).setContentsMargins(0, 0, 0, 0)
+        self.embed.setVisible(False)
+        mid.addWidget(self.embed, 1)
         root.addLayout(mid, 1)
         foot = QtWidgets.QHBoxLayout()
         self.b_back = QtWidgets.QPushButton("◀ もどる")
         self.b_back.setObjectName("back")
         self.b_back.clicked.connect(self._back)
         foot.addWidget(self.b_back)
+        self.b_skip = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
+        self.b_skip.setObjectName("sub")
+        self.b_skip.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_skip.clicked.connect(self._skip_machine)
+        self.b_skip.setVisible(False)
+        foot.addWidget(self.b_skip)
         self.lbl_count = QtWidgets.QLabel("")
         self.lbl_count.setStyleSheet("color:#5A6876; font-size:13px;")
         foot.addWidget(self.lbl_count)
@@ -265,6 +278,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._enter(j)
 
     def _back(self):
+        if self._wiz is not None and not self._close_wizard():
+            return
         if self.history:
             self._enter(self.history.pop())
 
@@ -305,6 +320,9 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _render(self):
         """手順が変わったとき: 文・ボタン・入力欄を作り直す。"""
         s = STEPS[self.i]
+        if s["id"] != "machine_in" and self._wiz is not None and not self._close_wizard():
+            self.i = INDEX["machine_in"]            # 書いている最中にやめない、と答えたとき
+            s = STEPS[self.i]
         c = self._all_ctx()
         self.lbl_who.setText(easy_flow.WHO.get("auto" if s["kind"] == "run" else s["kind"], "PC で")
                              if s["kind"] != "info" else "")
@@ -336,13 +354,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_lines.setText("\n".join(lines))
         self.lbl_lines.setVisible(bool(lines))
         if sid == "machine_in":
-            b = self._act_button("受注伝票番号から入れる…", self._run_wizard)
-            self._extra_widgets["act"] = b
-            sk = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
-            sk.setObjectName("sub")
-            sk.setCursor(QtCore.Qt.PointingHandCursor)
-            sk.clicked.connect(self._skip_machine)
-            self.extra.addWidget(sk)
+            self._open_wizard_inside()
         elif sid == "fields":
             self._build_fields()
         elif sid == "result":
@@ -356,6 +368,7 @@ class EasyModeDialog(QtWidgets.QDialog):
                 self.extra.addWidget(r)
         elif sid == "measuring":
             pg = QtWidgets.QProgressBar()
+            pg.setObjectName("pbar")
             pg.setTextVisible(False)
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
@@ -381,6 +394,7 @@ class EasyModeDialog(QtWidgets.QDialog):
             lb.setStyleSheet("color:#5A6876; font-size:13px;")
             self.extra.addWidget(lb)
             e = QtWidgets.QLineEdit(src.text())
+            e.setObjectName("fld")
             e.setMaximumWidth(340)
             e.textChanged.connect(lambda t, src=src: src.setText(t))
             if src is h.e_model:
@@ -400,6 +414,17 @@ class EasyModeDialog(QtWidgets.QDialog):
         sid = s["id"]
         c = self._all_ctx()
         st = self.st
+        inside = sid == "machine_in" and self._wiz is not None
+        self.right_w.setVisible(not inside)
+        self.art.setVisible(not inside)
+        self.embed.setVisible(inside)
+        self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff"))
+        self.b_next.setVisible(not inside)
+        self.lbl_count.setVisible(not inside)
+        if inside:                                   # 中のかんたん作成が案内する。ここは章の棒ともどるだけ
+            self.b_back.setEnabled(bool(self.history))
+            self.bar.set_progress(easy_flow.chapter_progress(self.i), s["ch"])
+            return
         done = easy_flow.done_now(sid, st, c, self.track) or (self.manual and s["kind"] == "machine")
         # 手順の絵
         ph = (self._phase % 2) * 0.9
@@ -549,24 +574,73 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._enter(j)
 
     # ------------------------------------------------------------ 押すもの
-    def _run_wizard(self):
-        """かんたん作成を1回開く。開いている間は、機械を読む係を止める（同じ機械に2本つながない）。"""
+    def _skip_machine(self):
+        if self._wiz is not None and not self._close_wizard():
+            return
+        self.ctx["skip_machine"] = True
+        self._render()
+
+    def _open_wizard_inside(self):
+        """かんたん作成を、この画面の中に入れる（別の窓を開かない）。開いている間は、機械を読む係を止める。"""
+        c = self._all_ctx()
+        if self._wiz is not None or c.get("handoff") or c.get("skip_machine"):
+            return
+        w = self.host.easy_make_wizard(self.embed)
+        w.setWindowFlags(QtCore.Qt.Widget)
+        for name in ("b_mode", "b_close"):               # 「全部表示」への切り替えと「閉じる」は出さない（初心者用。進むのは「測定へ進む」）
+            try:
+                getattr(w, name).hide()
+            except Exception:
+                pass
+        self.embed.layout().addWidget(w)
+        w.finished.connect(self._wizard_finished)
+        w.show()
+        self._wiz = w
         if self.poller is not None:
             self.poller.pause()
-        try:
-            res = self.host.easy_open_wizard() or {}
-        finally:
-            if self.poller is not None:
-                self.poller.resume()
+
+    def _wizard_finished(self, _r):
+        """中のかんたん作成の「測定へ進む」が押された（accept）。結果を受け取って、次へ進む。"""
+        w = self._wiz
+        if w is None or self._wiz_closing:
+            return
+        res = self.host.easy_wizard_result(w) or {}
+        self._drop_wizard()
         if res.get("handoff"):
             self.ctx["handoff"] = True
         if res.get("cycled"):
             self.ctx["cycled_in_wizard"] = True
-        self._refresh()
+        if self.ctx.get("handoff"):
+            QtCore.QTimer.singleShot(0, self._next)
+        else:
+            self._render()
 
-    def _skip_machine(self):
-        self.ctx["skip_machine"] = True
-        self._refresh()
+    def _drop_wizard(self):
+        w, self._wiz = self._wiz, None
+        if self.poller is not None:
+            self.poller.resume()
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+
+    def _close_wizard(self):
+        """中のかんたん作成を片づける。書いている最中は、今までと同じ確認が出る。片づけたら True。"""
+        w = self._wiz
+        if w is None:
+            return True
+        try:
+            if getattr(w, "_writer", None) is not None and not w._close_writer():
+                return False
+        except Exception:
+            pass
+        self._wiz_closing = True
+        try:
+            w.reject()
+        except Exception:
+            pass
+        self._wiz_closing = False
+        self._drop_wizard()
+        return True
 
     def _save(self):
         try:
@@ -577,6 +651,8 @@ class EasyModeDialog(QtWidgets.QDialog):
 
     # ------------------------------------------------------------ 閉じる
     def done(self, r):
+        if self._wiz is not None:
+            self._close_wizard()
         if self.poller is not None:
             self.poller.stop()
         self._timer.stop()

@@ -123,6 +123,7 @@ from . import wizard_steps as W
 from . import wizard_programs as WP
 from . import controllers
 from . import wizard_probe
+from . import semi_convert
 from . import seiban_flow
 from . import batch_build
 from . import param_origin
@@ -876,11 +877,11 @@ def _label_axis_name(label):
     return nc_param.axis_name(n) if n else str(label or "")
 
 
-def out_param_name(settings, prefix, seiban, ext=None, model="", axes=()):
+def out_param_name(settings, prefix, seiban, ext=None, model="", axes=(), semi=False):
     """出力ファイル名。設定 param_name_detail が真なら 型式・軸・傾斜/回転 も付ける。"""
     return param_build.filename(
         prefix, seiban, ext if ext is not None else param_out_ext(settings),
-        model=model, axes=axes,
+        model=model, axes=axes, semi=semi,
         detail=bool((settings or {}).get("param_name_detail", True)))
 
 
@@ -3013,7 +3014,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
                  basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id="",
-                 expect_unit="", auto_backup=False):
+                 expect_unit="", auto_backup=False, semi_note=""):
         super().__init__(parent)
         self.settings = settings
         # auto: 入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う（FocasDialog と同じ）。
@@ -3076,6 +3077,15 @@ class FocasWriteDialog(QtWidgets.QDialog):
         lead.setWordWrap(True)
         lead.setTextFormat(QtCore.Qt.RichText)
         v.addWidget(lead)
+        self.lbl_semi_band = QtWidgets.QLabel("")          # セミクロに変換した製品を書くときの帯（確認ボタンは増やさない）
+        self.lbl_semi_band.setWordWrap(True)
+        self.lbl_semi_band.setTextFormat(QtCore.Qt.PlainText)
+        self.lbl_semi_band.setStyleSheet(
+            "background:#fff7ed; color:#9a3412; border:1px solid #fdba74; padding:6px; font-weight:bold;")
+        self.lbl_semi_band.setVisible(bool(semi_note))
+        if semi_note:
+            self.lbl_semi_band.setText(str(semi_note))
+        v.addWidget(self.lbl_semi_band)
 
         self.lbl_target = QtWidgets.QLabel("書き込む相手: まだ機械につながっていません")
         self.lbl_target.setWordWrap(True)
@@ -5899,9 +5909,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
     むずかしい設定（フォルダ・CSV・手動指定）は「詳細設定…」の従来画面で行う。
     """
 
+    _semi_ref_done = QtCore.Signal(int, object)      # 同じ型式のセミクロ実物の探索が終わった（世代, 結果）
+
     def __init__(self, parent, settings, *, model="", probe_machine=False):
         super().__init__(parent)
         self.settings = settings
+        self._semi_gen = 0                          # セミクロ実物の探索の世代（古い結果は捨てる）
+        self._semi_refs = {}                        # {ファイルの番号: 実物の探索結果}
+        self._semi_info = {}
+        self._semi_key = None
+        self._semi_pending = False
         self._probe_machine = bool(probe_machine)   # 開いたとき、つながる機械を読むだけで見る（本番画面からだけ True）
         self._probe_client_factory = None           # 試験用: 偽クライアントを返す関数
         self._probe_port_open = None                # 試験用: 声かけ（ポート確認）の差し替え
@@ -6151,6 +6168,32 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_motor_info.setWordWrap(True)
         self.lbl_motor_info.setStyleSheet("color:#1d4ed8; font-weight:bold;")
         self.fm.addRow("", self.lbl_motor_info)
+        # フルクロの製品のときだけ出す: 位置を読む検出器（製品どおり／セミクロにする）。既定は毎回「製品どおり」
+        self.cmb_semi = QtWidgets.QComboBox()
+        self.cmb_semi.addItem("製品どおり（フルクロ＝テーブル側の検出器で読む）", "")
+        self.cmb_semi.addItem("セミクロにする（モーターの中の検出器だけで読む。社内用）", "semi")
+        self.cmb_semi.setToolTip(
+            "製品がフルクロ（テーブル側に付けた別の検出器で位置を読む）のときだけ出ます。\n"
+            "『セミクロにする』を選ぶと、モーターの中の検出器だけで読む値に自動で変えます。\n"
+            "変わる番号は下の一覧に出ます。計算で出せない製品は選べません（理由が出ます）。")
+        self.cmb_semi.currentIndexChanged.connect(self._on_semi_changed)
+        self.fm.addRow("位置を読む検出器", self.cmb_semi)
+        self.lbl_semi = QtWidgets.QLabel("")
+        self.lbl_semi.setWordWrap(True)
+        self.lbl_semi.setTextFormat(QtCore.Qt.PlainText)
+        self.fm.addRow("", self.lbl_semi)
+        self.txt_semi = QtWidgets.QPlainTextEdit()
+        self.txt_semi.setReadOnly(True)
+        self.txt_semi.setMaximumHeight(110)
+        self.txt_semi.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.fm.addRow("", self.txt_semi)
+        self.lbl_semi_ref = QtWidgets.QLabel("")
+        self.lbl_semi_ref.setWordWrap(True)
+        self.lbl_semi_ref.setTextFormat(QtCore.Qt.PlainText)
+        self.lbl_semi_ref.setStyleSheet("color:#1d4ed8;")
+        self.fm.addRow("", self.lbl_semi_ref)
+        self._semi_ref_done.connect(self._on_semi_ref_done)
+        self._set_semi_visible(False)
         op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
         self.cmb_origin = QtWidgets.QComboBox()
         self.cmb_origin.addItem("変更しない", "")
@@ -6278,6 +6321,201 @@ class ParamWizardDialog(QtWidgets.QDialog):
         lab = self.fm.labelForField(self.cmb_axis_pick)
         if lab is not None:
             lab.setVisible(bool(on))
+
+    # ----- フルクロ → セミクロ（semi_convert。変換は _gather の中で prepare に渡す前に行う）-----
+    def _set_semi_visible(self, on, detail=False):
+        for wd in (self.cmb_semi, self.lbl_semi):
+            wd.setVisible(bool(on))
+        lab = self.fm.labelForField(self.cmb_semi)
+        if lab is not None:
+            lab.setVisible(bool(on))
+        self.txt_semi.setVisible(bool(on and detail))
+        self.lbl_semi_ref.setVisible(bool(on and detail and self.lbl_semi_ref.text()))
+
+    def _semi_product_values(self, f, raw):
+        """変換の入力にする製品の値（作成と同じ取り方）。読めなければ None。"""
+        if f.get("source") in ("db", "custom"):
+            vals = dict(f.get("values") or {})
+            if not vals and f.get("source") == "custom":
+                sh = xls_param.sheet_values(f.get("path", ""), f.get("sheet_name", ""))
+                vals = dict(sh.get("values", {})) if sh else {}
+            return vals
+        try:
+            ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
+        except Exception:
+            return None
+        return param_build.product_change_values(raw, ptext)
+
+    def _semi_convert_file(self, f, raw, axnum, vals=None):
+        """1つの製品ファイルをセミクロにした結果（semi_convert.convert）。設定の closed_loop_* を使う。"""
+        meta = f.get("meta") or {}
+        if vals is None:
+            vals = self._semi_product_values(f, raw)
+        if vals is None:
+            return None
+        return semi_convert.convert(
+            vals, raw=raw or "", axis=axnum, gear_header=meta.get("gear", ""),
+            gear_db=meta.get("gear_db", ""),
+            loop_number=self.settings.get("closed_loop_number", "1815"),
+            loop_bit=int(self.settings.get("closed_loop_bit", 1)),
+            full_when=int(self.settings.get("closed_loop_full", 1)))
+
+    def _semi_basic(self):
+        """表示用に使える BASIC と軸（まだ決まっていなければ ""・None）。"""
+        raw, ax = "", None
+        mp = self.e_basic.text().strip()
+        if mp and Path(mp).is_file():
+            try:
+                raw = param_build.read_master(mp)
+            except Exception:
+                raw = ""
+        idx = self.cmb_ctrl.currentData()
+        if raw and idx is not None and 0 <= idx < len(self._cand):
+            asg = self._cand[idx][1]
+            if asg:
+                ax = seiban_flow_axis(asg[0])
+        if raw and not ax:
+            ax = 1
+        return raw, ax
+
+    def _semi_results(self):
+        """選んだ製品のうち、フルクロのものの変換結果 [(ファイル, 結果)]。"""
+        raw, ax = self._semi_basic()
+        out = []
+        for f in self._selected_files():
+            if f["meta"].get("system", "FANUC") != "FANUC":
+                continue
+            r = self._semi_convert_file(f, raw, ax)
+            if r is not None and r["mode"] == "フル":
+                out.append((f, r))
+        return out
+
+    def _semi_stop_text(self):
+        """『セミクロにする』を選んだのに変換できないときの理由（段①の「足りないもの」へ出す）。"""
+        if not self._semi_choice():
+            return ""
+        for _f, r in (self._semi_info or {}).get("results") or []:
+            if r["stop"]:
+                return r["stop"][0]
+        return ""
+
+    def _semi_choice(self):
+        return self.cmb_semi.currentData() == "semi"
+
+    def _refresh_semi(self):
+        """段①の「位置を読む検出器」。フルクロの製品があるときだけ出す。既定は『製品どおり』。"""
+        if not hasattr(self, "cmb_semi"):
+            return
+        res = self._semi_results() if self._selected_files() else []
+        key = tuple(sorted((f.get("path") or f.get("name") or "", f["kind"]) for f, _r in res))
+        if key != self._semi_key:                           # 選ぶ製品が変わったら、毎回「製品どおり」へ戻す
+            self._semi_key = key
+            self.cmb_semi.blockSignals(True)
+            self.cmb_semi.setCurrentIndex(0)
+            self.cmb_semi.blockSignals(False)
+            self._semi_refs = {}
+            self._semi_gen += 1
+            self._semi_pending = False
+            self.lbl_semi_ref.setText("")
+        self._semi_info = {"results": res}
+        if not res:
+            self._set_semi_visible(False)
+            self.lbl_semi.setText("")
+            return
+        stops = [(f, r) for f, r in res if r["stop"]]
+        item = self.cmb_semi.model().item(1)
+        if item is not None:
+            item.setEnabled(not stops)                      # 変換できない製品は選べない
+        if stops and self._semi_choice():
+            self.cmb_semi.blockSignals(True)
+            self.cmb_semi.setCurrentIndex(0)
+            self.cmb_semi.blockSignals(False)
+        self._set_semi_visible(True, self._semi_choice())
+        if stops:
+            self.lbl_semi.setText("セミクロにはできません: " + " ／ ".join(
+                f"{f['kind']}：{r['stop'][0]}" for f, r in stops))
+            self.lbl_semi.setStyleSheet("color:#b45309;")
+            return
+        self.lbl_semi.setStyleSheet("color:#475569;")
+        if not self._semi_choice():
+            self.lbl_semi.setText("この製品はフルクロです。『セミクロにする』を選ぶと、変わる番号を一覧に出します。")
+            return
+        lines, basis = [], []
+        for f, r in res:
+            lines.append(f"【{f['kind']}】フルクロ → セミクロ で変わるところ（{len(r['changes'])}つ変える・"
+                         f"{len(r['skipped'])}つ書かない）")
+            for c in r["changes"]:
+                lines.append(f"  {c['num']} {c['name']}　{c['full'] or '—'} → {c['semi']}　（{c['note']}）")
+            for sk in r["skipped"]:
+                lines.append(f"  {sk['num']} {sk['name']}　{sk['full']} → 書かない（{sk['note']}）")
+            basis.append(r["basis"])
+        self.txt_semi.setPlainText("\n".join(lines))
+        self.lbl_semi.setText("根拠: " + " ／ ".join(basis)
+                              + "\n※ 2000 の #4 の扱いは実データで一番多い傾向に合わせたものです（要確認）。")
+        self._start_semi_ref(res)
+        self._set_semi_visible(True, True)
+
+    def _start_semi_ref(self, res):
+        """同じ型式のセミクロ実物を、製品の場所から探す（別スレッド。読むだけ。選んだとき1回だけ）。"""
+        pd = self._abs_dir("param_product_dir")
+        if not pd or not Path(pd).is_dir() or self._semi_refs:
+            self._show_semi_ref()
+            return
+        if self._semi_pending:                              # 探している最中は、重ねて始めない
+            return
+        self._semi_pending = True
+        self._semi_gen += 1
+        gen = self._semi_gen
+        self.lbl_semi_ref.setText("同じ型式のセミクロ実物を探しています…")
+        loop = (self.settings.get("closed_loop_number", "1815"), int(self.settings.get("closed_loop_bit", 1)),
+                int(self.settings.get("closed_loop_full", 1)))
+        jobs = [(i, f["kind"], f.get("path", ""), dict(f.get("meta") or {})) for i, (f, _r) in enumerate(res)]
+
+        def work():
+            found = {}
+            for i, kind, path, meta in jobs:
+                try:
+                    found[i] = semi_convert.find_semi_reference(
+                        pd, model=meta.get("model", ""), gear=meta.get("gear") or meta.get("gear_db", ""),
+                        motor_no=meta.get("motor_no", ""), kind=kind, exclude_path=path,
+                        loop_number=loop[0], loop_bit=loop[1], full_when=loop[2],
+                        cancel=lambda: gen != self._semi_gen)
+                except Exception:
+                    found[i] = None
+            try:
+                self._semi_ref_done.emit(gen, found)
+            except RuntimeError:
+                pass                                        # 画面が先に閉じた
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_semi_ref_done(self, gen, found):
+        if gen != self._semi_gen:
+            return
+        self._semi_pending = False
+        self._semi_refs = dict(found or {}) or {-1: None}
+        self._show_semi_ref()
+
+    def _show_semi_ref(self):
+        """実物が見つかったときだけ、計算した値と実物を番号ごとに比べて出す（参考。書く値は計算のまま）。"""
+        res = (self._semi_info or {}).get("results") or []
+        lines = []
+        for i, (f, r) in enumerate(res):
+            hit = self._semi_refs.get(i)
+            if not hit:
+                continue
+            c = semi_convert.compare_reference(r, hit["values"])
+            line = (f"同じ型式のセミクロ実物があります: {hit['name']}（参考）。"
+                    f"計算した値と {c['matched']}/{c['total']} 番号が一致")
+            if c["mismatch"]:
+                line += "。違う番号: " + "、".join(f"{n}（計算 {m} ／ 実物 {a}）" for n, m, a in c["mismatch"])
+            lines.append(f"{f['kind']}：{line}")
+        self.lbl_semi_ref.setText("\n".join(lines))
+        self.lbl_semi_ref.setVisible(bool(lines) and self._semi_choice())
+
+    def _on_semi_changed(self, *_):
+        self._refresh_semi()
+        self._apply_mode()
 
     def _pick_axis_motor(self, _i):
         mid = self.cmb_axis_pick.currentData()
@@ -6753,7 +6991,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             src = "対応表" if cap else ""
         meta = {"model": rec.get("model", ""), "kind": rec.get("kind", "") or "回転",
                 "motor": motor, "system": "FANUC", "capacity": cap, "capacity_src": src,
-                "voltage": seiban_flow.motor_voltage(motor), "dd": str(rec.get("dd", "")) == "1"}
+                "voltage": seiban_flow.motor_voltage(motor), "dd": str(rec.get("dd", "")) == "1",
+                "gear": str(rec.get("gear", "") or "")}
         nm = rec.get("name", "") + (f"：{rec['sheet']}" if rec.get("sheet") else "")
         return {"kind": meta["kind"], "name": nm, "meta": meta, "source": "custom",
                 "path": rec.get("path", ""), "sheet_name": rec.get("sheet", ""),
@@ -6775,7 +7014,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         meta = {"model": e.model, "kind": kind, "motor": motor, "system": "FANUC",
                 "capacity": cap, "capacity_src": src,
                 "voltage": seiban_flow.motor_voltage(motor),
-                "dd": xls_param.is_dd(e.values(), motor=motor, gear=e.gear)}
+                "dd": xls_param.is_dd(e.values(), motor=motor, gear=e.gear),
+                "gear_db": str(e.gear or ""), "motor_no": str(e.motor_no or "")}
         tail = "　".join(b for b in (e.controller, e.axis, e.seiban, e.date) if b)
         nm = "DB" + (f"：{tail}" if tail else f"：{e.model}")
         return {"kind": kind, "name": nm, "meta": meta, "source": "db",
@@ -6884,6 +7124,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     # ----- ② 候補制御装置 -----
     def _update_candidates(self, *_):
+        self._update_candidates_body()
+        self._refresh_semi()
+
+    def _update_candidates_body(self):
         sel = self._selected_files()
         prev = None                                   # いま選んでいる号機（作り直しても、あれば選び直す）
         pi = self.cmb_ctrl.currentData()
@@ -7174,7 +7418,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 "チェックを外す（原点確立は『変更しない』）か、ファイルを作って入れてください。")
             return None
         # 各ファイル → 変更値（平坦）→ 割当軸番号
-        axis_values, per_meta = {}, {}
+        axis_values, per_meta, semi_used = {}, {}, []
         for f, a in zip(sel, asg):
             axnum = seiban_flow_axis(a)
             if f.get("source") == "db":
@@ -7197,6 +7441,17 @@ class ParamWizardDialog(QtWidgets.QDialog):
                     f"{f['kind']}（{f['name']}）から変更値を取り出せませんでした。"
                     "BASICと製品/特注データの形式が合っているか確認してください。")
                 return None
+            # フルクロ → セミクロ（選んだときだけ）。prepare に渡す前、仮モーターの 2020 を外す・DGPR を触るより先
+            if self._semi_choice():
+                sr = self._semi_convert_file(f, raw, axnum, vals)
+                if sr is not None and sr["mode"] == "フル":
+                    if sr["stop"]:
+                        QtWidgets.QMessageBox.warning(
+                            self, title, f"{f['kind']}（{f['name']}）はセミクロにできません:\n{sr['stop'][0]}\n\n"
+                            "『位置を読む検出器』を『製品どおり』にするか、製品データを確かめてください。")
+                        return None
+                    vals = sr["values"]
+                    semi_used.append((f, sr))
             # 作成時オプション（2000を0／原点確立 ON/OFF）を反映。旧→新はプレビューで確認
             vals = param_build.with_servo_options(
                 raw, axnum, vals,
@@ -7209,7 +7464,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             axis_values[axnum] = vals
             per_meta[axnum] = (f, a)
         return dict(sel=sel, asg=asg, ctl=ctl, master=master, out=out, seiban=seiban, raw=raw,
-                    axis_values=axis_values, per_meta=per_meta)
+                    axis_values=axis_values, per_meta=per_meta, semi=semi_used)
 
     def _machine_job(self):
         """機械へ直接書く窓に渡す (引数のタプル, キーワード引数の辞書)。作れないときは None（理由は画面に出す）。"""
@@ -7243,6 +7498,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"),
             expect_unit=str(ctl.unit), auto_backup=True,
             motor_id=(self.e_motor_id.text().strip() if motor == "temp" else ""),
+            semi_note=(f"セミクロに変換して書きます（製品 {seiban} はフルクロ。モーターの中の検出器だけで位置を読む値に変えています）"
+                       if g.get("semi") else ""),
             subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
                      f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
                      " の製品値のうち、機械の今と違う所だけを書きます。")
@@ -7284,7 +7541,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             non_fanuc=any(f["meta"].get("system", "FANUC") != "FANUC" for f in sel),
             motor=self.cmb_motor.currentData() or "", seiban=self.e_seiban.text(),
             ctrl_chosen=idx is not None and 0 <= idx < len(self._cand),
-            basic_ok=bool(self.e_basic.text().strip() and Path(self.e_basic.text().strip()).is_file()))
+            basic_ok=bool(self.e_basic.text().strip() and Path(self.e_basic.text().strip()).is_file()),
+            semi_stop=self._semi_stop_text())
 
     def _apply_mode(self):
         """表示を、いまのモード・段に合わせる（部品は作り直さない。出し入れするだけ）。"""
@@ -7356,7 +7614,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_decided.setText("決めたこと: " + (W.summary(
             seiban=self.e_seiban.text().strip(), model=self.e_model.text().strip(),
             kinds="＋".join(f["kind"] for f in sel), motor=self.cmb_motor.currentData() or "",
-            motor_id=self.e_motor_id.text().strip(), ctrl=ctl) or "（まだありません）"))
+            motor_id=self.e_motor_id.text().strip(), ctrl=ctl,
+            semi=self._semi_choice() and bool((self._semi_info or {}).get("results"))) or "（まだありません）"))
         if st["missing"] and step < 3:
             self.lbl_decided.setText(self.lbl_decided.text() + "\n▶ あと: " + st["missing"][0])
 
@@ -7787,6 +8046,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         sel, asg, ctl, master, out, seiban, raw, axis_values, per_meta = (
             g[k] for k in ("sel", "asg", "ctl", "master", "out", "seiban", "raw",
                            "axis_values", "per_meta"))
+        semi = bool(g.get("semi"))
         # 頭文字・ファイル名（T+R が選択順で並ぶ。種別不明や重複は "TR"）
         if len(sel) >= 2:
             kinds = {"傾斜": "T", "回転": "R"}
@@ -7799,7 +8059,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         name_axes = [(nc_param.axis_name(seiban_flow_axis(a)), f["kind"])
                      for f, a in zip(sel, asg)]
         fname = out_param_name(self.settings, prefix, seiban,
-                               model=self.e_model.text().strip(), axes=name_axes)
+                               model=self.e_model.text().strip(), axes=name_axes, semi=semi)
         axis_label = "＋".join(f"{nc_param.axis_name(ax)}" for ax in sorted(axis_values))
         # プレビュー（軸つき）
         rows = [(num, nc_param.axis_name(ax) if ax else "共通", old, new)
@@ -7811,7 +8071,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                  else (ax or "共通"), old, new, kind, chg)
                 for (num, ax, old, new, kind, chg) in plan["rows"]]
         sub = ("＋".join(f["kind"] for f in sel)
-               + f" → {fname}（{ctl.label()}）")
+               + f" → {fname}（{ctl.label()}）"
+               + ("\n※ フルクロの製品を、セミクロに変換して作ります（名前に SEMI。客先へ出すものではありません）" if semi else ""))
         if not ParamPreviewDialog(self, rows, subtitle=sub,
                                   out_dir=out, need=plan["need"]).exec():
             return
@@ -7842,14 +8103,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 full_when=int(self.settings.get("closed_loop_full", 1)))
             n_miss = sum(1 for (_m, a) in missing if a == axnum)
             _log_ng = _log_param_creation(
-                self.settings, model=meta.get("model", ""), kind=f["kind"], mode=mode,
+                self.settings, model=meta.get("model", ""), kind=f["kind"],
+                mode=("セミ（フルから変換）" if semi else mode),
                 motor=meta.get("motor", ""), controller=controller,
                 axis=nc_param.axis_name(axnum), seiban=seiban,
                 basic=Path(master).name, out=fname,
                 applied=len(vals) - n_miss, total=len(vals),
                 soft=self._soft_limit(),
                 zeroed="あり" if self._zero_params() else "なし")
-            if csv_path:
+            if csv_path and not semi:          # 変換した値は、製品の履歴(DB)に登録しない（製品の値と取り違えない）
                 entry = nc_param.ParamEntry(
                     model=meta.get("model", ""), kind=f["kind"], mode=mode,
                     motor=meta.get("motor", ""), motor_no=meta.get("motor_no", ""),

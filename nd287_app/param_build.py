@@ -218,7 +218,7 @@ def axis_tag(axis, kind: str = "") -> str:
 
 
 def filename(prefix: str, seiban: str, ext: str = ".DAT", *, model: str = "",
-             axes=(), detail: bool = True, sep: str = "_") -> str:
+             axes=(), detail: bool = True, sep: str = "_", semi: bool = False) -> str:
     """出力ファイル名 <頭文字><Seiban>[_型式][_軸-種別...]<拡張子>。
 
     例: filename("T", "50013078", model="RTT-135", axes=[("Z", "傾斜")])
@@ -240,6 +240,8 @@ def filename(prefix: str, seiban: str, ext: str = ".DAT", *, model: str = "",
         for a in (axes or ()):
             parts.append(axis_tag(*a) if isinstance(a, (tuple, list)) else axis_tag(a))
         stem = str(sep or "_").join([stem] + [p for p in parts if p])
+    if semi:             # セミクロに変換したファイル。客先へ出すものと取り違えないよう名前に入れる
+        stem = f"{stem or 'NONAME'}{sep or '_'}SEMI"
     return f"{stem or 'NONAME'}{ext}"
 
 

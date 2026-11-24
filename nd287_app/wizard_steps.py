@@ -11,7 +11,7 @@ STEPS = (1, 2, 3, 4)
 
 
 def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seiban="",
-               ctrl_chosen=False, basic_ok=False):
+               ctrl_chosen=False, basic_ok=False, semi_stop=""):
     """戻り値 {"can_next": 次へ進めるか, "missing": [足りないものの文…]}。"""
     missing = []
     if step == 1:
@@ -25,6 +25,8 @@ def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seib
             missing.append("FANUC 以外の製品は作れません。FANUC の製品だけにチェックしてください")
         if found and selected and not non_fanuc and not motor:
             missing.append("機械に付いているモーターを選んでください（製品のモーター／社内の仮モーター）")
+        if found and selected and not non_fanuc and semi_stop:
+            missing.append("セミクロにできません: " + semi_stop)
     elif step == 2:
         if not ctrl_chosen:
             missing.append("制御装置（号機）を選んでください")
@@ -45,7 +47,7 @@ def program_offer(step, *, params_ok=False):
     return False, ""
 
 
-def summary(*, seiban="", model="", kinds="", motor="", motor_id="", ctrl=""):
+def summary(*, seiban="", model="", kinds="", motor="", motor_id="", ctrl="", semi=False):
     """『決めたこと』の1行。決めたものだけ並べる。"""
     parts = []
     if seiban:
@@ -58,6 +60,8 @@ def summary(*, seiban="", model="", kinds="", motor="", motor_id="", ctrl=""):
         parts.append("製品のモーター")
     elif motor == "temp":
         parts.append("仮モーター" + (f"（{motor_id}）" if motor_id else ""))
+    if semi:
+        parts.append("セミクロに変換")
     if ctrl:
         parts.append(ctrl)
     return " ／ ".join(parts)

@@ -3029,6 +3029,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._motor_id = str(motor_id or "").strip()
         self._expect_unit = str(expect_unit or "").strip()   # かんたん作成で選んだ号機（つないだ機械と照らし合わせる）
         self._auto_backup = bool(auto_backup)               # つないだら、控えを自動で取る（読むだけ）
+        self._stage1 = None              # DGPR の1段目（2020 と DGPR だけ書く）のとき、その説明。通常は None
+        self._stage1_done = False        # 1段目を書き終えた（電源の入れ直し待ち）
+        self._continue_pending = False   # 「つなぎ直して続ける」を押した（つないだら控えを取る）
         self._axis_by_motor = None                         # 機械の 2020 から決めた軸（番号）
         self._result = None              # 直近の書込の WriteResult
         self._undone = False
@@ -3171,6 +3174,12 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.lbl_motor.setStyleSheet("color:#92400e;")
         self.lbl_motor.setVisible(False)
         cl.addWidget(self.lbl_motor)
+        self.lbl_stage1 = QtWidgets.QLabel("")
+        self.lbl_stage1.setWordWrap(True)
+        self.lbl_stage1.setStyleSheet("background:#fffbeb; color:#92400e; padding:6px;"
+                                      "border:1px solid #f59e0b; border-radius:4px;")
+        self.lbl_stage1.setVisible(False)
+        cl.addWidget(self.lbl_stage1)
         self.tbl = QtWidgets.QTableWidget(0, len(self.COLS))
         self.tbl.setHorizontalHeaderLabels(self.COLS)
         self.tbl.verticalHeader().setVisible(False)
@@ -3219,6 +3228,12 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.lbl_alert.setFont(f2)
         self.lbl_alert.setVisible(False)
         rl.addWidget(self.lbl_alert)
+        self.lbl_power = QtWidgets.QLabel("")
+        self.lbl_power.setWordWrap(True)
+        self.lbl_power.setStyleSheet("background:#fef9c3; color:#854d0e; padding:10px; font-weight:bold;"
+                                     "border:2px solid #eab308; border-radius:4px;")
+        self.lbl_power.setVisible(False)
+        rl.addWidget(self.lbl_power)
         self.txt_result = QtWidgets.QPlainTextEdit()
         self.txt_result.setReadOnly(True)
         self.txt_result.setMinimumHeight(110)
@@ -3237,6 +3252,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.lbl_undo_why.setStyleSheet("color:#b45309; padding:2px;")
         self.lbl_undo_why.setVisible(False)
         rl.addWidget(self.lbl_undo_why)
+        self.b_continue = QtWidgets.QPushButton("つなぎ直して続ける")
+        self.b_continue.setToolTip("電源を入れ直したあとに押します。つなぎ直して控えを取り直し、残りの差を一覧にします")
+        self.b_continue.clicked.connect(self.continue_after_power)
+        self.b_continue.setVisible(False)
+        rr.addWidget(self.b_continue)
         rr.addWidget(self.b_undo)
         rr.addWidget(self.b_undo_one)
         rr.addWidget(self.b_resolve)
@@ -3470,11 +3490,13 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.lbl_missing.setText("")
         self._show_target(cands)
         self._show_state(status, alarms)
+        want_backup = self._auto_backup or self._continue_pending
+        self._continue_pending = False
         if not ident.get("cnc_id"):
             self._set_state("つながりました。ただし、機械ごとの番号（CNC ID）が読めないので、この機械には書きません"
                             "（どの機械か確かめられないため。読むだけはできます）",
                             "color:#b91c1c; font-weight:bold;")
-        elif self._auto_backup and not self._busy and self._backup is None and not self.lbl_estop.isVisible() \
+        elif want_backup and not self._busy and self._backup is None and not self.lbl_estop.isVisible() \
                 and not self._unit_mismatch():
             QtCore.QTimer.singleShot(0, self.take_backup)      # 読むだけ。号機の食い違い・非常停止のときは取らない
 
@@ -3683,7 +3705,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
             elif self._motor_id and mach is not None:
                 txt += f"（入力した番号 {self._motor_id} は機械の今の 2020 と同じです）"
             self.lbl_motor.setText(txt)
-        elif it is not None:
+        elif it is not None and not self._stage1:
             self.lbl_motor.setText(
                 f"モーターが製品データと違います: 機械の今 {it['old']} ／ 製品 {it['new']}。"
                 "仮モーターなどが付いているなら、上のチェックを入れて 2020 を書かないようにしてください。"
@@ -3703,18 +3725,115 @@ class FocasWriteDialog(QtWidgets.QDialog):
             if self._axis_by_motor is not None:
                 kw["axis"] = self._axis_by_motor
             plan = self.plan_fn(raw, zero_scope="all" if self._zero_all else "product", **kw)
+            stage1 = self._stage1_plan(raw, plan)
+            if stage1 is not None:                # 1段目: 2020 と DGPR だけ（残りは電源を入れ直したあと）
+                plan = stage1[0]
             wplan = focas_ops.plan_writes(raw, plan, self._types, verified=self._verified())
             focas_ops.save_plan_file(folder, plan["newtext"])
         except Exception as e:
             self._raw, self._plan, self._wplan = None, None, None
+            self._stage1 = None
             self.lbl_summary.setText(f"書く内容を決められませんでした: {type(e).__name__}: {e}")
             self.tbl.setRowCount(0)
             self._refresh_enabled()
             return
         self._raw, self._plan, self._wplan = raw, plan, wplan
+        self._stage1 = stage1[1] if stage1 is not None else None
+        self._stage1_done = False
+        self.lbl_power.setVisible(False)
         self._fill_table()
         self._show_motor_note()
+        self._show_stage1_note()
         self._refresh_enabled()
+
+    def _stage1_plan(self, raw, plan):
+        """DGPR の2段階書込の1段目か調べる。1段目なら (1段目の plan, 説明) を返す。違えば None。
+
+        1段目になるのは、機械の今の 2020 と、plan（param_build.prepare の結果）の 2020 が**違う**ときだけ。
+        仮モーター（keep_motor）のときは 2020 を書かないので対象外。
+        1段目の中身は 2020 と DGPR（settings の motor_zero_param の motor_zero_bit 番）だけ。
+        機械の控え（raw）の行から、値だけその場で置換して作る（他のビットは機械の今のまま）。
+        サーボの値（2021〜）は DGPR で機械が標準値に上書きするので、ここでは書かない
+        （電源を入れ直したあとの2段目で書く）。"""
+        if self._keep_motor or plan.get("fmt") != "fanuc":
+            return None
+        changed = []
+        for (num, lab, old, new) in fanuc_param.diff(raw, plan["newtext"]):
+            n = str(num).strip().lstrip("Nn")
+            if n.isdigit() and int(n) == MOTOR_ID_PARAM and old is not None and new is not None:
+                changed.append((lab, old, new))
+        if not changed:
+            return None
+        zp = str(self.settings.get("motor_zero_param", "2000"))
+        zb = int(self.settings.get("motor_zero_bit", 1))
+        text, rows, labels, cant = raw, [], [], []
+        for lab, old, new in changed:
+            text, ok = fanuc_param.set_value(text, MOTOR_ID_PARAM, new, lab)
+            if not ok:
+                cant.append(f"N{MOTOR_ID_PARAM:05d} {lab or '-'}")
+                continue
+            rows.append((f"{MOTOR_ID_PARAM:05d}", lab, old, new, "製品値", True))
+            labels.append(lab)
+        for lab in labels:
+            cur = fanuc_param.get_value(raw, zp, lab)
+            if cur is None:
+                cant.append(f"N{int(zp):05d} {lab or '-'}")
+                continue
+            new = fanuc_param.set_bit_value(cur, zb, False)
+            if new != str(cur):
+                text, ok = fanuc_param.set_value(text, zp, new, lab)
+                if not ok:
+                    cant.append(f"N{int(zp):05d} {lab or '-'}")
+                    continue
+                rows.append((f"{int(zp):05d}", lab, cur, new, "DGPRを0にする", True))
+        p1 = dict(plan)
+        p1.update(newtext=text, rows=rows, missing=[], problems=list(plan.get("problems") or []))
+        return p1, {"labels": labels, "zero_param": zp, "zero_bit": zb, "cant": cant}
+
+    def _show_stage1_note(self):
+        st = self._stage1
+        if not st:
+            self.lbl_stage1.setVisible(False)
+            return
+        self.lbl_stage1.setText(
+            "<b>1段目です（2段で書きます）。</b>製品のモーター番号（2020）が機械の今の値と違うので、"
+            f"今回は <b>2020 と DGPR（{st['zero_param']} の #{st['zero_bit']} を 0）だけ</b>を書きます。"
+            "DGPR を使うと、機械がサーボの値（2021〜）を標準値で上書きするので、製品に合わせたサーボの値は"
+            "まだ書きません。<br>書いたあとに<b>電源を入れ直して</b>（この画面は電源に触りません）、"
+            "［つなぎ直して続ける］を押すと、控えを取り直して残りの差（サーボの値など）が一覧に出ます（2段目）。")
+        self.lbl_stage1.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_stage1.setVisible(True)
+        if st["cant"]:
+            self.lbl_motor.setText("機械に無い場所があり、1段目を書けません: " + "、".join(st["cant"]))
+            self.lbl_motor.setVisible(True)
+
+    def continue_after_power(self):
+        """電源を入れ直したあと。つなぎ直して、控えを取り直し、残りの差を一覧にする（2段目）。"""
+        if self._busy or self._closed:
+            return
+        self._continue_pending = True
+        self._backup, self._wplan, self._plan, self._raw, self._stage1 = None, None, None, None, None
+        self._stage1_done = False
+        self.lbl_power.setVisible(False)
+        self.lbl_stage1.setVisible(False)
+        self.tbl.setRowCount(0)
+        self.lbl_backup.setText("控え: まだ取っていません（つなぎ直したら自動で取ります。機械は読むだけです）")
+        client = self.client
+        if not self._connected or client is None:
+            self.connect_machine()
+            return
+
+        def work(progress):
+            try:
+                client.call("disconnect")
+            except Exception:
+                pass
+            return None
+
+        def done(_):
+            self._set_connected(False)
+            self.connect_machine()
+        self._run(work, done, mode="disconnect")
 
     def _rebuild_wplan(self):
         """確認済みの型が増えたとき、一覧の「確認済み」だけを更新する。"""
@@ -3919,6 +4038,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         unknown = bool(res is not None and any(it["status"] == "unknown" for it in res.items))
         self.b_resolve.setVisible(unknown)
         self.b_resolve.setEnabled(idle and unknown)
+        self.b_continue.setVisible(self._stage1_done)
+        self.b_continue.setEnabled(idle and self._stage1_done)
 
     # --- 書く ---------------------------------------------------------------------------
 
@@ -3991,6 +4112,12 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self._rewrite_blocked = True
         self._show_items(res)
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(res)))
+        if self._stage1 and res.state == "done" and res.items and all(it["status"] == "ok" for it in res.items):
+            self._stage1_done = True
+            self.lbl_power.setText(
+                "1段目が書けました。電源を入れ直してください。入れ直したら『つなぎ直して続ける』を押してください。"
+                "（このアプリは電源に触りません。サーボの値は、入れ直したあと2段目で書きます）")
+            self.lbl_power.setVisible(True)
         self._refresh_enabled()
         self._after_stopped_for_close(res)
 

@@ -7461,7 +7461,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if self._need_d_drive:
             self.lbl_need.setText(self.lbl_need.text() + "　末尾が -D のモーターなので、-D駆動が○の号機だけを出しています。")
         if self._need_ib:
-            self.lbl_need.setText(self.lbl_need.text() + "　末尾が -B のモーターなので、35i-MB など i-B 世代の号機だけを出しています。")
+            self.lbl_need.setText(self.lbl_need.text() + "　末尾が -B のモーターなので、30i・31i・32i・35i 系の号機だけを出しています。")
         if not self._cand:
             self.cmb_ctrl.addItem(f"（容量 {capstr}{vtxt} を満たす制御装置がありません）", -1)
         else:

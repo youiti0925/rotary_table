@@ -74,4 +74,4 @@ class TestDDriveMotor(unittest.TestCase):
             self.assertFalse(sf.is_b_motor(m), m)
         ctls = controllers.load_controllers("マスタ/制御装置マスタ.csv")
         got = sorted(str(c.unit) for c, _a in sf.only_ib_generation([(c, []) for c in ctls]))
-        self.assertEqual(got, ["31", "82", "84"])
+        self.assertEqual(got, ["20", "21", "22", "23", "31", "82", "84"])

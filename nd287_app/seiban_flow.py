@@ -227,9 +227,9 @@ def is_b_motor(motor_model: str) -> bool:
 
 
 def only_ib_generation(cands: list) -> list:
-    """CNCユニットが 30i/31i/32i/35i の B 系（35i-MB・31i-B など）の号機だけに絞る。
-    31i-MA（A系）や 0i-MD・18i は入らない。2026-11-24 利用者「-Bは新しい制御装置」。"""
-    pat = re.compile(r"^\s*(30|31|32|35)i-?M?B\b", re.I)
+    """CNCユニットが 30i/31i/32i/35i 系（31i-MA・35i-MB など）の号機だけに絞る。
+    0i-MD・18i は入らない。2026-11-24 利用者「-Bは31iとか決まってる」。"""
+    pat = re.compile(r"^\s*(30|31|32|35)i", re.I)
     return [ca for ca in cands if pat.search(str(getattr(ca[0], "cnc", "") or ""))]
 
 

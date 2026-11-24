@@ -5861,6 +5861,34 @@ class _ProbeJob(QtCore.QThread):
         self.done_probe.emit(res)
 
 
+class _AxisProbeJob(QtCore.QThread):
+    """製品の軸を決めるため、機械の各軸の指定番号を読むだけ（書かない・控えも取らない）。"""
+    done_axis = QtCore.Signal(object)
+
+    def __init__(self, settings, factory, host, numbers, axes):
+        super().__init__()
+        self._a = (settings, factory, host, numbers, axes)
+        self._client = None
+
+    def abort(self):
+        c = self._client
+        if c is not None and hasattr(c, "abort"):
+            try:
+                c.abort()
+            except Exception:
+                pass
+
+    def run(self):
+        res = None
+        try:
+            st, fac, host, nums, n = self._a
+            res = wizard_probe.read_axis_params(st, fac, host, nums, n,
+                                                on_client=lambda c: setattr(self, "_client", c))
+        except Exception:
+            res = None
+        self.done_axis.emit(res)
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -5879,6 +5907,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._probe_port_open = None                # 試験用: 声かけ（ポート確認）の差し替え
         self._probe_started = False
         self._probe_job = None
+        self._axis_job = None                       # 製品の軸を決めるための読み取り（読むだけ）
         self._probe_closed = False
         self._machine_probe = None                  # {"host","unit","axes":{軸番号:{"motor_id","amr"}},...}
         self._auto_key = None                       # 自動設定をもう済ませた製品データ
@@ -6110,6 +6139,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_motor_suggest.setToolTip("仮モーターが決まっていないとき、この製品と同じ容量のモーターの候補です。選ぶと番号が入ります")
         self.cmb_motor_suggest.activated.connect(self._pick_suggested_motor)
         self.fm.addRow("どれを付ける？", self.cmb_motor_suggest)
+        self.cmb_axis_pick = QtWidgets.QComboBox()      # 製品の軸が機械から決まらないとき、人が1回だけ選ぶ
+        self.cmb_axis_pick.setToolTip("機械を読んでも、製品の軸がどれか決められませんでした。付いている軸を選ぶと、"
+                                      "その軸の 2020（モーター番号）が上の欄に入ります")
+        self.cmb_axis_pick.activated.connect(self._pick_axis_motor)
+        self.fm.addRow("製品の軸は？（機械の各軸の 2020）", self.cmb_axis_pick)
+        self._set_axis_pick_visible(False)
         self.lbl_motor_info = QtWidgets.QLabel("")
         self.lbl_motor_info.setWordWrap(True)
         self.lbl_motor_info.setStyleSheet("color:#1d4ed8; font-weight:bold;")
@@ -6227,13 +6262,131 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     def _stop_probe(self):
         self._probe_closed = True
-        job = self._probe_job
-        if job is not None and job.isRunning():
-            job.abort()
-            job.wait(3000)
-            if job.isRunning():
-                _PROBE_ORPHANS.append(job)            # 止まりきらない間は壊さない
-                job.finished.connect(lambda j=job: _PROBE_ORPHANS.remove(j) if j in _PROBE_ORPHANS else None)
+        for job in (self._probe_job, self._axis_job):
+            if job is not None and job.isRunning():
+                job.abort()
+                job.wait(3000)
+                if job.isRunning():
+                    _PROBE_ORPHANS.append(job)            # 止まりきらない間は壊さない
+                    job.finished.connect(lambda j=job: _PROBE_ORPHANS.remove(j) if j in _PROBE_ORPHANS else None)
+
+    # ----- 製品の軸を、軸別パラメータの一致数で決める（読むだけ） -----
+    def _set_axis_pick_visible(self, on):
+        self.cmb_axis_pick.setVisible(bool(on))
+        lab = self.fm.labelForField(self.cmb_axis_pick)
+        if lab is not None:
+            lab.setVisible(bool(on))
+
+    def _pick_axis_motor(self, _i):
+        mid = self.cmb_axis_pick.currentData()
+        if mid:
+            self.e_motor_id.setText(str(mid))
+
+    def _axis_probe_inputs(self, f, pr):
+        """(製品の変更値 {番号:値}, BASICの軸別の値 {番号:[各軸の値]})。BASIC が見つからなければ None。"""
+        bd = self._abs_dir("param_basic_dir")
+        path = controllers.basic_file_for_unit(bd, pr.get("unit")) if bd and pr.get("unit") else None
+        if not path:
+            return None
+        btext = Path(path).read_text(encoding="cp932", errors="replace")
+        if f.get("source") in ("db", "custom"):
+            prod = {k: v for k, v in (f.get("values") or {}).items() if not isinstance(k, tuple)}
+        else:
+            ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
+            prod = {k: v for k, v in param_build.product_change_values(btext, ptext).items()
+                    if not isinstance(k, tuple)}
+        basic_axes = {}
+        for (num, lab), v in fanuc_param.values_map(btext).items():
+            no = wizard_probe.param_int(num)
+            if no is not None and fanuc_param.axis_of_label(lab) is not None:
+                basic_axes.setdefault(no, []).append(v)
+        return prod, basic_axes
+
+    def _start_axis_detect(self, f, pr):
+        """製品の軸を決める（読むだけ）。順序: ①機械の各軸の 2165（アンプ最大電流）が、製品データ自身の 2165、
+        無ければ製品の容量(+電圧を機械の電圧に読み替え)と同じ軸 → ②機械の 2020 が画面の仮モーター番号と同じ軸
+        → ③製品の値と機械の値の一致数 → ④候補だけ人が選ぶ。軸は 2165 で決める（2020 だけでは決めない）。"""
+        self._set_axis_pick_visible(False)
+        axes = pr.get("axes") or {}
+        meta = f.get("meta") or {}
+        ctrl = next((c for c in self._controllers if str(c.unit) == str(pr.get("unit") or "")), None)
+        why = []
+        cands = sorted(k for k in axes)
+        inp = None
+        try:
+            inp = self._axis_probe_inputs(f, pr)
+        except Exception:
+            inp = None
+        prod = inp[0] if inp else {}
+        by_amr, amr = [], wizard_probe.product_amr(prod)
+        if amr:                                         # ① 製品データ自身の 2165 が最優先
+            by_amr = wizard_probe.amr_axes(amr, axes)
+            if by_amr:
+                why.append(f"製品のアンプ最大電流 {amr} と同じ軸は " + "・".join(self._axis_letter(k) for k in by_amr) + "軸")
+        if not by_amr:                                  # ① 製品の容量(+電圧)を機械の電圧に読み替えて、機械の 2165 と比べる
+            info = wizard_probe.capacity_axes(meta.get("capacity"), meta.get("voltage"),
+                                              ctrl.voltage if ctrl is not None else "", axes)
+            by_amr = info["axes"]
+            if by_amr:
+                why.append(info["note"] + f" → 機械の 2165 が {info['cap']} の軸は "
+                           + "・".join(self._axis_letter(k) for k in by_amr) + "軸")
+            else:
+                why.append(info["note"] + "（機械の 2165 から容量では軸を絞れませんでした）")
+        if by_amr:
+            cands = by_amr
+        cands, narrowed = wizard_probe.narrow_by_motor_id(cands, axes, self.e_motor_id.text())
+        if narrowed:
+            why.append(f"機械の 2020 が入力の仮モーター {self.e_motor_id.text().strip()} と同じ軸は "
+                       + "・".join(self._axis_letter(k) for k in cands) + "軸")
+        ctx = {"cands": cands, "why": why, "prod": prod, "n": 0}
+        if len(cands) == 1:
+            self._axis_finish(ctx, cands[0])
+            return
+        nums = wizard_probe.pick_numbers(*inp) if inp else []
+        if not nums or not cands or not pr.get("host"):
+            self._axis_finish(ctx, 0)
+            return
+        ctx["n"] = len(nums)
+        factory = self._probe_client_factory or (
+            lambda st: focas_client.make_client(st, log_path=str(app_dir() / "focas_helper.log")))
+        job = _AxisProbeJob(self.settings, factory, pr["host"], nums, cands)
+        job.done_axis.connect(lambda res, c=ctx: self._axis_detected(res, c))
+        self._axis_job = job
+        job.start()
+
+    def _axis_detected(self, res, ctx):
+        """③ 製品の値と機械の各候補軸の値の一致数で決める。決まらなければ ④ へ。"""
+        counts = wizard_probe.count_matches(ctx["prod"], res) if res else {}
+        ax = wizard_probe.decide_axis(counts)
+        if ax and ax in ctx["cands"]:
+            ctx["why"].append(f"製品らしい値 {ctx['n']} 個中 {counts[ax]} 個が一致する軸（2位との差が明確）は "
+                              f"{self._axis_letter(ax)}軸")
+        self._axis_finish(ctx, ax if ax in ctx["cands"] else 0)
+
+    def _axis_finish(self, ctx, ax):
+        pr = self._machine_probe
+        if self._probe_closed or not pr or self._motor_id_by_user or self.cmb_motor.currentData() != "temp":
+            return
+        mid = wizard_probe._clean(((pr.get("axes") or {}).get(ax) or {}).get("motor_id")) if ax else ""
+        if ax and mid:
+            self.e_motor_id.setText(mid)
+            msg = (" → ".join(ctx["why"]) + f" → {mid} が付いている{self._axis_letter(ax)}軸に決めました"
+                   "（違えば直してください）")
+            self.lbl_auto.setText((self.lbl_auto.text() + "\n" if self.lbl_auto.isVisible() and self.lbl_auto.text()
+                                   else "") + msg)
+            self.lbl_auto.setVisible(True)
+            return
+        choices = wizard_probe.axis_choices(pr.get("axes"), self._axis_letter, only=ctx["cands"])
+        if not choices:
+            return
+        self.cmb_axis_pick.clear()
+        self.cmb_axis_pick.addItem("製品の軸を選んでください（機械から決められませんでした）", "")
+        for text, _k, m in choices:
+            self.cmb_axis_pick.addItem(text, m)
+        self.lbl_auto.setText((self.lbl_auto.text() + "\n" if self.lbl_auto.isVisible() and self.lbl_auto.text()
+                               else "") + "軸を決められませんでした: " + " → ".join(ctx["why"]))
+        self.lbl_auto.setVisible(True)
+        self._set_axis_pick_visible(True)
 
     def done(self, r):
         self._stop_probe()
@@ -6295,6 +6448,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if notes:
             self.lbl_auto.setText("機械から読んで自動で決めました（違えば直してください）: " + "／".join(notes))
             self.lbl_auto.setVisible(True)
+        if dec["kind"] == "temp" and not dec["temp_id"] and not self._motor_id_by_user \
+                and self.cmb_motor.currentData() == "temp":
+            self._start_axis_detect(sel[0], pr)             # 番号が決まらない → 容量(2165)→2020→値の一致 で軸を決める（読むだけ）
 
     # ----- 補助 -----
     def _with_browse(self, line, slot):

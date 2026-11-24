@@ -44,7 +44,7 @@ class TwoAxisBase(WizardBase):
         self.settings["focas_registry_csv"] = str(self.work / "reg.csv")
         self.settings["focas_host"] = "127.0.0.1"
 
-    def make(self, t_hv, r_hv, t_hits=None, r_hits=None, t2020="250", r2020="299"):
+    def make(self, t_hv, r_hv, t_hits=None, r_hits=None, t2020="250", r2020="299", t_model=None, r_model=None):
         """23号機の実測（2165 が 25,25,45,85,85,165・2020 が 255,255,273,293,293,303）の偽の機械と、T+R の2製品。
         t_hits / r_hits: 製品らしい値が機械で一致する軸のリスト（軸番号）。hv=True は 400V 40A（→ 200V の機械では 80A＝A・B軸）、
         False は 200V 40A（＝Z軸だけ）。"""
@@ -54,10 +54,14 @@ class TwoAxisBase(WizardBase):
         r = PRODUCT.replace('"2020","A5","","","299"', f'"2020","A5","","","{r2020}"')
         if r_hv:
             r = r.replace("αiS8/4000-B", "αiS22/3000HV-B")
+        if r_model:
+            r = r.replace("αiS8/4000-B", r_model)
         (data / "R50014984.prm").write_text(r, encoding="cp932")
         t = (PRODUCT.replace("Axis=R", "Axis=T").replace('"2020","A5","","","299"', f'"2020","A5","","","{t2020}"'))
         if t_hv:
             t = t.replace("αiS8/4000-B", "αiS22/3000HV-B")
+        if t_model:
+            t = t.replace("αiS8/4000-B", t_model)
         (data / "T50014984.prm").write_text(t, encoding="cp932")
         client = DirectClient()
         m = client.machine
@@ -177,34 +181,23 @@ class TestTwoAxisAuto(TwoAxisBase):
             self.app.processEvents()
         self.app.processEvents()
 
-    def test_same_capacity_axes_are_chosen_once_each_from_the_list(self):
+    def test_same_capacity_axes_are_assigned_in_order_when_nothing_else_decides(self):
         w, _ = self.make(t_hv=True, r_hv=True)                  # 両方 A・B 候補で値の手がかりが無い
         self.search(w)
-        self.assertEqual(w._decided_axes, {})
-        self.assertFalse(w.cmb_axis_pick.isHidden())
-        self.assertFalse(w.cmb_axis_pick2.isHidden())
-        texts = self.combo_texts(w.cmb_axis_pick)
-        self.assertEqual([t for t in texts if "軸（" in t], ["A軸（293）", "B軸（293）"])
-        self.assertFalse(any(t.startswith(("X", "Y", "Z", "C")) for t in texts))     # 候補だけ
-        i = texts.index("A軸（293）")
-        w.cmb_axis_pick.setCurrentIndex(i)
-        w.cmb_axis_pick.activated.emit(i)
-        self.search_wait(w)
-        # 傾斜が A に決まったので、回転は B だけが残り、自動で B に決まる
         self.assertEqual(w._decided_axes, {"傾斜": "A", "回転": "B"})
         self.assertEqual(self.cur(w), ("23", ["A", "B"]))
+        self.assertIn("選んだ順に割り当てました", w.lbl_auto.text())
+        self.assertTrue(w.cmb_axis_pick.isHidden() and w.cmb_axis_pick2.isHidden())
+        swapped = [list(a) for c, a in w._cand if str(c.unit) == "23"]
+        self.assertIn(["B", "A"], swapped)                      # 入れ替えは人が選べる
 
     def test_cannot_pick_the_axis_the_other_product_uses(self):
-        w, _ = self.make(t_hv=True, r_hv=True)
-        self.search(w)
-        i = self.combo_texts(w.cmb_axis_pick).index("A軸（293）")
-        w.cmb_axis_pick.setCurrentIndex(i)
-        w.cmb_axis_pick.activated.emit(i)
-        self.search_wait(w)
-        w.cmb_axis_pick2.addItem("A軸（293）", 4)               # 無理に出しても、同じ軸にはならない
+        w, _ = self.make(t_hv=False, r_hv=True)
+        self.search(w)                                          # 傾斜は Z。回転は A・B のコンボ
+        w.cmb_axis_pick2.addItem("Z軸（273）", 3)               # 無理に出しても、同じ軸にはならない
         w.cmb_axis_pick2.setCurrentIndex(w.cmb_axis_pick2.count() - 1)
         w._pick_axis_multi(1)
-        self.assertEqual(w._decided_axes, {"傾斜": "A", "回転": "B"})
+        self.assertEqual(w._decided_axes, {"傾斜": "Z"})
 
     def test_one_product_only_keeps_the_existing_behaviour(self):
         w, client = self.make(t_hv=False, r_hv=True, r_hits=(5,))
@@ -253,7 +246,7 @@ class TestTwoAxisAuto(TwoAxisBase):
         self.search(w)
         self.assertEqual(w.cmb_motor.currentData(), "product")
         self.assertEqual(w._motor_kind, {})
-        self.assertEqual(w._decided_axes, {})                   # 製品のモーター（機械の 2020 と同じ軸は無い）→ 軸は決めない
+        self.assertEqual(w._decided_axes, {"傾斜": "Z", "回転": "B"})   # 軸は 2165 で決まる（モーターの選び方とは別）
 
     def test_unreachable_machine_is_silent(self):
         w, _ = self.make(t_hv=False, r_hv=True)
@@ -262,6 +255,37 @@ class TestTwoAxisAuto(TwoAxisBase):
         self.search(w)
         self.assertEqual(w._decided_axes, {})
         self.assertIsNone(w._mx)
+
+
+class TestTwoAxisSameCapacity(TwoAxisBase):
+    def test_both_20a_get_x_and_y_and_both_are_temp_motors(self):
+        """受注 50014905 相当: 傾斜も回転も αiF4/5000（2020=273・20A・200V）。23号機の 20A は X・Y（2020 は 255・255）。"""
+        w, client = self.make(t_hv=False, r_hv=False, t_model="αiF4/5000", r_model="αiF4/5000",
+                              t2020="273", r2020="273")
+        self.search(w)
+        self.assertEqual(w._decided_axes, {"傾斜": "X", "回転": "Y"})
+        self.assertEqual(self.cur(w), ("23", ["X", "Y"]))
+        self.assertEqual(w.cmb_motor.currentData(), "temp")           # X・Y の 2020 は 255 で製品の 273 と違う
+        self.assertEqual(w._motor_kind, {})                           # 両方仮モーター（製品ごとの区別は要らない）
+        t = w.lbl_auto.text()
+        self.assertNotIn("決めていません", t)
+        self.assertNotIn("Z軸", t)                                    # 2020 の一致で Z(273) を候補にしない
+        for part in ("傾斜: ", "回転: ", "X軸に決めました", "Y軸に決めました", "仮モーター", "2165 が 20A の軸は X・Y軸"):
+            self.assertIn(part, t)
+        self.assertEqual((w.e_motor_id.text(), w.e_motor_id2.text()), ("255", "255"))
+        self.assertEqual(client.machine.writes, [])
+        w.e_out.setText("")
+        self.run_machine(w)
+        self.assertEqual(sorted(self.opened[0][1]["product_axes"]), [1, 2])
+
+    def test_two_40a_do_not_fit_unit_23(self):
+        """受注 50014962 相当: 400V 20A → 200V の機械では 40A が2つ要る。23号機の 40A は Z だけ。"""
+        w, client = self.make(t_hv=False, r_hv=False, t_model="αiF12/4000HV-B", r_model="αiS8/4000HV-B")
+        self.search(w)
+        self.assertEqual(w._decided_axes, {})
+        self.assertIn("23号機には2軸とも載りません（40A の軸が1つしかありません）", w.lbl_auto.text())
+        self.assertTrue(w.cmb_axis_pick.isHidden() and w.cmb_axis_pick2.isHidden())
+        self.assertEqual(client.machine.writes, [])
 
 
 class TestTwoAxisSemi(TwoAxisBase):

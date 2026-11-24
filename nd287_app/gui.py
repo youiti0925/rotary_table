@@ -6590,6 +6590,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         meta = f.get("meta") or {}
         ctrl = next((c for c in self._controllers if str(c.unit) == str(pr.get("unit") or "")), None)
         why = []
+        cap = ""
         cands = sorted(k for k in axes)
         inp = None
         try:
@@ -6606,6 +6607,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             info = wizard_probe.capacity_axes(meta.get("capacity"), meta.get("voltage"),
                                               ctrl.voltage if ctrl is not None else "", axes)
             by_amr = info["axes"]
+            cap = info["cap"]
             if by_amr:
                 why.append(info["note"] + f" → 機械の 2165 が {info['cap']} の軸は "
                            + "・".join(self._axis_letter(k) for k in by_amr) + "軸")
@@ -6617,7 +6619,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if narrowed:
             why.append(f"機械の 2020 が入力の仮モーター {str(typed_id).strip()} と同じ軸は "
                        + "・".join(self._axis_letter(k) for k in cands) + "軸")
-        return {"cands": cands, "why": why, "prod": prod, "n": 0, "inp": inp}
+        return {"cands": cands, "why": why, "prod": prod, "n": 0, "inp": inp, "cap": cap}
 
     def _start_axis_detect(self, f, pr):
         """製品の軸を決める（読むだけ）。順序: ①機械の各軸の 2165（アンプ最大電流）が、製品データ自身の 2165、
@@ -6682,42 +6684,24 @@ class ParamWizardDialog(QtWidgets.QDialog):
         return self.e_motor_id if pos == 0 else self.e_motor_id2
 
     def _apply_probe_multi(self, sel, pr):
-        """2つの製品それぞれについて、モーター（製品／仮）と軸を決める。決め方は1製品のときと同じ
-        （軸は機械の 2165 で決める。2020 では決めない）。ただし2つが**同じ軸にならない**ようにする。"""
+        """2つの製品それぞれについて、軸とモーター（製品／仮）を決める。順序は1製品のときと同じ:
+        **まず軸を機械の 2165（容量）で決め**（2020 では決めない）、同じ容量の軸が複数のときだけ値の一致数、
+        それでも残れば順に割り当てる。モーター判定は、軸を決めた**あと**、その軸の 2020 が製品の 2020 と同じか。
+        2つが同じ軸にならないようにする。"""
         kinds = [f.get("kind") for f in sel]
-        if len(sel) != 2 or len(set(kinds)) != 2:
+        if len(sel) != 2 or len(set(kinds)) != 2 or not (pr.get("axes") or {}) or self._motor_id_by_user:
             return
         key = tuple((f.get("path") or f.get("name") or "", f.get("kind")) for f in sel)
         if key == self._auto_key:
             return
-        pids = wizard_probe.product_motor_ids(sel)
-        decs = [wizard_probe.decide(pr.get("axes") or {}, pid) if pid else None for pid in pids]
-        if not any(d and d["kind"] for d in decs):
-            return
         self._auto_key = key
         self._decided_axes, self._motor_kind, self._mx = {}, {}, None
-        forced = self.cmb_motor.currentData() if self._motor_by_user else ""
-        eff = [forced or (d["kind"] if d and d["kind"] else "") for d in decs]
-        if not self._motor_by_user:
-            known = {e for e in eff if e}
-            if len(known) == 1:
-                self.cmb_motor.setCurrentIndex(self.cmb_motor.findData(next(iter(known))))
-            elif len(known) == 2:                       # 片方だけ仮モーター。画面は「仮モーター」、製品ごとの区別は持っておく
-                self.cmb_motor.setCurrentIndex(self.cmb_motor.findData("temp"))
-                self._motor_kind = {k: e for k, e in zip(kinds, eff) if e}
+        pids = wizard_probe.product_motor_ids(sel)
         items = []
-        for pos, (f, d, e) in enumerate(zip(sel, decs, eff)):
-            it = {"f": f, "kind": f["kind"], "eff": e, "pid": pids[pos], "axis": 0, "cands": [], "rest": [],
-                  "why": [], "prod": {}, "inp": None, "tried": False, "picked": False, "motor_note": ""}
-            if e == "product" and d and d["kind"] == "product":
-                ax = "・".join(self._axis_letter(k) for k in d["axes"])
-                it["motor_note"] = f"{ax}軸の 2020 が製品と同じ（{pids[pos]}）なので製品のモーター"
-                if len(d["axes"]) == 1:
-                    it["axis"] = d["axes"][0]
-            elif e == "temp" and d and d["kind"] == "temp":
-                it["motor_note"] = f"機械のどの軸にも製品の 2020（{pids[pos]}）は付いていないので社内の仮モーター"
-            if e == "temp" and not self._motor_id_by_user:
-                it.update(self._axis_cands(f, pr, self._motor_edit(pos).text()))
+        for pos, f in enumerate(sel):
+            it = {"f": f, "kind": f["kind"], "eff": "", "pid": pids[pos], "axis": 0, "cands": [], "rest": [],
+                  "why": [], "prod": {}, "inp": None, "tried": False, "picked": False, "motor_note": "", "cap": ""}
+            it.update(self._axis_cands(f, pr, self._motor_edit(pos).text()))
             items.append(it)
         self._mx = {"items": items, "busy": False, "conflict": []}
         self._mx_step()
@@ -6730,12 +6714,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return
         items = mx["items"]
         dec, rest, conflict = wizard_probe.resolve_distinct(
-            [it["cands"] if it["eff"] == "temp" else [] for it in items], [it["axis"] for it in items])
+            [it["cands"] for it in items], [it["axis"] for it in items])
         for it, a, r in zip(items, dec, rest):
             it["axis"], it["rest"] = a, r
         mx["conflict"] = conflict
         for pos, it in enumerate(items):
-            if it["eff"] != "temp" or it["axis"] or len(it["rest"]) < 2 or it["tried"] or pos in conflict:
+            if it["axis"] or len(it["rest"]) < 2 or it["tried"] or pos in conflict:
                 continue
             it["tried"] = True
             inp = it.get("inp")
@@ -6752,6 +6736,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self._axis_jobs.append(job)
             job.start()
             return
+        # 値でも決まらず、同じ容量の軸が製品の数だけ残っているときは、選んだ順に割り当てる（入れ替えは人が直せる）
+        left = [i for i, it in enumerate(items) if not it["axis"] and i not in conflict and it["rest"]]
+        groups = {}
+        for i in left:
+            groups.setdefault(tuple(items[i]["rest"]), []).append(i)
+        for rest_t, who in groups.items():
+            if len(who) >= 2 and len(who) == len(rest_t):
+                for i, ax in zip(who, rest_t):
+                    items[i]["axis"] = ax
+                    items[i]["why"].append(f"同じ容量の軸が{len(rest_t)}つで製品も{len(who)}つなので、選んだ順に割り当てました"
+                                           "（入れ替えるなら②で別の割当を選んでください）")
+                    mx["ordered"] = True
         self._mx_apply()
 
     def _mx_detected(self, res, pos):
@@ -6789,11 +6785,32 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self._mx_step()
 
     def _mx_apply(self):
-        """決まった軸を、書く先（②の割当）・仮モーターの番号・根拠の表示・選び直しの一覧へ反映する。"""
+        """決まった軸を、書く先（②の割当）・モーターの判定・仮モーターの番号・根拠の表示・選び直しの一覧へ反映する。"""
         mx, pr = self._mx, self._machine_probe
         if mx is None or not pr or self._probe_closed:
             return
         items, axes = mx["items"], pr.get("axes") or {}
+        forced = self.cmb_motor.currentData() if self._motor_by_user else ""
+        for it in items:                                   # モーター判定: 軸を決めたあと、その軸の 2020 が製品と同じか
+            ax = it["axis"]
+            mid = wizard_probe._clean((axes.get(ax) or {}).get("motor_id")) if ax else ""
+            if ax and mid and it["pid"]:
+                it["eff"] = "product" if mid == it["pid"] else "temp"
+                it["motor_note"] = (f"{self._axis_letter(ax)}軸の 2020（{mid}）が製品と同じなので製品のモーター"
+                                    if it["eff"] == "product" else
+                                    f"{self._axis_letter(ax)}軸の 2020 は {mid}・製品は {it['pid']} で違うので社内の仮モーター")
+            else:
+                it["eff"], it["motor_note"] = "", ""
+            if forced:
+                it["eff"] = forced
+        effs = [it["eff"] for it in items]
+        if not self._motor_by_user and all(effs):
+            self._motor_kind = {}
+            if len(set(effs)) == 1:
+                self.cmb_motor.setCurrentIndex(self.cmb_motor.findData(effs[0]))
+            else:                                          # 片方だけ仮モーター。画面は「仮モーター」、製品ごとの区別は持つ
+                self.cmb_motor.setCurrentIndex(self.cmb_motor.findData("temp"))
+                self._motor_kind = {it["kind"]: it["eff"] for it in items}
         self._decided_axes = {}
         parts, picks = [], []
         for pos, it in enumerate(items):
@@ -6802,28 +6819,27 @@ class ParamWizardDialog(QtWidgets.QDialog):
             if ax:
                 self._decided_axes[it["kind"]] = self._axis_letter(ax)
             head = f"{it['kind']}: "
-            if it["eff"] == "product":
-                if it["motor_note"]:
-                    parts.append(head + it["motor_note"] + (f" → {self._axis_letter(ax)}軸" if ax else ""))
-            elif it["eff"] == "temp":
-                if it["motor_note"] and not it["why"]:
-                    it["why"].append(it["motor_note"])
-                chain = " → ".join(it["why"])
-                if ax:
-                    parts.append(head + chain + f" → {self._axis_letter(ax)}軸に決めました"
-                                 + (f"（付いているのは {mid}）" if mid else ""))
-                    if mid and (it["picked"] or not self._motor_id_by_user):
-                        self._motor_edit(pos).setText(mid)
-                else:
-                    parts.append(head + "軸を決められませんでした: " + chain)
-                    picks.append(pos)
+            chain = " → ".join(it["why"])
+            if ax:
+                parts.append(head + chain + f" → {self._axis_letter(ax)}軸に決めました"
+                             + (f"（{it['motor_note']}）" if it["motor_note"] else ""))
+                if it["eff"] == "temp" and mid and (it["picked"] or not self._motor_id_by_user):
+                    self._motor_edit(pos).setText(mid)
+            else:
+                parts.append(head + "軸を決められませんでした: " + chain)
+                picks.append(pos)
         if mx["conflict"]:
-            parts.append("傾斜と回転が同じ1つの軸しか候補に無いので、どちらも決めていません（確かめてください）")
+            caps = {it["cap"] for it in items if it["cap"]}
+            cap = next(iter(caps)) if len(caps) == 1 else "同じ容量"
+            n = len({k for i in mx["conflict"] for k in items[i]["rest"]})
+            un = str(pr.get("unit") or "")
+            parts.append(f"{un + '号機' if un else 'この機械'}には2軸とも載りません（{cap} の軸が{n}つしかありません）。"
+                         "どちらも決めていません")
         text = ("機械から読んで自動で決めました（違えば直してください）: " + "／".join(parts)) if parts else ""
         for pos, cmb in enumerate((self.cmb_axis_pick, self.cmb_axis_pick2)):
             it = items[pos]
             choices = wizard_probe.axis_choices(pr.get("axes"), self._axis_letter, only=it["rest"]) \
-                if pos in picks else []
+                if (pos in picks and pos not in mx["conflict"]) else []
             cmb.blockSignals(True)
             cmb.clear()
             if choices:
@@ -7411,6 +7427,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             fixed = [(c, list(letters)) for c in self._controllers
                      if un and str(c.unit) == un and all(a in c.axes() for a in letters)]
             if fixed and letters[0] != letters[1]:
+                fixed += [(c, letters[::-1]) for c, _a in list(fixed)]      # 傾斜と回転の入れ替えは人が選べる
                 self._cand = fixed + [(c, a) for c, a in self._cand if str(c.unit) != un]
                 fixed_multi = True
         conn_unit = self._connected_unit()

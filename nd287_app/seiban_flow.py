@@ -213,6 +213,18 @@ def is_hv(motor_model: str) -> bool:
     return "HV" in str(motor_model or "").upper()
 
 
+def is_d_motor(motor_model: str) -> bool:
+    """型式の末尾が -D（-D駆動のモーター。例 αiF12/4000-D・αiF8/3000 HV-D）なら True。
+    DD(DiS)モーターは別物なので False。2026-11-24 利用者「-D付はD駆動の事」。"""
+    s = str(motor_model or "").strip()
+    return bool(re.search(r"-\s*D$", s, re.I)) and not is_dd_motor(s)
+
+
+def only_d_drive(cands: list) -> list:
+    """制御装置マスタの「-D駆動」が ○ の号機だけに絞る（cands は [(controller, 軸...)]）。"""
+    return [ca for ca in cands if str(getattr(ca[0], "d_drive", "") or "").strip() in ("○", "〇", "◯", "O", "o")]
+
+
 def is_dd_motor(motor_model: str) -> bool:
     """DDモーター(直駆動 DiS系)なら True。番手＝トルクで αiS の出力番手とは別物。"""
     norm = re.sub(r"[\s\-_]", "", str(motor_model or "")).upper()

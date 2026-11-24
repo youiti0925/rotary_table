@@ -45,3 +45,23 @@ class TestCapacityUppercaseIF(unittest.TestCase):
         self.assertEqual(sf.standard_capacity("αIF8/3000 HV-B"), "20A")
         self.assertEqual(sf.standard_capacity("αiF8/3000 HV-B"), "20A")
         self.assertEqual(sf.standard_capacity("αIF12/4000"), "40A")
+
+
+class TestDDriveMotor(unittest.TestCase):
+    """末尾 -D のモーターは -D駆動 ○ の号機だけ（2026-11-24 利用者「-D付はD駆動の事」）。"""
+
+    def test_is_d_motor(self):
+        from nd287_app import seiban_flow as sf
+        for m in ("αiF12/4000-D", "αIF 8/3000-D", "αiF8/3000 HV-D", "αiS2/5000-D"):
+            self.assertTrue(sf.is_d_motor(m), m)
+        for m in ("αiF12/4000", "α22/2000", "", "DiS 100", "αiF8/3000 HV"):
+            self.assertFalse(sf.is_d_motor(m), m)
+
+    def test_only_d_drive_uses_master_column(self):
+        from nd287_app import seiban_flow as sf, controllers
+        ctls = controllers.load_controllers("マスタ/制御装置マスタ.csv") \
+            if hasattr(controllers, "load_controllers") else []
+        if not ctls:
+            self.skipTest("loader name differs")
+        got = sorted(str(c.unit) for c, _a in sf.only_d_drive([(c, []) for c in ctls]))
+        self.assertEqual(got, ["31", "82", "84"])

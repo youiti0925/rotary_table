@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1258件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
+- 現在 **1288件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -119,6 +119,10 @@ rm -f settings.json settings.json.bak      # ★必ず消す
 - モーター番号が機械と違う製品のモーターは2段階: 1段目で 2020 と DGPR=0 だけ書く→人が電源を入れ直す→2段目で残り
   （DGPR は標準のサーボ値で上書きするので、製品のサーボ値は電源入れ直しのあとに書く）。実機は未確認。
 - 初めての制御装置: 控えを「機械から取ったBASIC」（BASICフォルダの外）へ F<号機>BASIC.dat として登録（`first_unit.py`）。
+
+- 測定プログラムの FOCAS 送信（`focas_helper.prog_write`・`focas_ops.run_program_send`・ProgramDialog の送り方「機械へ直接（FOCAS）」）。
+  同じ番号があれば書かない（上書きは明示のとき）・承認ボタン1回・読み戻し照合。**LF CR CR のまま FOCAS で入るかは実機未確認**
+  （実機で通したのは LF 区切りだけ）。入らなければ EOB を LF のみにして試す。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

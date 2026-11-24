@@ -272,6 +272,17 @@ class TestWizardAutoProbe(WizardBase):
             self.assertIn(part, t)
         self.assertTrue(w.cmb_axis_pick.isHidden())
         self.assertEqual(client.machine.writes, [])                     # 読むだけ
+        self.assert_write_axis(w, "23", "B")                            # 書く先も B軸（容量40Aで Z に選び直さない）
+
+    def assert_write_axis(self, w, unit, axis):
+        """②の割り当て（＝③で書く先）が、自動で決めた軸になっていること。"""
+        self.assertTrue(w._cand)
+        c, axes = w._cand[0]
+        self.assertEqual((str(c.unit), list(axes)), (unit, [axis]))
+        i = w.cmb_ctrl.currentData()
+        self.assertTrue(i is not None and i >= 0)
+        c2, axes2 = w._cand[i]
+        self.assertEqual((str(c2.unit), list(axes2)), (unit, [axis]))
 
     def test_products_own_2165_has_priority_over_capacity(self):
         """製品データ自身の N2165=85 → 機械の 2165 が 85 の軸 A・B（電圧の読み替えは使わない）→ 値の一致で B。"""
@@ -308,6 +319,7 @@ class TestWizardAutoProbe(WizardBase):
         w.cmb_axis_pick.activated.emit(i)
         self.assertEqual(w.e_motor_id.text(), "293")
         self.assertEqual(client.machine.writes, [])
+        self.assert_write_axis(w, "23", "B")                            # 人が選んだ軸が書く先になる
 
     def test_read_numbers_are_limited_and_unreadable_ones_skipped(self):
         w, client = self.make_axes(self.NUMS)

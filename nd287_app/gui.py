@@ -5913,6 +5913,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._auto_key = None                       # 自動設定をもう済ませた製品データ
         self._motor_by_user = False                 # 人がモーターの欄を触ったら、自動で上書きしない
         self._motor_id_by_user = False
+        self._decided_axis = ""           # 機械から決めた（または人が選んだ）製品の軸の文字。書く先の軸はこれを使う
         self.setWindowTitle("受注番号から かんたん作成")
         fit_to_screen(self, 1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
         self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
@@ -6131,7 +6132,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                    "違えば書く前に警告します（この番号は書きません）")
         self.e_motor_id.setEnabled(False)
         self.e_motor_id.textChanged.connect(self._on_motor_id_changed)
-        self.e_motor_id.textEdited.connect(lambda _t: setattr(self, "_motor_id_by_user", True))   # 人が打ったとき
+        self.e_motor_id.textEdited.connect(lambda _t: (setattr(self, "_motor_id_by_user", True),
+                                                       setattr(self, "_decided_axis", "")))   # 人が打ったとき
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
@@ -6280,7 +6282,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _pick_axis_motor(self, _i):
         mid = self.cmb_axis_pick.currentData()
         if mid:
+            self._decided_axis = str(self.cmb_axis_pick.currentText()).strip()[:1]
             self.e_motor_id.setText(str(mid))
+            self._update_candidates()
 
     def _axis_probe_inputs(self, f, pr):
         """(製品の変更値 {番号:値}, BASICの軸別の値 {番号:[各軸の値]})。BASIC が見つからなければ None。"""
@@ -6369,7 +6373,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return
         mid = wizard_probe._clean(((pr.get("axes") or {}).get(ax) or {}).get("motor_id")) if ax else ""
         if ax and mid:
+            self._decided_axis = self._axis_letter(ax)
             self.e_motor_id.setText(mid)
+            self._update_candidates()
             msg = (" → ".join(ctx["why"]) + f" → {mid} が付いている{self._axis_letter(ax)}軸に決めました"
                    "（違えば直してください）")
             self.lbl_auto.setText((self.lbl_auto.text() + "\n" if self.lbl_auto.isVisible() and self.lbl_auto.text()
@@ -6919,6 +6925,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self._cand = seiban_flow.capable_controllers(self._controllers, [""] * len(sel), "")
         else:
             self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
+        if temp and self._decided_axis:
+            # 機械から決めた軸（2165 など）が書く先。仮モーターの容量で軸を選び直さない
+            un = str((self._machine_probe or {}).get("unit") or "")
+            ax = self._decided_axis
+            fixed = []
+            for c in self._controllers:
+                if un and str(c.unit) == un and ax in c.axes():
+                    fixed.append((c, [ax]))
+            if fixed:
+                self._cand = fixed + [(c, a) for c, a in self._cand if str(c.unit) != un]
         conn_unit = self._connected_unit()
         if conn_unit:
             self._cand.sort(key=lambda ca: 0 if str(ca[0].unit) == conn_unit else 1)

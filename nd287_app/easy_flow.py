@@ -18,6 +18,15 @@
 
 CHAPTERS = ("つなぐ", "製品を決める", "機械に入れる", "測る準備", "測る", "結果と保存")
 
+# 入り口（ホーム）から選ぶ流れ。「測る」以外も、絵と短い言葉で案内する（利用者 2026-11-24「他も全部イラストメインで」）。
+# chapters: 画面の上に出す章。steps の fl（流れ名 → 何章目か）で、どの手順がどの流れに入るかを決める。
+FLOWS = {
+    "measure": dict(title="測る", sub="最初から最後まで", chapters=CHAPTERS),
+    "program": dict(title="プログラムを機械に入れる", sub="測るための動き", chapters=("つなぐ", "機械に入れる", "おわり")),
+    "results": dict(title="結果を見る・印刷", sub="保存した結果", chapters=("えらぶ", "見る", "出す")),
+    "alarm": dict(title="アラームを調べる", sub="意味とやること", chapters=("調べる",)),
+}
+
 # 機械の状態の読み（focas_helper.STATUS_TEXT と同じ。実機で見たのは MDI(0) だけ）
 AUT_MDI, AUT_MEM, AUT_EDIT, AUT_HANDLE, AUT_JOG, AUT_REF = 0, 1, 3, 4, 5, 9
 RUN_RUNNING = 3
@@ -29,28 +38,33 @@ WHO = {"machine": "機械で", "pc": "PC で", "auto": "PC が自動で"}
 # art: 絵の名前（easy_mode が easy_art から選ぶ）。zoom=拡大する絵、part=操作盤のどこか。
 # detect: 機械の状態から「できた」を決めるときの名前（is_done）。無ければ、人が「やりました」を押す。
 STEPS = [
+    dict(id="home", ch=None, kind="home", title="何をしますか？", lines=[], art="home"),
     dict(id="intro", ch=0, kind="info", title="用意するもの",
          lines=["受注伝票と LAN ケーブル。", "PC と機械・表示器をつなぐ。"],
          art="scene", button="はじめる ▶"),
-    dict(id="power", ch=0, kind="machine", title="機械の電源を入れる",
+    dict(id="prog_intro", ch=None, fl={"program": 0}, kind="info", title="プログラムを機械に入れる",
+         lines=["測るための動きを作って、機械に入れます。"], art="scene", button="はじめる ▶"),
+    dict(id="power", ch=0, fl={"program": 0}, kind="machine", title="機械の電源を入れる",
          lines=["操作盤の緑の「入」を押します。"], part="power", zoom="power", detect="online"),
-    dict(id="estop", ch=0, kind="machine", title="非常停止をもどす",
+    dict(id="estop", ch=0, fl={"program": 0}, kind="machine", title="非常停止をもどす",
          lines=["赤い大きなボタンを右に回すと、手前に出ます。"], part="estop", zoom="estop", detect="estop_off"),
-    dict(id="dial_mdi", ch=1, kind="machine", title="つまみを MDI に合わせる",
+    dict(id="dial_mdi", ch=1, fl={"program": 0}, kind="machine", title="つまみを MDI に合わせる",
          lines=["操作モードのつまみを回します。"], part="dial", zoom="dial", to="MDI", detect="aut_mdi"),
-    dict(id="estop_press", ch=1, kind="machine", title="非常停止を押す",
+    dict(id="estop_press", ch=1, fl={"program": 0}, kind="machine", title="非常停止を押す",
          lines=["設定を書くあいだは、押したままにします。"], part="estop", zoom="estop_press", detect="estop_on"),
-    dict(id="machine_in", ch=2, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
+    dict(id="machine_in", ch=2, fl={"program": 1}, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
          lines=["受注伝票番号を入れると、PC が機械を読んで自動で決めます。", "機械に書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
-    dict(id="cycle_power", ch=2, kind="machine", title="電源を入れ直す",
+    dict(id="cycle_power", ch=2, fl={"program": 1}, kind="machine", title="電源を入れ直す",
          lines=["「切」を押して、画面が消えたら「入」を押します。"], part="power", zoom="power_cycle", detect="cycled"),
-    dict(id="estop_release", ch=2, kind="machine", title="非常停止をもどす",
+    dict(id="estop_release", ch=2, fl={"program": 1}, kind="machine", title="非常停止をもどす",
          lines=["書き終わりました。赤いボタンを右に回します。"], part="estop", zoom="estop", detect="estop_off"),
     dict(id="dial_ref", ch=2, kind="machine", title="つまみを原点復帰に合わせる",
          lines=["電源のあとは、原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
     dict(id="jog_origin", ch=2, kind="machine", title="「＋B」を押し続ける",
          lines=["テーブルが回って、原点で止まります。"], part="keys", zoom="jog"),
+    dict(id="prog_done", ch=None, fl={"program": 2}, kind="info", title="入りました",
+         lines=["機械に入れ終わりました。"], art="auto_done", button="ホームへ"),
     dict(id="fields", ch=3, kind="input", title="機番・名前・温度を入れる",
          lines=["型式と測り方は、もう入っています。"], art="table"),
     dict(id="dial_mem", ch=3, kind="machine", title="つまみをメモリ運転に合わせる",
@@ -70,8 +84,22 @@ STEPS = [
     dict(id="result", ch=5, kind="pc", title="測り終わりました",
          lines=[], art="verdict", button="保存する"),
     dict(id="finish", ch=5, kind="info", title="おつかれさまでした",
-         lines=["保存しました。"], art="verdict_saved", button="終わる"),
+         lines=["保存しました。"], art="verdict_saved", button="ホームへ"),
+    dict(id="open_past", ch=None, fl={"results": 0}, kind="pc", title="保存した結果をえらぶ",
+         lines=["型式や機番でさがせます。"], art="folder", button="結果をさがす…"),
+    dict(id="view_result", ch=None, fl={"results": 1}, kind="info", title="結果",
+         lines=[], art="verdict", button="次へ ▶"),
+    dict(id="output", ch=None, fl={"results": 2}, kind="pc", title="印刷・PDF",
+         lines=["どちらも、検査記録と同じ内容です。"], art="printer", button="ホームへ"),
+    dict(id="alarm_look", ch=None, fl={"alarm": 0}, kind="alarm", title="アラームを調べる",
+         lines=[], art="alarm", button="ホームへ"),
 ]
+for _s in STEPS:                      # 各手順が、どの流れの何章目か（測るの章は ch のまま）
+    _s.setdefault("fl", {})
+    if _s["ch"] is not None:
+        _s["fl"]["measure"] = _s["ch"]
+    if _s["id"] == "home":
+        _s["fl"]["home"] = 0
 INDEX = {s["id"]: i for i, s in enumerate(STEPS)}
 
 
@@ -94,6 +122,7 @@ def machine_state(status=None, alarms=None, *, online=False):
         "alarm": vals.get("alarm"),
         "pw": any(c.startswith("PW") for c in codes),   # PW0000（電源を入れ直してください）など
         "codes": codes,
+        "alarms": [{"code": str(a.get("code", "")), "text": str(a.get("text", ""))} for a in (alarms or [])],
     }
 
 
@@ -140,6 +169,8 @@ def needed(step_id, st, ctx):
     ctx = ctx or {}
     s = step(step_id)
     d = s.get("detect")
+    if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look"):
+        return True
     if step_id == "power":
         return not st["online"]
     mode = ctx.get("param_estop", "estop_only")     # パラメータを書くときの非常停止（focas_ops.estop_mode）
@@ -185,28 +216,40 @@ def done_now(step_id, st, ctx, track=None):
         return bool(ctx.get("finished"))
     if step_id == "result":
         return bool(ctx.get("saved"))
+    if step_id == "open_past":
+        return bool(ctx.get("has_data"))
+    if k in ("alarm",) or step_id in ("output", "view_result"):
+        return True
     return False
 
 
-def next_index(i, st, ctx):
-    """i の次に出す手順の位置（要らないものは飛ばす）。最後なら None。"""
+def in_flow(step_id, flow):
+    return flow in step(step_id)["fl"]
+
+
+def next_index(i, st, ctx, flow="measure"):
+    """i の次に出す手順の位置（その流れに入らないもの・要らないものは飛ばす）。最後なら None。"""
     for j in range(i + 1, len(STEPS)):
-        if needed(STEPS[j]["id"], st, ctx):
+        if flow in STEPS[j]["fl"] and needed(STEPS[j]["id"], st, ctx):
             return j
     return None
 
 
-def first_index(st, ctx):
-    """最初に出す手順（用意するもの）。"""
-    return 0
+def first_index(st, ctx, flow="measure"):
+    """その流れの最初の手順。"""
+    for j in range(len(STEPS)):
+        if flow in STEPS[j]["fl"] and needed(STEPS[j]["id"], st, ctx):
+            return j
+    return None
 
 
-def chapter_progress(i, total_done_ids=()):
+def chapter_progress(i, flow="measure"):
     """章ごとの進み具合（0〜1）。画面上の棒に使う。i=いまの手順の位置。"""
-    cur = STEPS[i]["ch"]
+    names = FLOWS.get(flow, FLOWS["measure"])["chapters"]
+    cur = STEPS[i]["fl"].get(flow, 0)
     out = []
-    for c in range(len(CHAPTERS)):
-        ids = [s["id"] for s in STEPS if s["ch"] == c]
+    for c in range(len(names)):
+        ids = [x["id"] for x in STEPS if x["fl"].get(flow) == c]
         if c < cur:
             out.append(1.0)
         elif c > cur:

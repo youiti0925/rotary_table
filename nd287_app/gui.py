@@ -14628,7 +14628,32 @@ class MainWindow(QtWidgets.QMainWindow):
         return dict(missing=g["missing"], capturing=g["capturing"], count=g["count"], finished=g["finished"],
                     ng=g["ng"], has_spec=g["has_spec"], saved=g["saved"], saved_path=g["saved_path"],
                     programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset,
-                    param_estop=focas_ops.estop_mode(True))
+                    param_estop=focas_ops.estop_mode(True),
+                    has_data=self.has_view_data(), **self._easy_view())
+
+    def _easy_view(self):
+        """画面に出ている結果の、規格から外れた所の数（画面の赤い字を数えるだけ）。"""
+        try:
+            ng, spec = self._flow_verdict() if self.has_view_data() else (0, False)
+        except Exception:
+            ng, spec = 0, False
+        return dict(view_ng=ng, view_spec=spec)
+
+    def easy_open_past(self):
+        """保存した結果をえらぶ（通常の「過去データ」と同じ画面）。"""
+        PastDataDialog(self).exec()
+
+    def easy_print(self):
+        self.print_report()
+
+    def easy_pdf(self):
+        self.save_report_pdf()
+
+    def easy_alarm_info(self, query):
+        """番号やことばでアラームを探す。[(番号, 題名, 原因, やること)] を返す（アラーム検索と同じ中身）。"""
+        from . import fanuc_alarms
+        rows = fanuc_alarms.search_alarms(fanuc_alarms.load_alarms(self.settings.get("fanuc_alarm_csv")), query)
+        return [(a.get("code", ""), a.get("title", ""), a.get("cause", ""), a.get("remedy", "")) for a in rows[:5]]
 
     def easy_start_capture(self):
         """取込開始（測定の画面の「取込開始」と同じ）。入っていない欄があれば、理由を投げる。"""

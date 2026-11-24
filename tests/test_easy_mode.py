@@ -24,7 +24,7 @@ def S(aut=1, run=0, emergency=0, pw=False, online=True):
 
 class TestFlow(unittest.TestCase):
     def ids(self, st, ctx=None):
-        return [s["id"] for s in F.STEPS if F.needed(s["id"], st, ctx or {})]
+        return [s["id"] for s in F.STEPS if "measure" in s["fl"] and F.needed(s["id"], st, ctx or {})]
 
     def test_already_ok_machine_skips_power(self):
         ids = self.ids(S(aut=3))
@@ -121,8 +121,10 @@ class TestFlow(unittest.TestCase):
     def test_every_step_has_text_and_a_chapter(self):
         for s in F.STEPS:
             self.assertTrue(s["title"])
-            self.assertTrue(0 <= s["ch"] < len(F.CHAPTERS))
-        chs = [s["ch"] for s in F.STEPS]
+            self.assertTrue(s["fl"], s["id"])                 # どれかの流れに入っている
+            for fl, ch in s["fl"].items():
+                self.assertTrue(0 <= ch < len(F.FLOWS.get(fl, F.FLOWS["measure"])["chapters"]), s["id"])
+        chs = [s["ch"] for s in F.STEPS if s["ch"] is not None]
         self.assertEqual(chs, sorted(chs))          # 章は戻らない（一方通行）
 
     def test_no_abbreviations_in_beginner_text(self):
@@ -203,7 +205,9 @@ class TestArt(unittest.TestCase):
                  easy_art.jog(False), easy_art.counter(False), easy_art.counter(True), easy_art.scene(),
                  easy_art.auto(True, "x"), easy_art.auto(False, "x"), easy_art.product(True), easy_art.measure(0, 36),
                  easy_art.measure(20, 36), easy_art.verdict(True), easy_art.verdict(False), easy_art.verdict(None),
-                 easy_art.verdict(True, saved=True), easy_art.table_picture(), easy_art.blank()]
+                 easy_art.verdict(True, saved=True), easy_art.table_picture(), easy_art.blank(),
+                 easy_art.tile_measure(), easy_art.tile_program(), easy_art.tile_results(), easy_art.tile_alarm(),
+                 easy_art.folder(), easy_art.printer(), easy_art.alarm_screen(True), easy_art.alarm_screen(False)]
         for svg in pics:
             md.parseString(svg.encode("utf-8"))
 
@@ -250,7 +254,8 @@ class FakeHost:
                         if not e.text().strip())
         return dict(missing=missing, capturing=self.capturing, count=(10, 36) if self.capturing else (0, 0),
                     finished=self.finished, ng=self.ng, has_spec=True, saved=self.saved, saved_path="x.BS",
-                    programs=(100,), next_mode="", mode="回転分割", counter_reset=True)
+                    programs=(100,), next_mode="", mode="回転分割", counter_reset=True,
+                    has_data=self.has_data, view_ng=self.view_ng, view_spec=True)
 
     def easy_start_capture(self):
         self.calls.append("start")
@@ -273,6 +278,23 @@ class FakeHost:
 
     def on_model_entered(self):
         pass
+
+    has_data = False
+    view_ng = 0
+
+    def easy_open_past(self):
+        self.calls.append("past")
+        self.has_data = True
+
+    def easy_print(self):
+        self.calls.append("print")
+
+    def easy_pdf(self):
+        self.calls.append("pdf")
+
+    def easy_alarm_info(self, q):
+        self.calls.append(("alarm", q))
+        return [("PS0010", "使えないGコード", "指令が無効", "プログラムを直す")] if q else []
 
 
 class FakePoller:
@@ -300,12 +322,15 @@ class TestDialog(unittest.TestCase):
         from PySide6 import QtWidgets
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
-    def make(self, st):
+    def make(self, st, flow="measure"):
         from nd287_app import easy_mode
         host, poller = FakeHost(), FakePoller(st)
         dlg = easy_mode.EasyModeDialog(host, poller)
         dlg.show()
         self.app.processEvents()
+        if flow:                                       # 入り口のタイルから流れを選ぶ
+            dlg._start_flow(flow)
+            self.app.processEvents()
         return dlg, host, poller
 
     def sid(self, dlg):
@@ -380,12 +405,74 @@ class TestDialog(unittest.TestCase):
         dlg.close()
         self.assertIn("stop", poller.log)
 
+    def test_starts_at_home_with_four_tiles(self):
+        dlg, host, poller = self.make(S(), flow=None)
+        self.assertEqual(self.sid(dlg), "home")
+        self.assertEqual(set(dlg.tiles), {"measure", "program", "results", "alarm"})
+        self.assertFalse(dlg.home.isHidden())
+        self.assertTrue(dlg.b_next.isHidden())
+        dlg._start_flow("measure")
+        self.assertEqual(self.sid(dlg), "intro")
+        self.assertTrue(dlg.home.isHidden())
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
+    def test_program_flow(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1), flow="program")
+        self.assertEqual(self.sid(dlg), "prog_intro")
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "machine_in")       # 電源・MDI・非常停止は済んでいるので、すぐ機械に入れる
+        self.assertIsNotNone(dlg._wiz)
+        host.wiz.handoff = {"steps": [{"mode": "回転分割", "programs": [100]}]}
+        host.wiz.accept()
+        self.app.processEvents()
+        self.assertEqual(self.sid(dlg), "estop_release")      # 書き終えたら非常停止をもどす
+        poller.st = S(aut=0, emergency=0)
+        dlg._tick()
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "prog_done")
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
+    def test_results_flow(self):
+        dlg, host, poller = self.make(S(), flow="results")
+        self.assertEqual(self.sid(dlg), "open_past")
+        self.assertFalse(dlg.b_next.isEnabled())
+        dlg._open_past()
+        self.assertIn("past", host.calls)
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "view_result")
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "output")
+        dlg._print()
+        dlg._pdf()
+        self.assertEqual(host.calls[-2:], ["print", "pdf"])
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
+    def test_alarm_flow(self):
+        dlg, host, poller = self.make(S(), flow="alarm")
+        self.assertEqual(self.sid(dlg), "alarm_look")
+        dlg.e_alarm.setText("PS0010")
+        self.assertIn("プログラムを直す", dlg.lbl_alarm.text())
+        dlg.e_alarm.setText("")
+        self.assertIn("番号を入れて", dlg.lbl_alarm.text())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
     def test_back_goes_to_the_step_before(self):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         dlg._next()
         self.assertEqual(self.sid(dlg), "machine_in")
         dlg._back()
         self.assertEqual(self.sid(dlg), "intro")
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "home")
         self.assertFalse(dlg.b_back.isEnabled())
         dlg.close()
 

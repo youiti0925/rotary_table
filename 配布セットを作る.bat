@@ -16,8 +16,8 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [1/2] アプリ本体（exe）を作っています…（数分かかります）
-".venv\Scripts\python.exe" -m pip install -q pyinstaller
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name nd287_bunkatsu --paths . nd287_exe_entry.py
+".venv\Scripts\python.exe" -m pip install -q pyinstaller xlrd
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name nd287_bunkatsu --hidden-import xlrd --paths . nd287_exe_entry.py
 if errorlevel 1 (
     echo [エラー] exe を作れませんでした。
     pause

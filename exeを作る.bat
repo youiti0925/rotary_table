@@ -13,8 +13,8 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" -m pip install pyinstaller
-".venv\Scripts\python.exe" -m PyInstaller --onefile --windowed --name nd287_bunkatsu --paths . nd287_exe_entry.py
+".venv\Scripts\python.exe" -m pip install pyinstaller xlrd
+".venv\Scripts\python.exe" -m PyInstaller --onefile --windowed --name nd287_bunkatsu --hidden-import xlrd --paths . nd287_exe_entry.py
 if errorlevel 1 (
     echo [エラー] ビルドに失敗しました。
     pause

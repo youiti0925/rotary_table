@@ -97,6 +97,10 @@ def _has_files(d):
         return False
 
 
+# 特注パラ(Excel)の置き場の候補（Google ドライブ）。このPCに無ければ登録しない。2026-11-24 RC が実在を確認
+CUSTOM_DIR_CANDIDATES = [r"G:\マイドライブ\特注パラメータ"]
+
+
 def register_locations(dst):
     """BASIC の場所と製品データの場所を、設定に登録する。報告の行を返す。
 
@@ -125,6 +129,14 @@ def register_locations(dst):
         data["param_product_dir"] = S.DEFAULTS["param_product_dir"]
         lines.append(f"製品データの場所を登録しました: {data['param_product_dir']}")
         changed = True
+    cd = str(data.get("param_custom_dir") or "")
+    if not cd:                                   # 特注パラ(Excel。DDなど)の置き場。見つかったときだけ登録する
+        for cand in CUSTOM_DIR_CANDIDATES:
+            if Path(cand).is_dir():
+                data["param_custom_dir"] = cand
+                lines.append(f"特注パラの場所を登録しました: {cand}")
+                changed = True
+                break
     if changed:
         if existed:
             shutil.copy2(sp, dst / "settings.json.bak_install")

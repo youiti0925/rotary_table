@@ -178,6 +178,23 @@ class TestBasicAndLocations(Base):
         self.assertNotIn("param_basic_dir", st)
         self.assertIn("param_product_dir", st)
 
+    def test_custom_param_dir_registered_only_when_it_exists_and_empty(self):
+        from nd287_app import install
+        orig = install.CUSTOM_DIR_CANDIDATES
+        try:
+            ok = self.tmp / "特注パラメータ"
+            ok.mkdir()
+            install.CUSTOM_DIR_CANDIDATES = [str(self.tmp / "無い"), str(ok)]
+            lines = self.run_install()
+            self.assertEqual(self.settings()["param_custom_dir"], str(ok))
+            self.assertTrue(any("特注パラの場所を登録しました" in ln for ln in lines))
+            install.CUSTOM_DIR_CANDIDATES = [str(self.tmp / "無い")]     # 無ければ登録しない
+            (self.dst / "settings.json").unlink()
+            self.run_install()
+            self.assertNotIn("param_custom_dir", self.settings())
+        finally:
+            install.CUSTOM_DIR_CANDIDATES = orig
+
     def test_default_product_dir_is_the_company_share(self):
         from nd287_app.settings import DEFAULTS
         self.assertTrue(DEFAULTS["param_product_dir"].startswith("\\\\svn03\\"))

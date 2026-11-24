@@ -6455,6 +6455,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.b_measure.clicked.connect(self.accept)
         row.insertWidget(row.indexOf(self.b_next), self.b_measure)
         self.handoff = None                        # 測定の画面へ渡すもの（WP.handoff。機械に入れ終えたときだけ）
+        self.power_cycled = False                  # 書いたあと、電源の入れ直しが要った（はじめてモードが原点復帰を案内する）
         self.lbl_now = QtWidgets.QLabel("")        # 段③: いまの状態と、次に人がやること（1つだけ。大きく）
         self.lbl_now.setWordWrap(True)
         self.lbl_now.setTextFormat(QtCore.Qt.PlainText)
@@ -8252,6 +8253,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _on_writer_finished(self, ok):
         """段③の書込が終わった。全部書けて読み戻しも合ったときだけ、段④への案内を出す。"""
         self._params_ok = bool(ok)
+        w = self._writer
+        try:
+            if w is not None and ((w._result is not None and w._result.power_cycle) or w._stage1_done):
+                self.power_cycled = True
+        except Exception:
+            pass
         self._apply_mode()
 
     def reject(self):
@@ -14436,6 +14443,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_flow_skip.setToolTip("パラメータと測定プログラムが、もう機械に入っているとき。測定の準備へ進みます")
         self.b_flow_skip.clicked.connect(self._flow_skip)
         row.addWidget(self.b_flow_skip)
+        self.b_easy = QtWidgets.QPushButton("はじめてモード")
+        self.b_easy.setToolTip("絵で1つずつ案内する、初心者用の画面を開きます（今の画面はそのまま残ります）")
+        self.b_easy.clicked.connect(self.show_easy_mode)
+        row.addWidget(self.b_easy)
         b_proc = QtWidgets.QPushButton("手順を見る")
         b_proc.setToolTip("最初から最後までの手順（1枚）を開きます")
         b_proc.clicked.connect(lambda: HelpDialog(self, start_title="はじめての手順").exec())
@@ -14444,6 +14455,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.lbl_flow)        # 文は横いっぱい（狭い画面でも縦に伸びすぎない）
         bar.addWidget(box)
         self.addToolBar(QtCore.Qt.TopToolBarArea, bar)
+        tools_menu.addAction("はじめてモード（初心者用）…", self.show_easy_mode)
         self.act_flow = tools_menu.addAction("作業の案内を出す（上の帯）")
         self.act_flow.setCheckable(True)
         self.act_flow.setChecked(bool(self.settings.get("show_flow_guide", True)))
@@ -14577,6 +14589,51 @@ class MainWindow(QtWidgets.QMainWindow):
             self._flow_steps = []
             self.discard_measurement()
         self._refresh_flow()
+
+    # ----- はじめてモード（初心者用。今の機能を呼ぶだけ。easy_mode.py） -----
+
+    def show_easy_mode(self):
+        from . import easy_mode, easy_machine
+        poller = easy_machine.MachinePoller(self.settings)
+        poller.start()
+        easy_mode.EasyModeDialog(self, poller).exec()
+        self._refresh_flow()
+
+    def easy_ctx(self):
+        g = self._flow_inputs()
+        try:
+            counter_reset = FanucConfig.from_settings(self.settings).counter_reset
+        except Exception:
+            counter_reset = True
+        return dict(missing=g["missing"], capturing=g["capturing"], count=g["count"], finished=g["finished"],
+                    ng=g["ng"], has_spec=g["has_spec"], saved=g["saved"], saved_path=g["saved_path"],
+                    programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset)
+
+    def easy_start_capture(self):
+        """取込開始（測定の画面の「取込開始」と同じ）。入っていない欄があれば、理由を投げる。"""
+        missing = self.missing_required_fields()
+        if missing:
+            raise RuntimeError("入れていない欄があります: " + "、".join(missing))
+        self.start()
+        if self.seq is None:
+            raise RuntimeError("取込を始められませんでした")
+
+    def easy_save(self):
+        """セーブ（測定の画面の「セーブ」と同じ。上書きの確認などは、今までどおり出る）。"""
+        self.save()
+
+    def easy_next_mode(self, mode):
+        self.mode_combo.setCurrentText(mode)
+        self.on_model_entered()
+        self._flow_saved = False
+
+    def easy_open_wizard(self):
+        """かんたん作成を1回開く。戻り値 {"handoff": 機械に入れ終えた, "cycled": 電源の入れ直しが要った}。"""
+        dlg = ParamWizardDialog(self, self.settings, model=self.e_model.text().strip(), probe_machine=True)
+        dlg.exec()
+        h = getattr(dlg, "handoff", None)
+        self._apply_wizard_handoff(h)
+        return {"handoff": bool(h and h.get("steps")), "cycled": bool(getattr(dlg, "power_cycled", False))}
 
     def _apply_wizard_handoff(self, h):
         """かんたん作成で機械に入れ終えたあと: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""

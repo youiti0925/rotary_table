@@ -23,3 +23,4 @@ focas_helper.log
 # FOCAS の台帳（機械の CNC ID が入る。PCごと）
 マスタ/FOCAS機械台帳.csv
 .claude/worktrees/
+製品の型式索引.json

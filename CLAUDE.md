@@ -48,7 +48,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1438件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
+- 現在 **1441件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 

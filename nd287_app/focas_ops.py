@@ -1159,7 +1159,7 @@ def describe_result(res, *, undo=False):
     if res.power_cycle:
         lines.append("PW0000 が出ています。機械の電源を入れ直してください。 入れ直したあとは、"
                      "控えを取り直して確かめてください（電源を待って自動で確かめる機能は、まだありません）。")
-    if res.written():
-        lines.append("最後に、機械のセッティング画面で『パラメータ書込』（PWE）を 0 に戻してください"
-                     "（アプリは PWE を触りません）。")
+    # 書いたあとの「PWE を 0 に戻してください」は出さない（2026-11-24 利用者の決定:
+    # 現場ではパラメータ書込は ON のままがふつうで、毎回出ると邪魔）。
+    # 書けないとき（SW0100 が無い＝PWE が OFF）は writable_state が理由として出す。
     return lines

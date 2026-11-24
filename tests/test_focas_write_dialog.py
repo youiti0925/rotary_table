@@ -183,7 +183,7 @@ class TestFlow(WriteDialogBase):
         res = d.txt_result.toPlainText()
         self.assertIn("2 件が「書けた・読み戻しOK」", res)
         self.assertIn("すべて合っています", res)
-        self.assertIn("PWE", res)                                        # 最後に PWE を戻す案内
+        self.assertNotIn("PWE", res)                                     # 戻す案内は出さない（利用者の決定）
         self.assertIn("増えたアラームは、ありません", res)
         # 同じ控えで2回は書かせない
         self.assertFalse(d.b_write.isEnabled())

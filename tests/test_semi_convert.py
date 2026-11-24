@@ -210,49 +210,175 @@ def prm(model, gear, v1815):
               '"2024","","","","12500",""\n')
 
 
-class TestReference(unittest.TestCase):
+def prm_vals(model, gear, mode, extra=None, motor="M1"):
+    """フル/セミの組の試験用ファイル。受注ごとに違う値(1850)・型式ごとに同じ値を持つ。"""
+    base = {"1013": "00000000", "1260": "360.000", "1820": "2", "1850": "0", "2020": "279", "2022": "111",
+            "2023": "8192"}
+    if mode == "フル":
+        base.update({"1815": "00100010", "1821": "45000", "2000": "***1***0", "2018": "*******1",
+                     "2024": "69", "2084": "9", "2085": "25", "2209": "*1******"})
+    else:
+        base.update({"1815": "00100000", "1821": "2000", "2000": "***0***0", "2024": "12500",
+                     "2084": "1", "2085": "500", "2209": "*0******"})
+    base.update(extra or {})
+    head = (HEADER.format(model=model, gear=gear).replace("Motor Number=M1", f"Motor Number={motor}"))
+    body = '"番号","軸","和名","英名","値","説明"\n'
+    for k, v in base.items():
+        q = "'" if _bitlike(v) else ""
+        body += f'"{k}","","","","{q}{v}",""\n'
+    return head + body
+
+
+def _bitlike(v):
+    return len(v) == 8 and set(v) <= set("01*")
+
+
+class TestPairs(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
 
     def w(self, name, text):
         Path(self.d, name).write_bytes(text.encode("cp932"))
 
-    def test_finds_same_model_semi(self):
-        self.w("R50000001.prm", prm("RTV-231,WF", "1/180", "00100010"))       # フル → 対象外
-        self.w("R50000002.prm", prm("RTV-999", "1/180", "00100000"))          # 別型式
-        self.w("T50000003.prm", prm("RTV-231,WF", "1/180", "00100000"))       # 傾斜
-        self.w("R50000004.prm", prm("RTV-231,WF", "1/90", "00100000"))        # 別減速比
-        self.w("R50000005.prm", prm("RTV-231,WF", "1/180", "00100000"))       # これ
-        hit = S.find_semi_reference(self.d, model="RTV-231,WF", gear="1/180", motor_no="M1", kind="回転")
-        self.assertEqual(hit["name"], "R50000005.prm")
-        self.assertEqual(hit["values"]["1821"], "2000")
+    def find(self, **kw):
+        args = dict(model="RTV-231,WF", gear="1/180", motor_no="M1", kind="回転")
+        args.update(kw)
+        return S.find_pair_rules(self.d, **args)
 
-    def test_none_when_absent_or_excluded(self):
-        self.w("R50000001.prm", prm("RTV-231,WF", "1/180", "00100010"))
-        self.assertIsNone(S.find_semi_reference(self.d, model="RTV-231,WF", gear="1/180", kind="回転"))
-        self.w("R50000005.prm", prm("RTV-231,WF", "1/180", "00100000"))
-        self.assertIsNone(S.find_semi_reference(self.d, model="RTV-231,WF", gear="1/180", kind="回転",
-                                                exclude_path=str(Path(self.d, "R50000005.prm"))))
-        self.assertIsNone(S.find_semi_reference(self.d + "x", model="a"))
+    def test_model_levels(self):
+        self.assertEqual(S.model_level("RTV-231,WF", "RTV-231,WF"), 0)
+        self.assertEqual(S.model_level("RTV-231,WF", "RTV-231WF"), 1)
+        self.assertEqual(S.model_level("RTV-231,WF", "RTV-231"), 2)
+        self.assertEqual(S.model_level("RTV-231,WF", "RTV-232"), None)
 
-    def test_cancel(self):
-        self.w("R50000005.prm", prm("RTV-231,WF", "1/180", "00100000"))
-        self.assertIsNone(S.find_semi_reference(self.d, model="RTV-231,WF", kind="回転", cancel=lambda: True))
+    def test_pair_rules_only_differing_and_not_individual(self):
+        f = {"1815": "00100010", "1821": "45000", "2024": "69", "1850": "5", "2000": "***1***0",
+             "2018": "*******1", "2020": "279", "1013": "00000000"}
+        s_ = {"1815": "00100000", "1821": "2000", "2024": "12500", "1850": "9", "2000": "***0***0",
+              "2020": "299", "1013": "00000000"}
+        r = S.pair_rules(f, s_)
+        self.assertIn(("bit", 1815, 1, "0"), r)
+        self.assertIn(("val", 1821, "2000"), r)
+        self.assertIn(("bit", 2000, 4, "0"), r)
+        self.assertIn(("drop", 2018), r)
+        self.assertFalse([x for x in r if x[1] in (1850, 2020, 1013)])      # 受注ごとに違う値は入れない
+
+    def test_apsz_bit_ignored(self):
+        r = S.pair_rules({"1815": "00100010"}, {"1815": "00000000"})        # #5(APZ) は据付けごと
+        self.assertEqual(r, {("bit", 1815, 1, "0")})
+
+    def test_vote_majority(self):
+        a = {("val", 1821, "2000"), ("val", 2022, "5")}
+        b = {("val", 1821, "2000")}
+        c = {("val", 1821, "2000"), ("val", 2022, "7")}
+        taken, left = S.vote_rules([a, b, c])
+        self.assertEqual([r for r, _n in taken], [("val", 1821, "2000")])
+        self.assertEqual(sorted(r for r, _n in left), [("val", 2022, "5"), ("val", 2022, "7")])
+
+    def test_find_pairs_and_apply_only_pair_numbers(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル", {"1850": "11"}))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"1850": "99"}))
+        self.w("R50000003.prm", prm_vals("RTV-999", "1/180", "セミ"))          # 別型式
+        self.w("T50000004.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))       # 傾斜
+        self.w("R50000005.prm", prm_vals("RTV-231,WF", "1/90", "セミ"))        # 別減速比
+        rules = self.find()
+        self.assertEqual(rules["n_pairs"], 1)
+        self.assertEqual(rules["level"], 0)
+        # 利用者の製品（別の受注。受注ごとに違う値を持つ）
+        mine = {"1013": "'00000000", "1260": "360.000", "1820": "2", "1815": "'00100010",
+                "1821": "45000", "2000": "'***1***0", "2018": "'*******1", "2023": "8192",
+                "2024": "69", "2084": "9", "2085": "25", "2209": "'*1******", "2020": "279",
+                "1850": "-94", "2022": "111"}
+        r = S.convert(mine, rules=rules, gear_header="1/180")
+        self.assertEqual(r["source"], "組")
+        self.assertIn("同じ型式の組 1組から", r["basis"])
+        for n, v in SEMI.items():
+            self.assertEqual(norm(r["values"][n]), v, n)
+        self.assertEqual(r["values"]["1850"], "-94")                   # 受注ごとに違う値は触らない
+        self.assertEqual(r["values"]["2022"], "111")
+        self.assertNotIn("2018", r["values"])
+        self.assertIn("一致", r["compare"])
+        self.assertNotIn("違う", r["compare"])
+
+    def test_pair_wins_over_formula_and_cmr_other_than_2(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル", {"1820": "4"}))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"1820": "4", "1821": "2222"}))
+        rules = self.find()
+        mine = {k: v for k, v in FULL.items()}
+        mine["1820"] = "4"
+        r = S.convert(mine, rules=rules, gear_header="1/180")
+        self.assertEqual(r["source"], "組")                            # CMR が 2 以外でも、実物の根拠があれば使う
+        self.assertEqual(r["values"]["1821"], "2222")
+        self.assertIn("計算式は使えません", r["compare"])
+        self.assertIn("CMR", r["compare"])
+        # 組が無ければ式になり、CMR 2 以外は変換しない
+        r2 = S.convert(mine, rules=None, gear_header="1/180")
+        self.assertTrue(r2["stop"])
+
+    def test_formula_disagreement_listed(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"1821": "2222"}))
+        r = S.convert(FULL, rules=self.find(), gear_header="1/180")
+        self.assertIn("計算と実物で違う: 1821", r["compare"])
+        self.assertEqual(norm(r["values"]["1821"]), "2222")
+
+    def test_outside_known_numbers_flagged(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル", {"2200": "1"}))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"2200": "7"}))
+        r = S.convert(dict(FULL, **{"2200": "1"}), rules=self.find(), gear_header="1/180")
+        c = next(c for c in r["changes"] if c["num"] == 2200)
+        self.assertTrue(c["review"])
+        self.assertEqual(r["values"]["2200"], "7")
+
+    def test_minority_rule_not_applied_but_listed(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"2022": "5"}))
+        self.w("R50000003.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"2022": "7"}))
+        self.w("R50000004.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))
+        rules = self.find()
+        self.assertEqual(rules["n_pairs"], 3)
+        r = S.convert(FULL, rules=rules, gear_header="1/180")
+        self.assertEqual(r["values"]["2022"] if "2022" in r["values"] else None, FULL.get("2022"))
+        self.assertTrue([c for c in r["changes"] if c.get("unapplied") and c["num"] == 2022])
+
+    def test_model_ladder_head_only(self):
+        self.w("R50000001.prm", prm_vals("RTV-231", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231", "1/180", "セミ"))
+        rules = self.find()                                            # 型式 'RTV-231,WF' → カンマ前で見つかる
+        self.assertEqual(rules["level"], 2)
+        self.assertEqual(rules["n_pairs"], 1)
+
+    def test_no_pair_means_formula(self):
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))   # セミだけ（フルの実物が無い）
+        rules = self.find()
+        self.assertEqual(rules["n_pairs"], 0)
+        self.assertEqual(rules["semi_ref"]["name"], "R50000002.prm")
+        r = S.convert(FULL, rules=rules, gear_header="1/180")
+        self.assertEqual(r["source"], "計算式")
+        c = S.compare_reference(r, rules["semi_ref"]["values"])
+        self.assertEqual(c["matched"], c["total"] - len(c["mismatch"]))
+
+    def test_none_when_absent(self):
+        self.assertIsNone(self.find())
+        self.assertIsNone(S.find_pair_rules(self.d + "x", model="a"))
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))
+        self.assertIsNone(self.find(cancel=lambda: True))
+        self.assertIsNone(self.find(model="ZZZ-1"))
+
+    def test_exclude_own_file(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))
+        r = self.find(exclude_path=str(Path(self.d, "R50000002.prm")))
+        self.assertEqual(r["n_pairs"], 0)
 
     def test_compare_counts_and_mismatch(self):
         r = S.convert(FULL, gear_header="1/180")
-        actual = dict(SEMI)                                   # 写真のセミ（2018 の行なし）
-        c = S.compare_reference(r, actual)
+        c = S.compare_reference(r, dict(SEMI))
         self.assertEqual((c["matched"], c["total"]), (8, 8))
-        self.assertEqual(c["mismatch"], [])
-        actual2 = dict(actual, **{"2084": "2", "2018": "1"})
-        c = S.compare_reference(r, actual2)
+        c = S.compare_reference(r, dict(SEMI, **{"2084": "2", "2018": "1"}))
         self.assertEqual(c["matched"], 6)
         self.assertEqual(sorted(n for n, _a, _b in c["mismatch"]), [2018, 2084])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ---------------------------------------------------------------- 画面（かんたん作成の段①）
@@ -330,7 +456,8 @@ class TestWizardSemi(WizardBase):
         self.assertIn("45000 → 2000", t)
         self.assertIn("2018", t)
         self.assertIn("書かない", t)
-        self.assertIn("要確認", w.lbl_semi.text())
+        self.assertIn("要確認", t)
+        self.assertIn("根拠: 計算式", t)
         self.assertIn("セミクロに変換", w.lbl_decided.text())
 
     def test_selection_resets_when_product_changes(self):
@@ -356,6 +483,7 @@ class TestWizardSemi(WizardBase):
         import nd287_app.gui as G
         w = self.open()
         w.cmb_semi.setCurrentIndex(1)
+        self.wait_search(w)
         self.pick_ctrl(w)
         job = self.job(w)
         (settings, plan_fn), kw = job
@@ -383,6 +511,7 @@ class TestWizardSemi(WizardBase):
         import nd287_app.gui as G
         w = self.open()
         w.cmb_semi.setCurrentIndex(1)
+        self.wait_search(w)
         self.pick_ctrl(w)
         out = Path(self.settings["param_product_dir"]).parent / "out"
         out.mkdir(exist_ok=True)
@@ -402,30 +531,48 @@ class TestWizardSemi(WizardBase):
         self.assertIn("_SEMI.", seen[0])
         self.assertIn("SEMI", seen[0])
 
-    def test_real_semi_reference_shown_with_counts(self):
+    def wait_search(self, w):
+        for _ in range(200):
+            self.app.processEvents()
+            if not w._semi_pending:
+                break
+            time.sleep(0.02)
+        self.app.processEvents()
+
+    def test_pair_in_product_folder_is_first_basis(self):
+        (self.prod / "R50000008.prm").write_text(product_text(extra={"1850": "5"}), encoding="cp932")
         (self.prod / "R50000009.prm").write_text(
             product_text(v1815="00100000", extra={"1821": "2000", "2000": "***0***0", "2024": "12500",
                                                   "2084": "1", "2085": "500", "2209": "*0******",
-                                                  "2018": "*******1"}), encoding="cp932")
+                                                  "2018": "", "1850": "9"}), encoding="cp932")
         w = self.open()
         w.cmb_semi.setCurrentIndex(1)
-        for _ in range(100):
-            self.app.processEvents()
-            if "実物があります" in w.lbl_semi_ref.text():
-                break
-            time.sleep(0.05)
-        t = w.lbl_semi_ref.text()
-        self.assertIn("R50000009.prm", t)
-        self.assertIn("一致", t)
-        self.assertIn("2018", t)                             # 実物には 2018 の行がある → 違う番号に出る
+        self.wait_search(w)
+        t = w.txt_semi.toPlainText()
+        self.assertIn("同じ型式の組 1組から", t)
+        self.assertIn("45000 → 2000", t)
+        self.assertNotIn("1850", t)                          # 受注ごとに違う値は組の差に入らない
 
-    def test_no_reference_says_nothing(self):
+    def test_no_pair_uses_formula_and_says_nothing_extra(self):
         w = self.open()
         w.cmb_semi.setCurrentIndex(1)
-        for _ in range(40):
-            self.app.processEvents()
-            time.sleep(0.02)
+        self.wait_search(w)
+        self.assertIn("計算式", w.txt_semi.toPlainText())
         self.assertEqual(w.lbl_semi_ref.text(), "")
+
+    def test_gather_waits_while_searching(self):
+        w = self.open()
+        w.cmb_semi.setCurrentIndex(1)
+        self.wait_search(w)
+        self.pick_ctrl(w)
+        w._semi_pending = True
+        warned = []
+        import nd287_app.gui as G
+        with mock.patch.object(G.QtWidgets.QMessageBox, "question",
+                               lambda *a, **k: G.QtWidgets.QMessageBox.Yes), \
+                mock.patch.object(G.QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2])):
+            self.assertIsNone(w._machine_job())
+        self.assertTrue(any("探している途中" in x for x in warned))
 
 
 HERE_FIX = Path(_H) / "fixtures"

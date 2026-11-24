@@ -160,9 +160,9 @@ def detect(raw, values, axis, *, loop_number="1815", loop_bit=1, full_when=1):
     return mode
 
 
-def convert(values, *, raw="", axis=None, gear_header="", gear_db="", lookup=None,
-            loop_number="1815", loop_bit=1, full_when=1):
-    """製品の値（{番号: 値}）をセミクロ用にする。
+def convert_formula(values, *, raw="", axis=None, gear_header="", gear_db="", lookup=None,
+                    loop_number="1815", loop_bit=1, full_when=1):
+    """計算式で、製品の値（{番号: 値}）をセミクロ用にする。
 
     戻り値 dict:
       mode     … 製品の判定 'フル' / 'セミ' / ''
@@ -175,7 +175,7 @@ def convert(values, *, raw="", axis=None, gear_header="", gear_db="", lookup=Non
     """
     values = dict(values or {})
     out = {"mode": "", "stop": [], "values": values, "changes": [], "skipped": [], "basis": "",
-           "gear": ""}
+           "gear": "", "source": "", "compare": ""}
     if lookup is None and raw and axis:
         lookup = lambda n: fanuc_param.value_on_axis(raw, n, axis)
 
@@ -258,92 +258,210 @@ def convert(values, *, raw="", axis=None, gear_header="", gear_db="", lookup=Non
                     f"・モーター1回転 {L} パルス")
 
     # ---- 値を作る ----
-    new = dict(values)
-    changes = out["changes"]
+    ed = _Edit(values, lookup)
+    ed.set_bit(int(str(loop_number)), int(loop_bit), not bool(int(full_when)),
+               f"#{loop_bit} を 0 に", force=True)
+    ed.set_num(1821, Fraction(L), f"{int(table_pulses)} × {out['gear']} ＝ モーター1回転のパルス数")
+    ed.set_bit(2000, 0, False, "#0 を 0 に（セミクロは全部 0）", only_if="1")
+    ed.set_bit(2000, 4, False, "#4 を 0 に（実データで一番多い傾向。要確認）", only_if="1", review=True)
+    ed.set_num(2023, Fraction(VELPULSE_SEMI), "セミクロは 8192")
+    ed.set_num(2024, Fraction(PPLS_SEMI), "セミクロは 12500")
+    ed.set_num(2084, Fraction(g.numerator), f"{L} / {GEAR_DIV} を約分")
+    ed.set_num(2085, Fraction(g.denominator), f"{L} / {GEAR_DIV} を約分")
+    ed.set_bit(2209, 6, False, "#6 を 0 に", only_if="1")
+    ed.drop(DROP_NUMBERS, "書かない（製品データから外す。機械の今の値のまま）")
+    out["values"], out["changes"], out["skipped"] = ed.new, ed.changes, ed.skipped
+    out["source"] = "計算式"
+    return out
 
-    def getn(n):                                   # 変えた後の値（同じ番号を2回変えても消し合わない）
-        k = _find_key(new, n)
-        return new[k] if k is not None else get(n)
 
-    def put(n, v):
-        k = _find_key(new, n)
-        new[k if k is not None else str(n)] = v
+class _Edit:
+    """製品の値の辞書を書き換え、差の一覧（changes / skipped）を作る。元の辞書は変えない。"""
 
-    def num_change(n, target, note):
-        cur = getn(n)
+    def __init__(self, values, lookup=None):
+        self.new = dict(values)
+        self.lookup = lookup
+        self.changes, self.skipped = [], []
+
+    def get(self, n):
+        k = _find_key(self.new, n)
+        if k is not None:
+            return self.new[k]
+        return self.lookup(n) if self.lookup else None
+
+    def put(self, n, v):
+        k = _find_key(self.new, n)
+        self.new[k if k is not None else str(n)] = v
+
+    def _name(self, n):
+        return NAMES.get(n) or (_MPI_NAME if n in DROP_NUMBERS else "")
+
+    def set_num(self, n, target, note, review=False):
+        cur = self.get(n)
         cv = to_number(cur) if cur is not None else None
         if cv is not None and cv == target:
             return
         s = str(int(target)) if Fraction(target).denominator == 1 else str(float(target))
-        put(n, s)
-        changes.append({"num": n, "name": NAMES[n], "full": "" if cur is None else _clean(cur),
-                        "semi": s, "note": note, "review": False})
+        self.put(n, s)
+        self.changes.append({"num": n, "name": self._name(n), "full": "" if cur is None else _clean(cur),
+                             "semi": s, "note": note, "review": review})
 
-    def bit_change(n, bit, on, note, *, only_if=None, force=False, review=False):
-        cur = getn(n)
+    def set_text(self, n, text, note, review=False):
+        """数として読めない値（そのままの文字）を置く。数として同じなら何もしない。"""
+        cur = self.get(n)
+        if cur is not None and _same_value(cur, text):
+            return
+        self.put(n, text)
+        self.changes.append({"num": n, "name": self._name(n), "full": "" if cur is None else _clean(cur),
+                             "semi": _clean(text), "note": note, "review": review})
+
+    def set_bit(self, n, bit, on, note, *, only_if=None, force=False, review=False):
+        cur = self.get(n)
         if cur is None:
             return
         ch = bit_char(cur, bit)
         if ch == "":
             return
-        if not force and ch != only_if:
+        if not force and only_if is not None and ch != only_if:
             return
-        if ch == ("1" if on else "0") and not force:
+        if not force and ch == ("1" if on else "0"):
             return
         newv = set_bit_masked(cur, bit, on)
         if newv is None or newv == str(cur).strip():
             return
-        put(n, newv)
-        changes.append({"num": n, "name": NAMES[n], "full": _clean(cur), "semi": _clean(newv),
-                        "note": note, "review": review})
+        self.put(n, newv)
+        prev = next((c for c in self.changes if c["num"] == n and c.get("bits")), None)
+        if prev:                                    # 同じ番号の別のビット: 1行にまとめる
+            prev["semi"] = _clean(newv)
+            prev["note"] += f"／{note}"
+            prev["review"] = prev["review"] or review
+            return
+        self.changes.append({"num": n, "name": self._name(n), "full": _clean(cur), "semi": _clean(newv),
+                             "note": note, "review": review, "bits": True})
 
-    bit_change(int(str(loop_number)), int(loop_bit), not bool(int(full_when)),
-               f"#{loop_bit} を 0 に", force=True)
-    num_change(1821, Fraction(L), f"{int(table_pulses)} × {out['gear']} ＝ モーター1回転のパルス数")
-    bit_change(2000, 0, False, "#0 を 0 に（セミクロは全部 0）", only_if="1")
-    bit_change(2000, 4, False, "#4 を 0 に（実データで一番多い傾向。要確認）", only_if="1", review=True)
-    num_change(2023, Fraction(VELPULSE_SEMI), "セミクロは 8192")
-    num_change(2024, Fraction(PPLS_SEMI), "セミクロは 12500")
-    num_change(2084, Fraction(g.numerator), f"{L} / {GEAR_DIV} を約分")
-    num_change(2085, Fraction(g.denominator), f"{L} / {GEAR_DIV} を約分")
-    bit_change(2209, 6, False, "#6 を 0 に", only_if="1")
-
-    # ---- 書かない番号 ----
-    kept, dropped = param_build.drop_params(new, DROP_NUMBERS)
-    for k, v in dropped.items():
-        n = _num_of(k)
-        out["skipped"].append({"num": n, "name": DROP_NAMES.get(n, _MPI_NAME), "full": _clean(v),
-                               "note": "書かない（製品データから外す。機械の今の値のまま）"})
-    out["values"] = kept
-    return out
+    def drop(self, numbers, note):
+        kept, dropped = param_build.drop_params(self.new, numbers)
+        for k, v in dropped.items():
+            n = _num_of(k)
+            self.skipped.append({"num": n, "name": self._name(n), "full": _clean(v), "note": note})
+        self.new = kept
 
 
-# ------------------------------------------------------------------ 同じ型式のセミクロ実物（参考）
-def _norm_gear(s):
-    f = parse_gear(s)
-    return f if f is not None else _clean(s)
+# ------------------------------------------------------------------ 同じ型式のフル／セミの組（第一の根拠）
+# 受注番号が違っても、型式・減速比・モーター・傾斜/回転が同じなら「もの」は同じ。共有にフルとセミの両方があれば、
+# その組で値が違う番号が、フル→セミの関係そのもの（実物の根拠）。計算式はその次。
+INDIVIDUAL_NUMBERS = (1850, 1851, 1852, 2020, 6750, 6751, 6752, 6753, 6754)   # 受注・据付けごとに違う値は組の差に入れない
+INDIVIDUAL_BITS = ((1815, 5),)                                                  # 原点確立(APZ)も据付けごと
+KNOWN_NUMBERS = tuple(NAMES) + tuple(DROP_NUMBERS)                              # 実データで確かめた番号。外は「要確認」
+MAX_PAIRS = 24
 
 
-def find_semi_reference(folder, *, model, gear="", motor_no="", kind="", exclude_path="",
-                        loop_number="1815", loop_bit=1, full_when=1, cancel=None, max_files=None):
-    """製品の場所から、型式・減速比・モーター・傾斜/回転が同じで 1815 #1=0（セミ）の実物を1つ探す。
-    読むだけ。画面を固めないよう、呼ぶ側が別スレッドで呼ぶ（cancel() が真なら中止）。
-    戻り値 {path, name, values{番号:値}}、無ければ None。"""
+def _compact(m):
+    return "".join(ch for ch in str(m or "").upper() if not ch.isspace() and ch != ",")
+
+
+def _head(m):
+    return str(m or "").split(",")[0].strip().upper()
+
+
+def model_level(want, got):
+    """型式の照合の順: 0=そのまま／1=空白・カンマを詰めた形／2=カンマの前だけ。合わなければ None。"""
+    want, got = str(want or "").strip(), str(got or "").strip()
+    if not want or not got:
+        return None
+    if want == got:
+        return 0
+    if _compact(want) == _compact(got):
+        return 1
+    if _head(want) == _head(got):
+        return 2
+    return None
+
+
+def _is_bits(v):
+    s = _clean(v)
+    return len(s) == 8 and set(s) <= set("01*")
+
+
+def pair_rules(fvals, svals):
+    """フル1本・セミ1本の値から「フル→セミで変わるところ」を取り出す（キーの集合）。
+    ビット列は桁ごと。受注ごとに違う番号（INDIVIDUAL_*）は入れない。"""
+    rules = set()
+    f = {}
+    s = {}
+    for src, dst in ((fvals, f), (svals, s)):
+        for k, v in (src or {}).items():
+            n = _num_of(k)
+            if n is not None and _clean(v) != "":
+                dst.setdefault(n, v)
+    for n in sorted(set(f) | set(s)):
+        if n in INDIVIDUAL_NUMBERS:
+            continue
+        if n in f and n not in s:
+            rules.add(("drop", n))
+        elif n in s and n not in f:
+            rules.add(("val", n, _clean(s[n])))
+        elif _is_bits(f[n]) and _is_bits(s[n]):
+            a, b = _clean(f[n]), _clean(s[n])
+            for i in range(8):
+                bit = 7 - i
+                if a[i] in "01" and b[i] in "01" and a[i] != b[i] and (n, bit) not in INDIVIDUAL_BITS:
+                    rules.add(("bit", n, bit, b[i]))
+        elif not _same_value(f[n], s[n]):
+            rules.add(("val", n, _clean(s[n])))
+    return rules
+
+
+def vote_rules(per_pair):
+    """組ごとの規則の集合 → 多数決。戻り値 (採る規則のリスト, 採らなかった [(規則, 件数)])。
+    同じ番号（ビットは桁）で値が割れたときは一番多いものを採る（同数なら採らない）。"""
+    from collections import Counter
+    n = len(per_pair)
+    cnt = Counter(r for rs in per_pair for r in rs)
+    groups = {}
+    for r, c in cnt.items():
+        slot = r[:2] if r[0] != "bit" else r[:3]
+        groups.setdefault(slot, []).append((r, c))
+    taken, left = [], []
+    for slot, lst in groups.items():
+        lst.sort(key=lambda x: -x[1])
+        top = lst[0]
+        tie = len(lst) > 1 and lst[1][1] == top[1]
+        if top[1] * 2 > n and not tie:
+            taken.append((top[0], top[1]))
+            left += lst[1:]
+        else:
+            left += lst
+    key = lambda x: (x[0][1], x[0][0], str(x[0][2:]))
+    return sorted(taken, key=key), sorted(left, key=key)
+
+
+def find_pair_rules(folder, *, model, gear="", motor_no="", kind="", exclude_path="",
+                    loop_number="1815", loop_bit=1, full_when=1, cancel=None, max_files=None, cap=6):
+    """製品の場所から、型式（そのまま→詰めた形→カンマ前の順）・減速比・モーター・傾斜/回転が同じ
+    フルとセミの組を探し、「フル→セミで変わるところ」を多数決で決める。読むだけ。
+    画面を固めないよう、呼ぶ側が別スレッドで呼ぶ（cancel() が真なら None）。
+
+    戻り値 None（同じ型式のものが1本も無い）、または dict:
+      level / n_pairs / fulls / semis（ファイル名）／ rules [(規則, 件数)] ／ unapplied [(規則, 件数)]
+      semi_ref … セミの実物1本 {name, values}（組が作れないときの参考用）
+    """
     model = str(model or "").strip()
     prefix = {"傾斜": "T", "回転": "R"}.get(kind, "")
     if not model or not folder or not Path(folder).is_dir():
         return None
     ex = os.path.normcase(os.path.abspath(exclude_path)) if exclude_path else ""
-    seen = 0
+    head_u = _head(model)
     with os.scandir(folder) as it:
-        names = sorted((e.name for e in it
-                        if e.name[:1].upper() in (("T", "R") if not prefix else (prefix,))
-                        and ("." + e.name.rpartition(".")[2].lower()) in (".prm", ".txt", ".dat")))
+        names = sorted(e.name for e in it
+                       if e.name[:1].upper() in ((prefix,) if prefix else ("T", "R"))
+                       and ("." + e.name.rpartition(".")[2].lower()) in (".prm", ".txt", ".dat"))
+    found, seen = [], 0
     for name in names:
         if cancel and cancel():
             return None
         if max_files is not None and seen >= max_files:
-            return None
+            break
         p = Path(folder) / name
         if ex and os.path.normcase(os.path.abspath(p)) == ex:
             continue
@@ -351,7 +469,7 @@ def find_semi_reference(folder, *, model, gear="", motor_no="", kind="", exclude
         try:                                  # 先頭だけ読んで型式が違えば捨てる（共有に約1.5万件あるため）
             with open(p, "rb") as fh:
                 hb = fh.read(4096)
-                if ("Model=" + model) not in hb.decode("cp932", errors="replace"):
+                if head_u not in hb.decode("cp932", errors="replace").upper():
                     continue
                 text = (hb + fh.read()).decode("cp932", errors="replace")
         except (OSError, UnicodeError):
@@ -361,18 +479,112 @@ def find_semi_reference(folder, *, model, gear="", motor_no="", kind="", exclude
         except Exception:
             continue
         hv = lambda k: prm_format.header_get(doc, k, "").strip()
-        if hv("Model") != model:
+        lv = model_level(model, hv("Model"))
+        if lv is None:
             continue
         if gear and _norm_gear(hv("Gear Rate")) != _norm_gear(gear):
             continue
         if motor_no and hv("Motor Number") and hv("Motor Number") != str(motor_no).strip():
             continue
-        v1815 = prm_format.param_value(doc, loop_number)
-        if fanuc_param.closed_loop_mode(v1815, int(loop_bit), int(full_when)) != "セミ":
+        mode = fanuc_param.closed_loop_mode(prm_format.param_value(doc, loop_number),
+                                            int(loop_bit), int(full_when))
+        if mode not in ("フル", "セミ"):
             continue
         vals = {num: v for (num, v, _jp, _en) in prm_format.iter_params(doc) if v != ""}
-        return {"path": str(p), "name": name, "values": vals}
-    return None
+        found.append({"name": name, "level": lv, "mode": mode, "values": vals})
+        if (lv == 0 and sum(1 for e in found if e["level"] == 0 and e["mode"] == "フル") >= cap
+                and sum(1 for e in found if e["level"] == 0 and e["mode"] == "セミ") >= cap):
+            break
+    if not found:
+        return None
+    semi_any = next((e for e in found if e["mode"] == "セミ"), None)
+    ref = {"name": semi_any["name"], "values": semi_any["values"]} if semi_any else None
+    for lv in (0, 1, 2):
+        fulls = [e for e in found if e["mode"] == "フル" and e["level"] <= lv][:cap]
+        semis = [e for e in found if e["mode"] == "セミ" and e["level"] <= lv][:cap]
+        if fulls and semis:
+            pairs = [(f, s) for s in semis for f in fulls][:MAX_PAIRS]
+            taken, left = vote_rules([pair_rules(f["values"], s["values"]) for f, s in pairs])
+            return {"level": lv, "n_pairs": len(pairs), "fulls": [e["name"] for e in fulls],
+                    "semis": [e["name"] for e in semis], "rules": taken, "unapplied": left,
+                    "semi_ref": ref}
+    return {"level": None, "n_pairs": 0, "fulls": [], "semis": [], "rules": [], "unapplied": [],
+            "semi_ref": ref}
+
+
+def _rule_text(r):
+    if r[0] == "drop":
+        return f"{r[1]} 書かない"
+    if r[0] == "bit":
+        return f"{r[1]} #{r[2]}={r[3]}"
+    return f"{r[1]}={r[2]}"
+
+
+def convert(values, *, rules=None, **kw):
+    """フルクロ → セミクロ。根拠の順番: (a) 同じ型式のフル/セミの組（rules＝find_pair_rules の結果）
+    → (b) 計算式 → (c) どちらも無ければ変換しない（理由1行）。戻り値は convert_formula と同じ形に
+    source（根拠）・compare（計算式との比べ）を足したもの。"""
+    calc = convert_formula(values, **kw)
+    if calc["mode"] != "フル":
+        return calc
+    if not rules or not rules.get("rules"):
+        return calc
+    lookup = kw.get("lookup")
+    if lookup is None and kw.get("raw") and kw.get("axis"):
+        raw, axis = kw["raw"], kw["axis"]
+        lookup = lambda n: fanuc_param.value_on_axis(raw, n, axis)
+    ed = _Edit(values, lookup)
+    loop_number, loop_bit = kw.get("loop_number", "1815"), int(kw.get("loop_bit", 1))
+    full_when = int(kw.get("full_when", 1))
+    ed.set_bit(int(str(loop_number)), loop_bit, not bool(full_when), f"#{loop_bit} を 0 に", force=True)
+    n_pairs = rules["n_pairs"]
+    drops = []
+    for r, c in rules["rules"]:
+        n = r[1]
+        outside = n not in KNOWN_NUMBERS
+        note = f"同じ型式の実物の組 {c}/{n_pairs} 組" + ("。確かめた番号の外なので要確認" if outside else "")
+        if r[0] == "val":
+            num = to_number(r[2])
+            if num is not None and r[2].lstrip("+-").replace(".", "", 1).isdigit():
+                ed.set_num(n, num, note, review=outside)
+            else:
+                ed.set_text(n, r[2], note, review=outside)
+        elif r[0] == "bit":
+            ed.set_bit(n, r[2], r[3] == "1", f"#{r[2]} を {r[3]} に（{note}）", review=outside)
+        else:
+            drops.append(n)
+    ed.drop(drops, "書かない（同じ型式のセミクロ実物に行が無い）")
+    # 組の差に入らなくても、MPI/MPR 系・2018 は書かない（実データでセミは 0 件）
+    ed.drop([n for n in DROP_NUMBERS if n not in drops and _find_key(ed.new, n) is not None],
+            "書かない（セミクロには要らない番号）")
+    for r, c in rules.get("unapplied", []):
+        ed.changes.append({"num": r[1], "name": ed._name(r[1]), "full": "", "semi": "（入れない）",
+                           "note": f"組の差に出たが {c}/{n_pairs} 組だけで揃わない（{_rule_text(r)}）。要確認",
+                           "review": True, "unapplied": True})
+    out = dict(calc)
+    out.update(values=ed.new, changes=ed.changes, skipped=ed.skipped, stop=[], source="組",
+               basis=(f"同じ型式の組 {n_pairs}組から（フル {'・'.join(rules['fulls'][:3])} ／ "
+                      f"セミ {'・'.join(rules['semis'][:3])}）"))
+    # 計算式との比べ（食い違う番号を出す）
+    calc_vals = calc["values"] if not calc["stop"] else None
+    if calc_vals is None:
+        out["compare"] = "計算式は使えません: " + calc["stop"][0]
+    else:
+        nums = sorted({c["num"] for c in ed.changes if not c.get("unapplied")}
+                      | {c["num"] for c in calc["changes"]} | {s["num"] for s in calc["skipped"]})
+        diff = []
+        for n in nums:
+            a, b = _find_key(ed.new, n), _find_key(calc_vals, n)
+            if not _same_value(ed.new[a] if a is not None else None, calc_vals[b] if b is not None else None):
+                diff.append(n)
+        out["compare"] = (f"計算式でも作って比べました: {len(nums) - len(diff)}/{len(nums)} 番号が一致"
+                          + (f"。計算と実物で違う: {'、'.join(str(n) for n in diff)}" if diff else ""))
+    return out
+
+
+def _norm_gear(s):
+    f = parse_gear(s)
+    return f if f is not None else _clean(s)
 
 
 def _same_value(a, b):

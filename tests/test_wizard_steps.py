@@ -39,6 +39,14 @@ class TestSteps(unittest.TestCase):
         self.assertEqual(W.summary(seiban="50014984", motor="temp", motor_id="299"),
                          "50014984 ／ 仮モーター（299）")
 
+    def test_semi_stop_is_listed_as_missing_and_summary(self):
+        st = W.step_state(1, found=True, selected=1, motor="product", seiban="1",
+                          semi_stop="CMR が 2 以外のため確かめていません（値: 4）")
+        self.assertFalse(st["can_next"])
+        self.assertIn("セミクロにできません", st["missing"][0])
+        self.assertIn("セミクロに変換", W.summary(seiban="1", semi=True))
+        self.assertNotIn("セミクロ", W.summary(seiban="1"))
+
 
 if __name__ == "__main__":
     unittest.main()

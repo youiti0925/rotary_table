@@ -254,6 +254,22 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
             return w
         self.assertEqual(self._check(make), [])
 
+    def test_param_wizard_dialog_semi_rows(self):
+        """かんたん作成の段①に出る「位置を読む検出器」（フルクロの製品のとき）。長い理由・根拠・一覧でも収まる。"""
+        import nd287_app.gui as G
+
+        def make(s):
+            w = G.ParamWizardDialog(None, s)
+            w._set_semi_visible(True, True)
+            w.lbl_semi.setText("セミクロにはできません: 回転：CMR が 2 以外のため確かめていません（値: 4）" * 2)
+            w.txt_semi.setPlainText("1821 レファレンスカウンタ　45000 → 2000（同じ型式の実物の組 1/1 組）\n" * 30)
+            w.lbl_semi_ref.setText("同じ型式のセミクロ実物があります: R50014861.prm（参考）。計算した値と 7/8 番号が一致。"
+                                   "違う番号: 1821（計算 2000 ／ 実物 91）" * 2)
+            w.lbl_semi_ref.setVisible(True)
+            w._apply_mode()
+            return w
+        self.assertEqual(self._check(make), [])
+
     def test_batch_program_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.BatchProgramDialog(None, s)), [])

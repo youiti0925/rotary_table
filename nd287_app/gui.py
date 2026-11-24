@@ -6354,7 +6354,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if vals is None:
             return None
         return semi_convert.convert(
-            vals, raw=raw or "", axis=axnum, gear_header=meta.get("gear", ""),
+            vals, rules=f.get("_semi_rules"), raw=raw or "", axis=axnum, gear_header=meta.get("gear", ""),
             gear_db=meta.get("gear_db", ""),
             loop_number=self.settings.get("closed_loop_number", "1815"),
             loop_bit=int(self.settings.get("closed_loop_bit", 1)),
@@ -6417,6 +6417,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self._semi_gen += 1
             self._semi_pending = False
             self.lbl_semi_ref.setText("")
+            for ff in self._files:
+                ff.pop("_semi_rules", None)
         self._semi_info = {"results": res}
         if not res:
             self._set_semi_visible(False)
@@ -6442,16 +6444,19 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return
         lines, basis = [], []
         for f, r in res:
-            lines.append(f"【{f['kind']}】フルクロ → セミクロ で変わるところ（{len(r['changes'])}つ変える・"
+            lines.append(f"【{f['kind']}】根拠: {r['basis']}" if r.get("source") == "組" else
+                         f"【{f['kind']}】根拠: 計算式（同じ型式の実物の組は見つかっていません）")
+            if r.get("compare"):
+                lines.append("  " + r["compare"])
+            lines.append(f"  フルクロ → セミクロ で変わるところ（{sum(1 for c in r['changes'] if not c.get('unapplied'))}つ変える・"
                          f"{len(r['skipped'])}つ書かない）")
             for c in r["changes"]:
                 lines.append(f"  {c['num']} {c['name']}　{c['full'] or '—'} → {c['semi']}　（{c['note']}）")
             for sk in r["skipped"]:
                 lines.append(f"  {sk['num']} {sk['name']}　{sk['full']} → 書かない（{sk['note']}）")
-            basis.append(r["basis"])
+            basis.append(("同じ型式の組から" if r.get("source") == "組" else "計算式") + "：" + r["basis"])
         self.txt_semi.setPlainText("\n".join(lines))
-        self.lbl_semi.setText("根拠: " + " ／ ".join(basis)
-                              + "\n※ 2000 の #4 の扱いは実データで一番多い傾向に合わせたものです（要確認）。")
+        self.lbl_semi.setText("根拠: " + " ／ ".join(basis))
         self._start_semi_ref(res)
         self._set_semi_visible(True, True)
 
@@ -6475,7 +6480,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             found = {}
             for i, kind, path, meta in jobs:
                 try:
-                    found[i] = semi_convert.find_semi_reference(
+                    found[i] = semi_convert.find_pair_rules(
                         pd, model=meta.get("model", ""), gear=meta.get("gear") or meta.get("gear_db", ""),
                         motor_no=meta.get("motor_no", ""), kind=kind, exclude_path=path,
                         loop_number=loop[0], loop_bit=loop[1], full_when=loop[2],
@@ -6494,18 +6499,24 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return
         self._semi_pending = False
         self._semi_refs = dict(found or {}) or {-1: None}
+        res = (self._semi_info or {}).get("results") or []
+        for i, (f, _r) in enumerate(res):
+            if self._semi_refs.get(i):
+                f["_semi_rules"] = self._semi_refs[i]       # 変換は、見つかった組を第一の根拠にする
+        self._refresh_semi()
         self._show_semi_ref()
 
     def _show_semi_ref(self):
-        """実物が見つかったときだけ、計算した値と実物を番号ごとに比べて出す（参考。書く値は計算のまま）。"""
+        """組が作れなかったとき、同じ型式のセミクロ実物があれば、計算した値と番号ごとに比べて出す（参考）。"""
         res = (self._semi_info or {}).get("results") or []
         lines = []
         for i, (f, r) in enumerate(res):
             hit = self._semi_refs.get(i)
-            if not hit:
+            if not hit or r.get("source") == "組" or not hit.get("semi_ref"):
                 continue
-            c = semi_convert.compare_reference(r, hit["values"])
-            line = (f"同じ型式のセミクロ実物があります: {hit['name']}（参考）。"
+            ref = hit["semi_ref"]
+            c = semi_convert.compare_reference(r, ref["values"])
+            line = (f"同じ型式のセミクロ実物があります: {ref['name']}（参考。フルクロの実物が無く組にできませんでした）。"
                     f"計算した値と {c['matched']}/{c['total']} 番号が一致")
             if c["mismatch"]:
                 line += "。違う番号: " + "、".join(f"{n}（計算 {m} ／ 実物 {a}）" for n, m, a in c["mismatch"])
@@ -7443,6 +7454,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 return None
             # フルクロ → セミクロ（選んだときだけ）。prepare に渡す前、仮モーターの 2020 を外す・DGPR を触るより先
             if self._semi_choice():
+                if self._semi_pending:
+                    QtWidgets.QMessageBox.warning(
+                        self, title, "同じ型式のフルクロ／セミクロの実物を探している途中です。"
+                        "探し終わる（『位置を読む検出器』の下の表示が変わる）まで待ってから、もう一度押してください。")
+                    return None
                 sr = self._semi_convert_file(f, raw, axnum, vals)
                 if sr is not None and sr["mode"] == "フル":
                     if sr["stop"]:

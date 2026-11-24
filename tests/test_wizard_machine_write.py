@@ -66,12 +66,14 @@ class WizardBase(unittest.TestCase):
         w.warnings = []
         return w
 
-    def ready(self, w, unit="23"):
-        """受注番号 → 探す → 作るものにチェック → 号機を選ぶ（画面と同じ順）。"""
+    def ready(self, w, unit="23", motor=None):
+        """受注番号 → 探す → 作るものにチェック → モーター → 号機を選ぶ（画面と同じ順）。"""
         w.e_seiban.setText("50014984")
         w.search()
         for f in w._files:
             f["chk"].setChecked(True)
+        if motor:
+            w.cmb_motor.setCurrentIndex(w.cmb_motor.findData(motor))
         w._update_candidates()
         i = next((k for k, (c, _a) in enumerate(w._cand) if str(c.unit) == unit), None)
         self.assertIsNotNone(i, f"号機{unit}が候補にありません: {[str(c.unit) for c, _ in w._cand]}")
@@ -101,9 +103,8 @@ class TestWizardMachineWrite(WizardBase):
         self.assertEqual(w.b_machine.text(), "機械へ直接書く…")
 
     def test_opens_the_write_window_with_the_same_plan_input(self):
-        w = self.ready(self.wizard())
+        w = self.ready(self.wizard(), motor="product")
         w.e_out.setText("")                       # 出力先は要らない
-        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
         self.run_machine(w)
         self.assertEqual(w.warnings, [])
         self.assertEqual(len(self.opened), 1)
@@ -122,9 +123,8 @@ class TestWizardMachineWrite(WizardBase):
 
     def test_keep_motor_leaves_2020_out_of_the_plan(self):
         # 仮モーターが付いていて製品の 2020 と違うとき、2020 を書かない選択ができる
-        w = self.ready(self.wizard())
+        w = self.ready(self.wizard(), motor="temp")
         w.e_out.setText("")
-        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("temp"))
         self.run_machine(w)
         self.assertTrue(self.opened[0][1]["keep_motor"])
         plan_fn = self.opened[0][0][2]
@@ -145,11 +145,30 @@ class TestWizardMachineWrite(WizardBase):
         w = self.ready(self.wizard())
         w.e_out.setText("")
         self.assertFalse(w.e_motor_id.isEnabled())
-        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("temp"))
+        w = self.ready(w, motor="temp")
         self.assertTrue(w.e_motor_id.isEnabled())
         w.e_motor_id.setText("299")
         self.run_machine(w)
         self.assertEqual(self.opened[0][1]["motor_id"], "299")
+
+    def test_temp_motor_lists_every_unit_and_axis_without_voltage_filter(self):
+        w = self.ready(self.wizard())
+        n_product = len(w._cand)
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("temp"))
+        self.assertGreaterEqual(len(w._cand), n_product)
+        self.assertIn("23", {str(c.unit) for c, _a in w._cand})     # 200V の23号機も選べる
+        b23 = [a for c, a in w._cand if str(c.unit) == "23"]
+        self.assertIn(["B"], b23)                                    # 軸（B）は人が選べる
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
+        self.assertEqual(len(w._cand), n_product)
+
+    def test_connected_machine_unit_is_chosen_automatically(self):
+        w = self.wizard()
+        w._connected_unit = lambda: "23"
+        w = self.ready(w, unit="23")
+        self.assertEqual(str(w._cand[0][0].unit), "23")           # つながっている機械が先頭
+        self.assertEqual(w.cmb_ctrl.currentData(), 0)              # 自動で選ばれている
+        self.assertIn("つながっています", w.lbl_need.text())
 
     def test_motor_must_be_chosen_first(self):
         w = self.ready(self.wizard())

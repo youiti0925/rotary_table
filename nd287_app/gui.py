@@ -5148,6 +5148,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_motor.addItem("選んでください（機械へ直接書くときに必要）", "")
         self.cmb_motor.addItem("製品のモーター（製品データどおり）", "product")
         self.cmb_motor.addItem("社内の仮モーター（機械のまま。モーター番号 2020 は書かない）", "temp")
+        self.cmb_motor.currentIndexChanged.connect(self._update_candidates)
         self.cmb_motor.setToolTip(
             "機械に付いているのが製品のモーターか、社内の仮モーターかを選びます。\n"
             "仮モーターなら 2020（モーター番号）は書かず、機械の値のままにします。\n"
@@ -5660,23 +5661,69 @@ class ParamWizardDialog(QtWidgets.QDialog):
         # 製品の電圧（HV→400V）。選択ファイルの電圧で号機を絞る（400V製品は400V号機のみ）
         volts = {f["meta"].get("voltage") for f in sel if f["meta"].get("voltage")}
         voltage = volts.pop() if len(volts) == 1 else ""
-        self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
+        temp = self.cmb_motor.currentData() == "temp"
+        if temp:
+            # 仮モーターは製品のモーターと別物なので、製品の容量・電圧では号機を外さない。
+            # 軸は容量で決められないので、号機×軸の組を全部出して人が選ぶ（つながっている機械が先頭）
+            voltage = ""
+            if len(sel) == 1:
+                self._cand = [(c, [a]) for c in self._controllers for a in c.axes()]
+            else:
+                self._cand = seiban_flow.capable_controllers(self._controllers, [""] * len(sel), "")
+        else:
+            self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
+        conn_unit = self._connected_unit()
+        if conn_unit:
+            self._cand.sort(key=lambda ca: 0 if str(ca[0].unit) == conn_unit else 1)
         # 選択内容→必要な軸数の要約（両方なら2軸とも載る号機、片方なら1軸でよい号機）
         kinds = "＋".join(f["kind"] for f in sel)
         capstr = "・".join(n or "?" for n in needs)
         vtxt = f"・{voltage}" if voltage else ""
-        self.lbl_need.setText(
-            f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
+        if temp:
+            self.lbl_need.setText(
+                f"{kinds}（{len(sel)}軸）仮モーターなので、製品の容量・電圧では絞りません。号機と軸を選んでください … {len(self._cand)}通り")
+        else:
+            self.lbl_need.setText(
+                f"{kinds}（{len(sel)}軸／容量 {capstr}{vtxt}）を載せられる号機 … {len(self._cand)}台")
         if not self._cand:
             self.cmb_ctrl.addItem(f"（容量 {capstr}{vtxt} を満たす制御装置がありません）", -1)
         else:
             self.cmb_ctrl.addItem("（制御装置を選択）", -1)
+            pick = -1
             for i, (c, asg) in enumerate(self._cand):
                 amap = "  ".join(f"{nc_param.axis_name(seiban_flow_axis(a))}:{c.caps[a]}"
                                  for a in asg)
-                self.cmb_ctrl.addItem(f"{c.label()}  →  {amap}", i)
+                star = "★つながっている機械  " if conn_unit and str(c.unit) == conn_unit else ""
+                self.cmb_ctrl.addItem(f"{star}{c.label()}  →  {amap}", i)
+                if star and pick < 0:
+                    pick = i
+            # つながっている機械は自動で選ぶ。仮モーターで軸が何通りもあるときは、軸は人が選ぶ
+            if pick >= 0 and not temp:
+                self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(pick))
+            if conn_unit:
+                self.lbl_need.setText(self.lbl_need.text()
+                                      + f"\n機械につながっています: {conn_unit}号機（台帳）")
         self.cmb_ctrl.blockSignals(False)
         self._on_ctrl_changed()
+
+    def _connected_unit(self):
+        """いま LAN でつながる機械の号機（台帳の IP に 8193 で声をかけるだけ。台帳に無ければ ''）。10秒は覚えておく。"""
+        import time as _t
+        cache = getattr(self, "_conn_cache", None)
+        if cache and _t.monotonic() - cache[0] < 10:
+            return cache[1]
+        unit = ""
+        try:
+            reg = focas_find.registry_path(self.settings)
+            for ip in focas_find.known_ips(reg)[:4]:
+                if focas_find.port_open(ip, timeout=0.3):
+                    unit = focas_find.unit_for_ip(reg, ip)
+                    if unit:
+                        break
+        except Exception:
+            unit = ""
+        self._conn_cache = (_t.monotonic(), unit)
+        return unit
 
     def _on_ctrl_changed(self, *_):
         idx = self.cmb_ctrl.currentData()

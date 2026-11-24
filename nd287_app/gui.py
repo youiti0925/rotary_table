@@ -1142,7 +1142,7 @@ class ProgramDialog(QtWidgets.QDialog):
         buttons.addWidget(self.b_send)
         buttons.addWidget(b_sendhelp)
         buttons.addWidget(b_close)
-        root.addLayout(buttons)
+        root.addWidget(hscroll_buttons(buttons))   # 文字を大きくしても横に収める
 
         self._fit_to_screen()
 

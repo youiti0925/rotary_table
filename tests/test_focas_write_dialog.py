@@ -58,6 +58,7 @@ class WriteDialogBase(unittest.TestCase):
         self.settings.update(
             focas_host="127.0.0.1", focas_backup_dir=str(self.work / "控え"),
             focas_write_log_csv=str(self.work / "書込ログ.csv"),
+            focas_registry_csv=str(self.work / "台帳.csv"),       # 試験が本物の台帳を書かないように
             controller_master_csv=str(REPO / "マスタ" / "制御装置マスタ.csv"))
         self.dialogs = []
         self.client = DirectClient(copy.deepcopy(self.SCENARIO))

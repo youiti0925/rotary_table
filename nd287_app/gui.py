@@ -3116,6 +3116,24 @@ class FocasWriteDialog(QtWidgets.QDialog):
         kr.addWidget(self.b_cancel_backup)
         kr.addStretch(1)
         kl.addWidget(hscroll_buttons(kr))
+        # 初めての制御装置（台帳にも号機の候補にも無い）: 控えをその号機の BASIC として登録（人が押したときだけ）
+        self.box_first = QtWidgets.QWidget()
+        fr = QtWidgets.QHBoxLayout(self.box_first)
+        fr.setContentsMargins(0, 0, 0, 0)
+        self.e_first_unit = QtWidgets.QLineEdit()
+        self.e_first_unit.setPlaceholderText("号機（数字）")
+        self.e_first_unit.setMaximumWidth(110)
+        self.b_first_unit = QtWidgets.QPushButton("初めての制御装置です — この控えを BASIC として登録する")
+        self.b_first_unit.setToolTip(
+            "BASIC・制御装置マスタ・台帳のどこにも無い機械です。この控え（機械が出したパラメータ）を、"
+            "BASIC フォルダとは別の「機械から取ったBASIC」フォルダに F<号機>BASIC.dat として保存し、"
+            "制御装置マスタに仮の行（読めない項目は空欄）を足し、台帳に残します。押したときだけ登録します")
+        self.b_first_unit.clicked.connect(self._register_first_unit)
+        fr.addWidget(QtWidgets.QLabel("号機"))
+        fr.addWidget(self.e_first_unit)
+        fr.addWidget(self.b_first_unit, 1)
+        self.box_first.setVisible(False)
+        kl.addWidget(self.box_first)
         self.bar = QtWidgets.QProgressBar()
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
@@ -3444,6 +3462,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
             self.e_host.setText(res[3])            # 探して見つかった IP
             self._persist()
         reg_unit = res[4] if len(res) > 4 else ""
+        self._reg_unit = reg_unit
         old = (self._ident or {}).get("cnc_id")
         self._ident = ident
         self._set_connected(True)
@@ -3836,6 +3855,50 @@ class FocasWriteDialog(QtWidgets.QDialog):
             reasons += w["reasons"]
         return not reasons, reasons
 
+    def _first_unit_wanted(self):
+        """台帳にも無い・号機の候補が空・控えが完全なときだけ、登録ボタンを出す。"""
+        b = self._backup
+        return bool(self._connected and self._ident and self._ident.get("cnc_id")
+                    and not self._reg_unit and self.cmb_unit.count() <= 1
+                    and not (self.cmb_unit.currentData() or "")
+                    and b and (b[1] or {}).get("complete"))
+
+    def _update_first_unit(self, idle=True):
+        want = self._first_unit_wanted()
+        self.box_first.setVisible(want)
+        self.b_first_unit.setEnabled(want and idle)
+
+    def _register_first_unit(self):
+        """人が押したときだけ。控えを BASIC として登録し、マスタの仮行と台帳に残す。"""
+        from . import first_unit
+        if not self._first_unit_wanted() or self._backup is None:
+            return
+        folder, info = self._backup
+        unit = self.e_first_unit.text()
+        try:
+            res = first_unit.register_first_unit(self.settings, folder, info, unit, app_dir=app_dir())
+        except first_unit.FirstUnitError as e:
+            self._warn("初めての制御装置の登録", str(e))
+            return
+        except OSError as e:
+            self._warn("初めての制御装置の登録", f"保存できませんでした: {e}")
+            return
+        u = res["unit"]
+        self._reg_unit = u
+        self._load_controllers()
+        self.cmb_unit.blockSignals(True)
+        self.cmb_unit.addItem(f"号機{u}", u)
+        _select_unit(self.cmb_unit, u)
+        self.cmb_unit.blockSignals(False)
+        msg = (f"号機{u}の BASIC として保存しました:\n{res['file']}\n\n制御装置マスタ: "
+               + {"added": "仮の行を足しました（空欄の項目は後で直してください）",
+                  "exists": "もうあります（そのままです）",
+                  "nopath": "場所が未設定なので足していません"}[res["master"]]
+               + ("\n空欄のまま: " + "・".join(res["blank"]) if res["blank"] else "")
+               + "\n台帳にも残しました。")
+        self._show_target()
+        self._info("初めての制御装置の登録", msg)
+
     def _unit_mismatch(self):
         """かんたん作成で選んだ号機と、つないだ機械の号機（台帳・人が選んだもの）が違うときの文。違わなければ ''。"""
         if not self._expect_unit:
@@ -3868,6 +3931,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.b_stop.setEnabled(self._busy and not self._busy_quiet and self._mode in ("write", "undo"))
         self.chk_zero_all.setEnabled(idle and not self._rewrite_blocked)
         self.chk_keep_motor.setEnabled(idle and not self._rewrite_blocked)
+        self._update_first_unit(idle)
         ok, reasons = self._writable()
         n = len(self._wplan["items"]) if self._wplan else 0
         self.b_write.setText(f"この {n} 件を機械に書く")

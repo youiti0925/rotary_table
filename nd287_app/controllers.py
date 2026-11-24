@@ -257,17 +257,23 @@ def basic_file_for_unit(folder, unit):
     """
     from pathlib import Path
 
-    from . import param_origin
+    from . import first_unit, param_origin
     u = str(unit or "").strip()
-    if not u or not folder or not Path(folder).is_dir():
+    if not u:
         return None
     cands = []
-    for p in sorted(Path(folder).iterdir()):
-        if not p.is_file():
+    # BASIC フォルダに無ければ、次に「機械から取ったBASIC」（初めての制御装置の登録先）を見る
+    for d in [folder] + [str(x) for x in first_unit.search_dirs(folder)]:
+        if not d or not Path(d).is_dir():
             continue
-        m = re.match(r"^F(\d+)BASIC", p.name, re.IGNORECASE)
-        if m and u.isdigit() and m.group(1).isdigit() and int(m.group(1)) == int(u):
-            cands.append(p)
+        for p in sorted(Path(d).iterdir()):
+            if not p.is_file():
+                continue
+            m = re.match(r"^F(\d+)BASIC", p.name, re.IGNORECASE)
+            if m and u.isdigit() and m.group(1).isdigit() and int(m.group(1)) == int(u):
+                cands.append(p)
+        if cands:
+            break
     if not cands:
         return None
 

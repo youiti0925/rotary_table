@@ -6682,6 +6682,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if temp:
             self.lbl_need.setText(
                 f"{kinds}（{len(sel)}軸）仮モーターなので、製品の容量・電圧では絞りません。"
+                + (f"仮モーター（容量 {mcap}）に合う号機だけを出しています。" if by_unit and mcap else "")
                 + ("号機を選んでください（使う軸は、つないだあと、機械の 2020 が仮モーターの番号と同じ軸に自動で決まります）"
                    f" … {len(self._cand)}台" if by_unit else
                    f"号機と軸を選んでください … {len(self._cand)}通り"))
@@ -6735,12 +6736,21 @@ class ParamWizardDialog(QtWidgets.QDialog):
         cmb.clear()
         cap = self._product_capacity()
         temp = self.cmb_motor.currentData() == "temp"
-        if temp and not self.e_motor_id.text().strip() and cap:
-            rows = sorted(((no, i) for no, i in self._motor_table.items() if i.get("cap") == cap),
-                          key=lambda x: (x[1].get("model", ""), x[0]))
-            cmb.addItem(f"（この製品と同じ容量 {cap} のモーター: {len(rows)}種類）", "")
+        if temp and not self.e_motor_id.text().strip() and self._motor_table:
+            if cap:
+                rows = sorted(((no, i) for no, i in self._motor_table.items() if i.get("cap") == cap),
+                              key=lambda x: (x[1].get("model", ""), x[0]))
+                head = f"（この製品と同じ容量 {cap} のモーター: {len(rows)}種類。ここから選べます）"
+            else:
+                rows = sorted(self._motor_table.items(),
+                              key=lambda x: (x[1].get("cap", ""), x[1].get("model", ""), x[0]))
+                head = f"（この製品の容量が分からないので、全部のモーター {len(rows)}種類。ここから選べます）"
+            cmb.addItem(head, "")
             for no, i in rows:
-                cmb.addItem(f"{no}　{i.get('model') or '（型式の登録なし）'}", no)
+                m = i.get("model") or ""
+                cmb.addItem(f"{no}　{m or '（型式の登録なし）'}"
+                            + (f"（{seiban_flow.motor_voltage(m)}"
+                               + (f"・{i['cap']}" if i.get("cap") else "") + "）" if m else ""), no)
             show = bool(rows)
         else:
             show = False
@@ -6764,8 +6774,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return
         info = seiban_flow.motor_info(self._motor_table, mid)
         if info:
+            m = info.get("model") or ""
             self.lbl_motor_info.setText(
-                f"モーター {mid} → {info.get('model') or '（型式の登録なし）'}"
+                f"モーター {mid} → {m or '（型式の登録なし）'}"
+                + (f"　{seiban_flow.motor_voltage(m)}" if m else "")
                 + (f"　容量 {info['cap']}" if info.get("cap") else "　（容量の登録なし）"))
         else:
             self.lbl_motor_info.setText(

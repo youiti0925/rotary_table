@@ -21,3 +21,10 @@ class TestMotorTable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMotorVoltage(unittest.TestCase):
+    def test_hv_is_400v(self):
+        from nd287_app import seiban_flow
+        self.assertEqual(seiban_flow.motor_voltage("αiF22/3000HV"), "400V")
+        self.assertEqual(seiban_flow.motor_voltage("αiF12/4000"), "200V")

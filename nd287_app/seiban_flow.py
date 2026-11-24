@@ -412,3 +412,8 @@ def capable_controllers(controllers, needs: list, voltage: str = "") -> list:
         if asg is not None:
             out.append((c, asg))
     return out
+
+
+def motor_voltage(model: str) -> str:
+    """モーター型式から電圧クラスを言う。型式に HV が付けば 400V、それ以外は 200V（番号表に電圧の列が無いため）。"""
+    return "400V" if "HV" in str(model or "").upper() else "200V"

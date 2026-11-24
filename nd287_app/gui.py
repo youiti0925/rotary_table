@@ -70,6 +70,7 @@ from .fanuc import FanucConfig, generate as generate_fanuc
 from .firestore_sync import FirestoreSync, build_measurement_doc, overall_judgement
 from . import controller_import
 from . import motor_rules
+from . import servo_req
 from . import help_text
 from .export import (
     MODE_KEY,
@@ -4014,6 +4015,11 @@ class FocasWriteDialog(QtWidgets.QDialog):
             reasons.append(mm)
         if not self._wplan["items"]:
             reasons.append("書くものがありません（機械はすでに同じ値です）")
+        for req in (self._rule_ctx or {}).get("servo_req", []):
+            # 機械から読んだサーボソフトの版数が、このモーターに必要な版数より古ければ書かない（読めていないときは止めない）
+            ok_sv, msg_sv = servo_req.check((self._ident or {}).get("servo", ""), req)
+            if ok_sv is False:
+                reasons.append(msg_sv)
         info = self._backup[1] if self._backup else None
         if self._status is None:
             reasons.append("機械の状態を読めていません")
@@ -4258,6 +4264,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
                 from . import rules
                 rules.append_result(rules.log_path(app_dir()),
                                     dict(self._rule_ctx, unit=self.cmb_unit.currentData() or "",
+                                         servo=(self._ident or {}).get("servo", ""),
                                          seiban=self.seiban), res)
         self._show_items(res)
         self.txt_result.setPlainText("\n".join(focas_ops.describe_result(res)))
@@ -7605,6 +7612,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._cand, used_rules = motor_rules.apply(self._cand, d_models, motor_rules.load_rules(rpath))
         self._need_d_drive = any(r.get("見る列") == "-D駆動" for r in used_rules)
         self._need_ib = any(r.get("見る列") == "CNCユニット" for r in used_rules)
+        self._used_servo_reqs = [r.get("必要サーボ", "") for r in used_rules if r.get("必要サーボ")]
         self._used_rule_notes = [f"末尾 -{r.get('末尾')} → {r.get('見る列')} {r.get('条件')}" for r in used_rules]
         conn_unit = self._connected_unit()
         if conn_unit:
@@ -7975,7 +7983,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             used.append("TEMP_MOTOR")
         if g.get("semi"):
             used.append("SEMI")
-        return {"motor": model, "rules": used}
+        return {"motor": model, "rules": used, "servo_req": list(getattr(self, "_used_servo_reqs", []))}
 
     def write_to_machine(self):
         """機械へ直接書く（FOCAS）。かんたん作成と同じ入力（受注番号・号機・BASIC）から作る中身を決め、

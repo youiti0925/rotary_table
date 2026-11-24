@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 LOG_NAME = "規則の結果記録.csv"
-LOG_FIELDS = ["日時", "受注番号", "モーター型式", "号機", "使った規則", "結果", "アラーム", "控えフォルダ"]
+LOG_FIELDS = ["日時", "受注番号", "モーター型式", "号機", "使った規則", "サーボ版", "結果", "アラーム", "控えフォルダ"]
 
 # id: (内容, 根拠, 場所, 試験)
 RULES = {
@@ -65,7 +65,7 @@ def append_result(path, ctx, res, now=None):
                 w.writeheader()
             w.writerow({"日時": now or time.strftime("%Y-%m-%d %H:%M:%S"),
                         "受注番号": ctx.get("seiban", ""), "モーター型式": ctx.get("motor", ""),
-                        "号機": ctx.get("unit", ""), "使った規則": "・".join(ctx.get("rules", [])),
+                        "号機": ctx.get("unit", ""), "使った規則": "・".join(ctx.get("rules", [])), "サーボ版": ctx.get("servo", ""),
                         "結果": result, "アラーム": alarms, "控えフォルダ": getattr(res, "folder", "") or ""})
         return True
     except Exception:

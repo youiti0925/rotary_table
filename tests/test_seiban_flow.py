@@ -41,6 +41,20 @@ class TestFindSeibanFiles(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["kind"], "回転")
 
+    def test_many_files_and_extensions_and_case(self):
+        # 共有サーバのように件数が多くても、名前だけで絞って拾う（2026-11-24 実測 15,741件で 29秒→0.2秒）
+        d = Path(tempfile.mkdtemp())
+        for i in range(3000):
+            (d / f"R{50000000 + i}.prm").write_bytes(b"%\n")
+        (d / "t50014984.PRM").write_bytes(b"%\n")          # 小文字・大文字の拡張子
+        (d / "R50014984.txt").write_bytes(b"%\n")
+        (d / "R50014984.xls").write_bytes(b"x")            # 拡張子違いは拾わない
+        (d / "T50014984.prm.bak").write_bytes(b"x")        # 拡張子が .bak のものは拾わない
+        got = S.find_seiban_files(d, "50014984")
+        self.assertEqual([f["prefix"] for f in got], ["T", "R"])
+        self.assertEqual(got[0]["name"], "t50014984.PRM")
+        self.assertEqual(got[1]["name"], "R50014984.txt")      # 名前順で最初のもの（.prm は 50014984 に無い）
+
     def test_no_match(self):
         d = tempfile.mkdtemp()
         (Path(d) / "T111.prm").write_text("%\n", encoding="cp932")

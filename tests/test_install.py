@@ -37,7 +37,12 @@ class Base(unittest.TestCase):
     def run_install(self, **kw):
         kw.setdefault("roots", [(self.home / "Documents", 4), (self.home / "Downloads", 4)])
         kw.setdefault("make_shortcut", lambda lnk, target, wd, desc: self.links.append((lnk, target)))
-        return I.install(self.src, self.dst, **kw)
+        self.last_lines = I.install(self.src, self.dst, **kw)
+        return self.last_lines
+
+    def mine(self):
+        import json
+        return json.loads((self.dst / "settings.json").read_text(encoding="utf-8"))
 
     def old_folder(self, name="rotary_table", settings=b'{"a": 1}', age=0):
         old = self.home / "Downloads" / name
@@ -66,7 +71,7 @@ class TestFirstInstall(Base):
         touch(old / "マスタ" / "測定条件.csv", b"edited-on-this-pc")
         touch(old / "マスタ" / "ユーザー回転条件.csv", b"user")
         lines = self.run_install()
-        self.assertEqual((self.dst / "settings.json").read_bytes(), b'{"a": 1}')
+        self.assertEqual(self.mine()["a"], 1)               # 前の設定が引き継がれた（場所の登録が足される）
         self.assertTrue((self.dst / "測定データ" / "2026" / "a.csv").is_file())
         self.assertTrue((self.dst / "機械バックアップ" / "x" / "p.DAT").is_file())
         # このPCで直したマスタが勝つ（配布のマスタで上書きしない）
@@ -80,7 +85,8 @@ class TestFirstInstall(Base):
         self.old_folder("古い", settings=b'{"old": 1}', age=86400 * 30)
         self.old_folder("新しい", settings=b'{"new": 1}', age=0)
         self.run_install()
-        self.assertEqual((self.dst / "settings.json").read_bytes(), b'{"new": 1}')
+        self.assertEqual(self.mine().get("new"), 1)
+        self.assertNotIn("old", self.mine())
 
     def test_bundle_folder_itself_is_not_taken_over(self):
         # 配布セットを置いた開発用フォルダ（src の親）は「前のフォルダ」として拾わない
@@ -88,19 +94,94 @@ class TestFirstInstall(Base):
         touch(repo / "settings.json")
         touch(repo / "ND287分割測定.bat")
         self.run_install(roots=[(self.tmp / "配布", 4)])
-        self.assertFalse((self.dst / "settings.json").exists())
+        self.assertNotIn("x", (self.dst / "settings.json").read_text(encoding="utf-8")[:2])   # 引き継いでいない
+        self.assertFalse(self.mine().get("old"))
+        self.assertNotIn("引き継ぎ", " ".join(self.last_lines))
 
     def test_skips_venv_and_git(self):
         old = self.home / "Downloads" / "x" / ".venv" / "inner"
         touch(old / "settings.json")
         touch(old / "ND287分割測定.bat")
         self.run_install()
-        self.assertFalse((self.dst / "settings.json").exists())
+        self.assertEqual(self.mine().get("a"), None)
 
     def test_no_old_folder(self):
         lines = self.run_install()
-        self.assertFalse((self.dst / "settings.json").exists())
+        self.assertEqual(set(self.mine()), {"param_product_dir"})   # 場所の登録だけ（この配布セットには BASIC が無い）
         self.assertFalse(any("引き継ぎ" in ln for ln in lines))
+
+
+class TestBasicAndLocations(Base):
+    """BASIC を入れて場所を自動で登録する・製品データの場所の既定値（共有サーバ）。"""
+
+    def setUp(self):
+        super().setUp()
+        touch(self.src / "BASIC" / "F10BASIC.dat", b"b10")
+        touch(self.src / "BASIC" / "F23BASIC.dat", b"b23")
+
+    def settings(self):
+        import json
+        return json.loads((self.dst / "settings.json").read_text(encoding="utf-8"))
+
+    def test_basic_is_copied_and_registered_on_a_new_pc(self):
+        lines = self.run_install()
+        self.assertEqual((self.dst / "BASIC" / "F23BASIC.dat").read_bytes(), b"b23")
+        st = self.settings()                                  # 設定が無かったPCでも、2つは登録される
+        self.assertEqual(st["param_basic_dir"], str(self.dst / "BASIC"))
+        self.assertEqual(st["param_product_dir"],
+                         "\\\\svn03\\文書共有\\工機部内\\共用\\システム\\パラメータ表\\data")
+        self.assertTrue(any("BASICの場所を登録しました" in ln for ln in lines))
+
+    def test_partial_settings_file_is_valid_for_the_app(self):
+        from nd287_app import settings as S
+        self.run_install()
+        st = S.load_settings(self.dst / "settings.json")
+        self.assertEqual(st["param_basic_dir"], str(self.dst / "BASIC"))
+        self.assertIn("baudrate", st)                          # 足りない項目は既定値で補われる
+
+    def test_existing_valid_basic_dir_is_kept(self):
+        import json
+        mine = self.tmp / "マイBASIC"
+        touch(mine / "F10BASIC.dat")
+        touch(self.dst / "settings.json", json.dumps(
+            {"param_basic_dir": str(mine), "param_product_dir": "X:\\data"}).encode("utf-8"))
+        self.run_install()
+        st = self.settings()
+        self.assertEqual(st["param_basic_dir"], str(mine))     # このPCで決めた場所は変えない
+        self.assertEqual(st["param_product_dir"], "X:\\data")
+        self.assertFalse((self.dst / "settings.json.bak_install").exists())   # 変えなければ控えも作らない
+
+    def test_missing_basic_dir_is_replaced_and_backup_kept(self):
+        import json
+        touch(self.dst / "settings.json", json.dumps(
+            {"param_basic_dir": str(self.tmp / "消えたフォルダ"), "param_product_dir": "X:\\data",
+             "keep": 1}).encode("utf-8"))
+        self.run_install()
+        st = self.settings()
+        self.assertEqual(st["param_basic_dir"], str(self.dst / "BASIC"))
+        self.assertEqual(st["keep"], 1)                        # ほかの項目はそのまま
+        self.assertTrue((self.dst / "settings.json.bak_install").is_file())
+
+    def test_update_does_not_overwrite_basic_edited_on_this_pc(self):
+        self.run_install()
+        (self.dst / "BASIC" / "F23BASIC.dat").write_bytes(b"edited")
+        touch(self.src / "BASIC" / "F99BASIC.dat", b"new")
+        self.run_install()
+        self.assertEqual((self.dst / "BASIC" / "F23BASIC.dat").read_bytes(), b"edited")
+        self.assertEqual((self.dst / "BASIC" / "F99BASIC.dat").read_bytes(), b"new")
+
+    def test_no_basic_in_bundle_registers_only_product_dir(self):
+        import shutil as sh
+        sh.rmtree(self.src / "BASIC")
+        self.run_install()
+        st = self.settings()
+        self.assertNotIn("param_basic_dir", st)
+        self.assertIn("param_product_dir", st)
+
+    def test_default_product_dir_is_the_company_share(self):
+        from nd287_app.settings import DEFAULTS
+        self.assertTrue(DEFAULTS["param_product_dir"].startswith("\\\\svn03\\"))
+        self.assertTrue(DEFAULTS["param_product_dir"].endswith("\\パラメータ表\\data"))
 
 
 class TestUpdate(Base):

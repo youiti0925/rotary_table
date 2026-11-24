@@ -10,6 +10,7 @@
 
 import csv
 import io
+import os
 import re
 from pathlib import Path
 
@@ -34,23 +35,35 @@ def find_seiban_files(folder, seiban) -> list:
     s = str(seiban or "").strip()
     if not s or not folder or not Path(folder).is_dir():
         return []
+    # 共有サーバのフォルダは1万件を超える（15,741件・2026-11-24）。1件ずつ stat して調べると
+    # 約29秒かかるので、名前だけで先に絞る（os.scandir は名前を一覧と一緒に返す）。
+    # 絞る条件は従来と同じ: 頭文字 T/R の「直後」に Seiban が続く名前・拡張子が PARAM_EXTS。
+    want = s.upper()
+    cands = []
+    with os.scandir(folder) as it:
+        for e in it:
+            name = e.name
+            stem, dot, ext = name.rpartition(".")
+            if not dot:
+                stem, ext = name, ""
+            stem_u = stem.upper()
+            if ("." + ext.lower()) not in PARAM_EXTS:
+                continue
+            if stem_u[:1] not in ("T", "R") or not stem_u[1:].startswith(want):
+                continue
+            cands.append((name, e))
     found = {}
-    for p in sorted(Path(folder).iterdir()):
-        if not (p.is_file() and p.suffix.lower() in PARAM_EXTS):
+    for name, e in sorted(cands, key=lambda t: t[0]):
+        # 名前が合うものだけ、ファイルか確かめる（フォルダ名が .prm のとき等）
+        try:
+            if not e.is_file():
+                continue
+        except OSError:
             continue
-        stem = p.stem.upper()
-        m = re.match(r"^([TR])", stem)
-        if not m:
-            continue
-        prefix = m.group(1)
-        # 頭文字の「直後」に Seiban が続くものだけ（出力名の規則そのまま）。
-        # 「名前のどこかに含む」まで緩めると、型式名ファイル（RTT-137_<製番>.prm が
-        # 回転扱い）や 2軸出力（TR<製番>.prm が傾斜扱い）を誤って拾ってしまう。
-        # "R50014364 (1).prm" のような直後＋補足つきは引き続きヒットする。
-        rest = stem[1:]
-        if rest.startswith(s.upper()) and prefix not in found:
+        prefix = name[:1].upper()
+        if prefix not in found:
             found[prefix] = {"kind": PREFIX_KIND[prefix], "prefix": prefix,
-                             "path": str(p), "name": p.name}
+                             "path": str(Path(folder) / name), "name": name}
     return [found[k] for k in ("T", "R") if k in found]
 
 

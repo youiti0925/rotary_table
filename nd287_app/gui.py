@@ -5078,9 +5078,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
         b_view.clicked.connect(self._open_viewer)
         b_make = QtWidgets.QPushButton("作成 → 出力先")
         b_make.setObjectName("primary"); b_make.clicked.connect(self.create)
+        self.b_machine = QtWidgets.QPushButton("機械へ直接書く…")
+        self.b_machine.setToolTip(
+            "ファイルを出さずに、LANでつないだ機械へ直接書く（FOCAS）。\n"
+            "つなぐ → 全部の控え（バックアップ）→ 機械の今の値と違う所の一覧 → 確認して書く → 読み戻し の順。\n"
+            "上の ①②③ は「作成 → 出力先」と同じ（出力先は使いません）")
+        self.b_machine.clicked.connect(self.write_to_machine)
         b_close = QtWidgets.QPushButton("閉じる"); b_close.clicked.connect(self.accept)
         row.addWidget(b_adv); row.addWidget(b_view)
-        row.addStretch(1); row.addWidget(b_make); row.addWidget(b_close)
+        row.addStretch(1); row.addWidget(b_make); row.addWidget(self.b_machine); row.addWidget(b_close)
         v.addWidget(hscroll_buttons(row))
         # 文字サイズを上げても画面に収まるよう、中身をスクロールへ入れる
         # （ボタン列だけ外に残して常に押せるようにする）
@@ -5173,11 +5179,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         elif not self.e_basic.text().strip():
             msg = "③ 使うBASIC を指定してください（号機選択で自動で入ります）"
         elif not self.e_out.text().strip():
-            msg = "③ 出力先 を指定してください"
+            msg = "③ 出力先 を指定してください（機械へ直接書くなら、出力先は要りません）"
         elif not self.e_seiban.text().strip():
             msg = "③ Seiban（出力ファイル名用）を入れてください"
         else:
-            msg, ok = "準備OK。右下の『作成 → 出力先』を押してください", True
+            msg, ok = ("準備OK。右下の『作成 → 出力先』（ファイルを作る）か、"
+                       "『機械へ直接書く…』（LANでつないだ機械へ書く）を押してください"), True
         self.lbl_guide.setText(("✓ " if ok else "▶ ") + "次にやること： " + msg)
         self.lbl_guide.setStyleSheet(
             "padding:6px; border-radius:4px; "
@@ -5575,25 +5582,32 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._update_guide()
 
     # ----- ③ 作成 -----
-    def create(self):
+    def _gather(self, *, need_out, title="作成"):
+        """画面の入力を集めて、作る中身（軸ごとの変更値）を決める。
+
+        「作成 → 出力先」（ファイルを出す）と「機械へ直接書く」で**同じ入口・同じ点検**を使う
+        （別々に作ると、片方だけ直す事故が起きる＝CLAUDE.md）。
+        need_out=False（機械へ直接書く）のときは出力先を要求しない。
+        問題があれば理由を画面に出して None。よければ dict を返す。
+        """
         sel = self._selected_files()
         if not sel:
-            QtWidgets.QMessageBox.warning(self, "作成", "①で作るもの（傾斜/回転）を選んでください")
-            return
+            QtWidgets.QMessageBox.warning(self, title, "①で作るもの（傾斜/回転）を選んでください")
+            return None
         # FANUC以外（三菱/安川TPC等）はFANUCのBASICに適用できない＝今は作成不可で弾く
         non_fanuc = [f for f in sel if f["meta"].get("system", "FANUC") != "FANUC"]
         if non_fanuc:
             names = "、".join(f"{f['name']}（{f['meta'].get('system')}系）" for f in non_fanuc)
             QtWidgets.QMessageBox.warning(
-                self, "作成",
+                self, title,
                 f"次の製品はFANUC制御ではないため、今は作成できません:\n・{names}\n\n"
                 "現在パラメータ作成はFANUCのみ対応です（三菱・安川等は後日対応）。"
                 "FANUC製品だけを選んで作成してください。")
-            return
+            return None
         idx = self.cmb_ctrl.currentData()
         if idx is None or idx < 0 or idx >= len(self._cand):
-            QtWidgets.QMessageBox.warning(self, "作成", "②で制御装置を選んでください")
-            return
+            QtWidgets.QMessageBox.warning(self, title, "②で制御装置を選んでください")
+            return None
         ctl, asg = self._cand[idx]
         master = self.e_basic.text().strip()
         out = self.e_out.text().strip()
@@ -5602,19 +5616,28 @@ class ParamWizardDialog(QtWidgets.QDialog):
             # 型式検索から来ると未入力のことがある。空のまま作ると「R.prm」の
             # ような名無しファイル・Seiban無しの履歴ができてしまうので必須にする
             QtWidgets.QMessageBox.warning(
-                self, "作成", "Seiban（受注伝票番号）を入力してください（出力ファイル名になります）")
-            return
+                self, title, "Seiban（受注伝票番号）を入力してください（出力ファイル名になります）")
+            return None
         if not master or not Path(master).is_file():
-            QtWidgets.QMessageBox.warning(self, "作成", "使うBASIC（.prm）を指定してください")
-            return
-        if not out or not Path(out).is_dir():
-            QtWidgets.QMessageBox.warning(self, "作成", "出力先（存在するフォルダ）を指定してください")
-            return
+            QtWidgets.QMessageBox.warning(self, title, "使うBASIC（.prm）を指定してください")
+            return None
+        if need_out and (not out or not Path(out).is_dir()):
+            QtWidgets.QMessageBox.warning(self, title, "出力先（存在するフォルダ）を指定してください")
+            return None
         try:
             raw = param_build.read_master(master)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "作成", f"BASIC を読めません:\n{e}")
-            return
+            QtWidgets.QMessageBox.warning(self, title, f"BASIC を読めません:\n{e}")
+            return None
+        # 機械へ直接書くときは、作成時オプション（2000を0／原点確立）は使えない
+        # （ビットの基準が BASIC になり、機械の今の値の、ほかのビットを壊すため）。黙って無視しない
+        if not need_out and (self.chk_zero.isChecked() or self.cmb_origin.currentData()):
+            QtWidgets.QMessageBox.warning(
+                self, title,
+                "『DGPRを0にする』『原点確立』は、機械へ直接書くときは使えません"
+                "（機械の今の値の、ほかのビットを壊さないため）。\n"
+                "チェックを外す（原点確立は『変更しない』）か、ファイルを作って入れてください。")
+            return None
         # 各ファイル → 変更値（平坦）→ 割当軸番号
         axis_values, per_meta = {}, {}
         for f, a in zip(sel, asg):
@@ -5630,15 +5653,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 try:
                     ptext = Path(f["path"]).read_text(encoding="cp932", errors="replace")
                 except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "作成", f"製品データを読めません:\n{e}")
-                    return
+                    QtWidgets.QMessageBox.warning(self, title, f"製品データを読めません:\n{e}")
+                    return None
                 vals = param_build.product_change_values(raw, ptext)
             if not vals:
                 QtWidgets.QMessageBox.warning(
-                    self, "作成",
+                    self, title,
                     f"{f['kind']}（{f['name']}）から変更値を取り出せませんでした。"
                     "BASICと製品/特注データの形式が合っているか確認してください。")
-                return
+                return None
             # 作成時オプション（2000を0／原点確立 ON/OFF）を反映。旧→新はプレビューで確認
             vals = param_build.with_servo_options(
                 raw, axnum, vals,
@@ -5650,6 +5673,44 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 origin_bit=int(self.settings.get("origin_bit", 5)))
             axis_values[axnum] = vals
             per_meta[axnum] = (f, a)
+        return dict(sel=sel, asg=asg, ctl=ctl, master=master, out=out, seiban=seiban, raw=raw,
+                    axis_values=axis_values, per_meta=per_meta)
+
+    def write_to_machine(self):
+        """機械へ直接書く（FOCAS）。かんたん作成と同じ入力（受注番号・号機・BASIC）から作る中身を決め、
+        土台だけを「いま取った機械の控え」に替える。機械には、控えと作成結果の差だけを、
+        確認して1件ずつ書く（つなぐ → 控え → 差の一覧 → 確認 → 書く → 読み戻し → アラーム確認）。
+        作る中身の決め方は「作成 → 出力先」と同じ（_gather と plan_prepare）。
+        """
+        title = "機械へ直接書く"
+        g = self._gather(need_out=False, title=title)
+        if g is None:
+            return
+        sel, ctl, master, seiban, raw, axis_values = (
+            g[k] for k in ("sel", "ctl", "master", "seiban", "raw", "axis_values"))
+        if not self._basic_ok(master):
+            return
+
+        def plan_fn(foc_raw, zero_scope="product"):
+            # 土台は機械の控え（BASIC ではない）。reference="" と 0にする範囲は plan_prepare が決める
+            return self._plan(foc_raw, axis_values=axis_values, seiban=seiban, master_path="",
+                              focas_base=True, zero_scope=zero_scope)
+
+        shown = "＋".join(nc_param.axis_name(ax) for ax in sorted(axis_values))
+        FocasWriteDialog(
+            self, self.settings, plan_fn, seiban=seiban, basic_text=raw,
+            product_axes=sorted(axis_values), auto=True,
+            subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
+                     f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
+                     " の製品値のうち、機械の今と違う所だけを書きます。").exec()
+
+    def create(self):
+        g = self._gather(need_out=True)
+        if g is None:
+            return
+        sel, asg, ctl, master, out, seiban, raw, axis_values, per_meta = (
+            g[k] for k in ("sel", "asg", "ctl", "master", "out", "seiban", "raw",
+                           "axis_values", "per_meta"))
         # 頭文字・ファイル名（T+R が選択順で並ぶ。種別不明や重複は "TR"）
         if len(sel) >= 2:
             kinds = {"傾斜": "T", "回転": "R"}

@@ -92,7 +92,16 @@ def copy_python32(src, dst):
     return n
 
 
-def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, installer_dir=None):
+def find_basic_dir(settings):
+    """BASIC（F10BASIC.dat など）のフォルダ。このPCの設定 param_basic_dir。無ければ None。"""
+    d = str(settings.get("param_basic_dir") or "")
+    if d and Path(d).is_dir() and any(p.is_file() for p in Path(d).iterdir()):
+        return Path(d)
+    return None
+
+
+def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, installer_dir=None,
+                 basic_dir=None):
     """配布セットを out に作る。out の中は作り直す。戻り値は報告の行のリスト。"""
     out = Path(out)
     exe, helper, masters = Path(exe), Path(helper), Path(masters)
@@ -117,6 +126,12 @@ def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, in
                         ignore=shutil.ignore_patterns("ユーザー*.csv", "FOCAS*ログ.csv", "*ログ.csv",
                                                       "FOCAS機械台帳.csv", "__pycache__"))
         lines.append("マスタ: " + "・".join(sorted(p.name for p in (app / "マスタ").iterdir())))
+    if basic_dir is not None:
+        shutil.copytree(basic_dir, app / "BASIC")
+        nb = sum(1 for p in (app / "BASIC").rglob("*") if p.is_file())
+        lines.append(f"BASIC: {basic_dir}（{nb} ファイル。入れるとき場所も自動で登録）")
+    else:
+        lines.append("BASIC: 入れていません（各PCで「場所」欄に BASIC のフォルダを入れてください）")
     if py32_dir is not None:
         n = copy_python32(py32_dir, app / "focas" / "python32")
         lines.append(f"FOCAS 用 32bit Python: {py32_dir}（{n} ファイル）")
@@ -158,7 +173,8 @@ def main(argv=None):
     try:
         lines = build_bundle(args.out, exe=args.exe,
                              helper=repo_dir() / "nd287_app" / "focas_helper.py",
-                             masters=repo_dir() / "マスタ", py32_dir=py32, fwlib_dir=fw)
+                             masters=repo_dir() / "マスタ", py32_dir=py32, fwlib_dir=fw,
+                             basic_dir=find_basic_dir(settings))
     except DeployError as e:
         print(f"[エラー] {e}")
         return 1

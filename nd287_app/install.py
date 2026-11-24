@@ -14,6 +14,7 @@ PowerShell from running."）。
 結果は窓で知らせ、入れた先の install.log にも残す。
 """
 
+import json
 import os
 import shutil
 import sys
@@ -24,6 +25,9 @@ INSTALL_DIR_NAME = "ND287分割測定"
 EXE_NAME = "nd287_bunkatsu.exe"
 SHORTCUT_NAME = "ND287分割測定.lnk"
 MASTER = "マスタ"
+BASIC = "BASIC"                       # 配布セットに入れる BASIC（号機ごとの基本パラメータ）
+# app\\ から写すとき別扱いにするもの（無いファイルだけ入れる。このPCで直したものを上書きしない）
+KEEP_DIRS = (MASTER, BASIC)
 # 前のやり方から引き継ぐフォルダ（無いファイルだけ写す）
 CARRY_DIRS = ("測定データ", "機械バックアップ", MASTER)
 # 前のフォルダを探すときに入らないフォルダ
@@ -68,7 +72,7 @@ def copy_app(src, dst):
     for root, dirs, files in os.walk(src):
         rel = Path(root).relative_to(src)
         if rel == Path("."):
-            dirs[:] = [d for d in dirs if d != MASTER]
+            dirs[:] = [d for d in dirs if d not in KEEP_DIRS]
         (dst / rel).mkdir(parents=True, exist_ok=True)
         for f in files:
             to = dst / rel / f
@@ -80,6 +84,54 @@ def copy_app(src, dst):
                 raise
             n += 1
     return n
+
+
+# ---------------------------------------------------------------------------
+# 設定（settings.json）への登録
+# ---------------------------------------------------------------------------
+
+def _has_files(d):
+    try:
+        return Path(d).is_dir() and any(p.is_file() for p in Path(d).iterdir())
+    except OSError:
+        return False
+
+
+def register_locations(dst):
+    """BASIC の場所と製品データの場所を、設定に登録する。報告の行を返す。
+
+    - param_basic_dir: 未設定、または存在しないとき、入れた BASIC（dst\\BASIC）にする。
+      すでに存在する場所が入っていれば、そのまま（このPCで決めた場所を勝手に変えない）。
+    - param_product_dir: 未設定のとき、会社の共有サーバの既定値にする。
+    settings.json が無いPCでは、この2つだけ書いた設定を作る（足りない項目は起動時に既定値で補われる）。
+    """
+    from . import settings as S
+    dst = Path(dst)
+    sp = dst / "settings.json"
+    data, existed = {}, sp.is_file()
+    if existed:
+        try:
+            data = json.loads(sp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ["設定（settings.json）を読めなかったので、BASIC・製品データの場所は登録していません。"]
+    lines, changed = [], False
+    bd = str(data.get("param_basic_dir") or "")
+    if (not bd or not Path(bd).is_dir()) and _has_files(dst / BASIC):
+        data["param_basic_dir"] = str(dst / BASIC)
+        lines.append(f"BASICの場所を登録しました: {dst / BASIC}")
+        changed = True
+    pd = str(data.get("param_product_dir") or "")
+    if not pd:
+        data["param_product_dir"] = S.DEFAULTS["param_product_dir"]
+        lines.append(f"製品データの場所を登録しました: {data['param_product_dir']}")
+        changed = True
+    if changed:
+        if existed:
+            shutil.copy2(sp, dst / "settings.json.bak_install")
+        tmp = sp.with_name(sp.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, sp)
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +283,10 @@ def install(src, dst=None, *, roots=None, shortcuts=True, make_shortcut=None):
     copy_app(src, dst)
     added = copy_missing(src / MASTER, dst / MASTER)
     lines.append(f"マスタ: 新しく入れたもの {added} 件" if added else "マスタ: このPCのものをそのまま使います")
+    if (src / BASIC).is_dir():
+        nb = copy_missing(src / BASIC, dst / BASIC)
+        lines.append(f"BASIC: 新しく入れたもの {nb} 件" if nb else "BASIC: このPCのものをそのまま使います")
+    lines += register_locations(dst)
     focas = (dst / "focas" / "python32" / "python.exe").is_file() and (dst / "focas" / "Fwlib32.dll").is_file()
     lines.append("FOCAS（機械と直接つなぐ）: 使えます（32bit Python と Fwlib32.dll も入れました）" if focas
                  else "FOCAS（機械と直接つなぐ）: この配布セットには入っていません")

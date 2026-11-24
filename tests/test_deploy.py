@@ -129,6 +129,23 @@ class TestBundle(TempDir):
             self.assertFalse((out / rel).exists(), rel)
         self.assertTrue(any("Fwlib32.dll" in ln for ln in lines))
 
+    def test_basic_goes_into_the_bundle(self):
+        basic = self.tmp / "BASICもと"
+        touch(basic / "F10BASIC.dat")
+        touch(basic / "F86BASIC.DAT")
+        out, lines = self._make(basic_dir=basic)
+        self.assertTrue((out / "app" / "BASIC" / "F10BASIC.dat").is_file())
+        self.assertTrue((out / "app" / "BASIC" / "F86BASIC.DAT").is_file())
+        self.assertTrue(any("BASIC:" in ln and "2 ファイル" in ln for ln in lines))
+
+    def test_find_basic_dir(self):
+        self.assertIsNone(deploy.find_basic_dir({"param_basic_dir": ""}))
+        self.assertIsNone(deploy.find_basic_dir({"param_basic_dir": str(self.tmp / "無い")}))
+        (self.tmp / "空").mkdir()
+        self.assertIsNone(deploy.find_basic_dir({"param_basic_dir": str(self.tmp / "空")}))
+        touch(self.tmp / "B" / "F10BASIC.dat")
+        self.assertEqual(deploy.find_basic_dir({"param_basic_dir": str(self.tmp / "B")}), self.tmp / "B")
+
     def test_without_focas(self):
         out, lines = self._make(py32_dir=None, fwlib_dir=None)
         self.assertFalse((out / "app" / "focas").exists())

@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1209件**。1件でも落ちたら先に進まない。
+- 現在 **1218件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -100,6 +100,12 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   設定の次に見る。更新しても settings.json・測定データ・控えは消さない。マスタは**無いファイルだけ**入れる。
 - 初めて入れるときだけ、前のやり方のフォルダ（settings.json の隣に ND287分割測定.bat 等）を探し、
   一番新しい settings.json のフォルダから設定・測定データ・控え・マスタを写す（元は消さない・上書きしない）。
+
+### かんたん作成から機械へ直接書く（2026-11-24）
+- FOCAS は別画面にしない。かんたん作成の「機械へ直接書く…」→ `_gather()`（作成と共通）→ `FocasWriteDialog`（土台=機械の控え、`focas_base=True`）。
+  データは画面の「場所」欄（既定: `\\svn03\文書共有\工機部内\共用\システム\パラメータ表\data`）から取る。
+- 配布セットを作るPCの `param_basic_dir` の BASIC を `app\BASIC` に同梱し、入れるとき場所を自動登録する（`install.register_locations`）。
+- 受注番号の検索は `os.scandir`（共有に約1.5万ファイル。以前は約29秒）。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

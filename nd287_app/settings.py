@@ -109,7 +109,9 @@ DEFAULTS = dict(
     param_master_prm="",      # FANUC: 直接指定するBASIC .prm（フォルダ運用なら空でOK）
     # 共有サーバ運用: BASIC(制御装置の基本パラメータ)と、Seiban対応の製品データの置き場所
     param_basic_dir="",       # BASIC(.PRM)を置くフォルダ（例 \\server\param\BASIC）
-    param_product_dir="",     # Seibanごとの製品データを置くフォルダ（例 \\server\param\製品）
+    # Seibanごとの製品データ（T/R<受注伝票番号>.prm）の置き場所。会社の共有サーバ（2026-11-24 利用者から）。
+    # \\svn03\… の形で入れる（PC によって K: などの割り当てが違っても届く）
+    param_product_dir=r"\\svn03\文書共有\工機部内\共用\システム\パラメータ表\data",
     param_custom_dir="",      # 特注パラ(Excel)の置き場（MKPRMで作れない=DD等。系列別フォルダ）
     param_custom_index_csv=r"マスタ/特注パラ索引.csv",  # 特注パラの索引（型式で引く・再索引で更新）
     param_out_folder="",      # 確認表・差分ファイルの出力先（カードのドライブ or LAN共有）

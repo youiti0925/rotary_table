@@ -106,6 +106,57 @@ class TestFlow(unittest.TestCase):
                 self.assertNotIn(b, text)
 
 
+class TestWizardBrief(unittest.TestCase):
+    """かんたん作成の長い説明は、絵と短い言葉にする。長い文は、止まっているときだけ小さく添える。"""
+
+    def test_steps_one_and_two_use_short_words(self):
+        b = F.wizard_brief(1, missing=["受注伝票番号を入れて『探す』を押してください"])
+        self.assertEqual((b["pic"], b["kind"], b["say"]), ("product", "do", "伝票の番号を入れて「探す」を押す"))
+        self.assertEqual(F.wizard_brief(1, missing=[])["kind"], "done")
+        self.assertEqual(F.wizard_brief(2, missing=["制御装置（号機）を選んでください"])["say"], "号機を選ぶ")
+        self.assertEqual(F.wizard_brief(2, missing=["その号機の BASIC が見つかりません。『使うBASIC』を指定してください"])["say"],
+                         "元の設定ファイルが見つかりません")       # 略語を出さない
+
+    def test_real_guide_texts_become_short(self):
+        from nd287_app import flow_guide as G
+        cases = [
+            (dict(), "「つなぐ」を押す"),
+            (dict(connected=True), "「控えを取る」を押す"),
+            (dict(busy_mode="connect"), "機械につないでいます…"),
+            (dict(busy_mode="backup"), "機械の中身を写しています…"),
+            (dict(busy_mode="write"), "機械に書いています。さわらない"),
+            (dict(connected=True, estop="非常停止中です"), "非常停止がかかっています"),
+            (dict(connected=True, has_backup=True, plan_ready=True, n_items=12), "「機械に書く」を押す"),
+            (dict(connected=True, has_backup=True, plan_ready=True, result_state="done", result_all_ok=True),
+             "入りました ✓"),
+            (dict(connected=True, has_backup=True, plan_ready=True, result_state="done", result_all_ok=True,
+                  power_cycle=True), "電源を入れ直す"),
+            (dict(connected=True, has_backup=True, plan_ready=True, reasons=("書くものがありません（機械はすでに同じ値です）",)),
+             "もう同じ値が入っています ✓"),
+        ]
+        for kw, want in cases:
+            g = G.writer_guide(**kw)
+            b = F.wizard_brief(3, g["kind"], g["text"])
+            self.assertEqual(b["say"], want, g["text"])
+            self.assertLessEqual(len(b["say"]), 30)
+        g = G.program_guide(connected=True, has_backup=True)
+        self.assertEqual(F.wizard_brief(4, g["kind"], g["text"])["say"], "「送る」を押す")
+
+    def test_unknown_text_falls_back_by_kind_and_stop_keeps_the_reason(self):
+        b = F.wizard_brief(3, "stop", "知らない理由です")
+        self.assertEqual(b["say"], "止まっています")
+        self.assertEqual(b["detail"], "知らない理由です")
+        b = F.wizard_brief(3, "wait", "知らない文")
+        self.assertEqual((b["say"], b["detail"]), ("待っています…", ""))
+
+    def test_done_points_to_the_next_button(self):
+        b = F.wizard_brief(4, "done", "x", done=True)
+        self.assertEqual((b["kind"], b["say"]), ("done", "下の「測定へ進む」を押す"))
+
+    def test_power_cycle_shows_the_power_picture(self):
+        self.assertEqual(F.wizard_brief(3, "do", "機械の電源を切って、入れ直してください")["pic"], "power")
+
+
 class TestArt(unittest.TestCase):
     def test_svg_wellformed(self):
         import xml.dom.minidom as md

@@ -192,7 +192,31 @@ class EasyModeDialog(QtWidgets.QDialog):
         right.addStretch(1)
         mid.addWidget(self.right_w, 5)
         self.embed = QtWidgets.QWidget()           # 「機械に入れる」: かんたん作成を、この画面の中に入れる
-        QtWidgets.QVBoxLayout(self.embed).setContentsMargins(0, 0, 0, 0)
+        el = QtWidgets.QVBoxLayout(self.embed)
+        el.setContentsMargins(0, 0, 0, 0)
+        el.setSpacing(8)
+        self.strip = QtWidgets.QFrame()              # 絵と短い言葉（かんたん作成の長い説明の代わり）
+        self.strip.setObjectName("art")
+        sl = QtWidgets.QHBoxLayout(self.strip)
+        sl.setContentsMargins(12, 8, 12, 8)
+        sl.setSpacing(16)
+        self.v_strip = SvgView()
+        self.v_strip.setFixedSize(200, 120)
+        sl.addWidget(self.v_strip)
+        sv = QtWidgets.QVBoxLayout()
+        sv.setSpacing(4)
+        self.lbl_s_title = QtWidgets.QLabel("")
+        self.lbl_s_title.setStyleSheet("font-size:20px; font-weight:900; color:#17212B;")
+        self.lbl_s_say = QtWidgets.QLabel("")
+        self.lbl_s_say.setWordWrap(True)
+        self.lbl_s_say.setObjectName("watch")
+        self.lbl_s_detail = QtWidgets.QLabel("")
+        self.lbl_s_detail.setWordWrap(True)
+        self.lbl_s_detail.setStyleSheet("font-size:12px; color:#5A6876;")
+        for wd in (self.lbl_s_title, self.lbl_s_say, self.lbl_s_detail):
+            sv.addWidget(wd)
+        sl.addLayout(sv, 1)
+        el.addWidget(self.strip)
         self.embed.setVisible(False)
         mid.addWidget(self.embed, 1)
         root.addLayout(mid, 1)
@@ -216,7 +240,11 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_next.clicked.connect(self._next)
         foot.addWidget(self.b_next)
         root.addLayout(foot)
-        self.resize(1000, 640)
+        self.resize(1100, 700)
+        scr = QtWidgets.QApplication.primaryScreen()
+        if scr is not None:                          # 小さい画面（1024x768・1366x768）に収める
+            g = scr.availableGeometry()
+            self.resize(min(1100, g.width() - 20), min(700, g.height() - 40))
         self.setMinimumSize(900, 580)
 
     # ------------------------------------------------------------ 手順の移り変わり
@@ -341,15 +369,15 @@ class EasyModeDialog(QtWidgets.QDialog):
                 title = f"{flow_guide._o(progs[:1])} を呼び出す"
         if sid == "result":
             ng, spec = c.get("ng", 0), c.get("has_spec", False)
-            lines = ([f"規格から外れた所が {ng} か所あります（右の表の赤い字は通常の画面で見られます）。"] if ng else
-                     ["規格と比べた所に、外れはありません。"] if spec else
-                     ["この測定には、合否の規格が画面に出ていません。値を確かめてから保存してください。"])
+            lines = ([f"外れた所が {ng} か所あります。"] if ng else
+                     ["ぜんぶ規格の中です。"] if spec else
+                     ["規格は画面に出ていません。値を見て、保存します。"])
             title = "測り終わりました"
         if sid == "finish":
             path = c.get("saved_path") or ""
-            lines = ["保存しました" + (f"（{path}）" if path else "") + "。"]
+            lines = [("保存先: " + path) if path else "保存しました。"]
             if c.get("next_mode"):
-                lines.append(f"続けて「{c['next_mode']}」を測ります。")
+                lines.append(f"つぎは「{c['next_mode']}」。")
         self.lbl_title.setText(title)
         self.lbl_lines.setText("\n".join(lines))
         self.lbl_lines.setVisible(bool(lines))
@@ -421,7 +449,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff"))
         self.b_next.setVisible(not inside)
         self.lbl_count.setVisible(not inside)
-        if inside:                                   # 中のかんたん作成が案内する。ここは章の棒ともどるだけ
+        if inside:                                   # 中のかんたん作成の操作（入れる・押す）はそのまま。案内は絵と短い言葉
+            self._update_strip()
             self.b_back.setEnabled(bool(self.history))
             self.bar.set_progress(easy_flow.chapter_progress(self.i), s["ch"])
             return
@@ -495,6 +524,41 @@ class EasyModeDialog(QtWidgets.QDialog):
         shown = [x for x in range(len(STEPS)) if x == self.i or easy_flow.needed(STEPS[x]["id"], st, c)]
         self.lbl_count.setText(f"{shown.index(self.i) + 1} ／ {len(shown)}" if self.i in shown else "")
         self.bar.set_progress(easy_flow.chapter_progress(self.i), s["ch"])
+
+    def _update_strip(self):
+        w = self._wiz
+        try:
+            b = w.guide_brief()
+        except Exception:
+            return
+        br = easy_flow.wizard_brief(b["step"], b["kind"], b["text"], b["missing"], b["done"])
+        A = easy_art
+        ph = (self._phase % 2) * 0.9
+        pic = br["pic"]
+        label = "機械に入れています" if b["step"] == 3 else "測定の動きを入れます"
+        if pic == "product":
+            svg = A.product(not b["missing"])
+        elif pic == "table":
+            svg = A.table_picture()
+        elif pic == "power":
+            svg = A.power(False, True, ph)
+        elif pic == "scene":
+            svg = A.scene()
+        elif pic == "estop":
+            svg = A.estop(False, ph)
+        elif pic == "auto_done":
+            svg = A.auto(True, "入りました")
+        else:
+            svg = A.auto(br["kind"] == "done", label)
+        self.v_strip.set_svg(svg)
+        self.lbl_s_title.setText(f"{br['title']}")
+        bg, fg = WATCH_COLORS["wait" if br["kind"] == "do" else br["kind"]]
+        if br["kind"] == "do":
+            bg, fg = "#FFF3CF", "#7A5200"
+        self.lbl_s_say.setStyleSheet(f"background:{bg}; color:{fg};")
+        self.lbl_s_say.setText(br["say"])
+        self.lbl_s_detail.setText(br["detail"])
+        self.lbl_s_detail.setVisible(bool(br["detail"]))
 
     def _set_art(self, s, st, c, done, ph):
         sid = s["id"]
@@ -586,15 +650,20 @@ class EasyModeDialog(QtWidgets.QDialog):
         if self._wiz is not None or c.get("handoff") or c.get("skip_machine"):
             return
         w = self.host.easy_make_wizard(self.embed)
+        w.embedded = True                                  # 長い説明は出さない（上の絵と短い言葉が案内する）
         w.setWindowFlags(QtCore.Qt.Widget)
         for name in ("b_mode", "b_close"):               # 「全部表示」への切り替えと「閉じる」は出さない（初心者用。進むのは「測定へ進む」）
             try:
                 getattr(w, name).hide()
             except Exception:
                 pass
-        self.embed.layout().addWidget(w)
+        self.embed.layout().addWidget(w, 1)
         w.finished.connect(self._wizard_finished)
         w.show()
+        try:
+            w._apply_mode()                                # 長い説明を隠す
+        except Exception:
+            pass
         self._wiz = w
         if self.poller is not None:
             self.poller.pause()

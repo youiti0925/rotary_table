@@ -6456,6 +6456,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         row.insertWidget(row.indexOf(self.b_next), self.b_measure)
         self.handoff = None                        # 測定の画面へ渡すもの（WP.handoff。機械に入れ終えたときだけ）
         self.power_cycled = False                  # 書いたあと、電源の入れ直しが要った（はじめてモードが原点復帰を案内する）
+        self.embedded = False                      # はじめてモードの中に入れてある（長い説明は出さない。絵と短い言葉はあちらが出す）
+        self.now_kind, self.now_raw = "", ""
         self.lbl_now = QtWidgets.QLabel("")        # 段③: いまの状態と、次に人がやること（1つだけ。大きく）
         self.lbl_now.setWordWrap(True)
         self.lbl_now.setTextFormat(QtCore.Qt.PlainText)
@@ -8134,6 +8136,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                            "font-weight:bold;")
         else:
             self.lbl_decided.setStyleSheet("color:#475569;")
+        if self.embedded:
+            self._hide_long_text()
+
+    def guide_brief(self):
+        """はじめてモード用: いまの段と、案内の材料（読むだけ）。"""
+        st = W.step_state(self._step, **self._step_inputs())
+        return dict(step=self._step, kind=self.now_kind, text=self.now_raw, missing=list(st["missing"]),
+                    done=self.handoff is not None)
+
+    def _hide_long_text(self):
+        for wd in (self.lbl_steps, self.lbl_decided, self.lbl_now, self.lbl_conn):
+            wd.setVisible(False)
 
     def _on_next(self):
         st = W.step_state(self._step, **self._step_inputs())
@@ -8222,6 +8236,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._set_now(head + g["text"], g["kind"])
 
     def _set_now(self, text, kind):
+        self.now_kind, self.now_raw = kind, text          # はじめてモードが短い言葉にするために読む
+        if self.embedded:
+            return
         if text != self.lbl_now.text():
             self.lbl_now.setText(text)
             self.lbl_now.setStyleSheet("padding:8px; border-radius:4px; font-weight:bold;"

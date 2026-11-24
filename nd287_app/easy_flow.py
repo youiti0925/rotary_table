@@ -30,7 +30,7 @@ WHO = {"machine": "機械で", "pc": "PC で", "auto": "PC が自動で"}
 # detect: 機械の状態から「できた」を決めるときの名前（is_done）。無ければ、人が「やりました」を押す。
 STEPS = [
     dict(id="intro", ch=0, kind="info", title="用意するもの",
-         lines=["受注伝票と、LAN ケーブルを用意します。", "PC と機械、PC と角度の表示器を、ケーブルでつなぎます。"],
+         lines=["受注伝票と LAN ケーブル。", "PC と機械・表示器をつなぐ。"],
          art="scene", button="はじめる ▶"),
     dict(id="power", ch=0, kind="machine", title="機械の電源を入れる",
          lines=["操作盤の緑の「入」を押します。"], part="power", zoom="power", detect="online"),
@@ -44,21 +44,21 @@ STEPS = [
     dict(id="cycle_power", ch=2, kind="machine", title="電源を入れ直す",
          lines=["「切」を押して、画面が消えたら「入」を押します。"], part="power", zoom="power_cycle", detect="cycled"),
     dict(id="dial_ref", ch=2, kind="machine", title="つまみを原点復帰に合わせる",
-         lines=["電源を入れたあとは、最初に原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
+         lines=["電源のあとは、原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
     dict(id="jog_origin", ch=2, kind="machine", title="「＋B」を押し続ける",
          lines=["テーブルが回って、原点で止まります。"], part="keys", zoom="jog"),
     dict(id="fields", ch=3, kind="input", title="機番・名前・温度を入れる",
-         lines=["型式と測り方は、機械に入れたものに合わせて入っています。"], art="table"),
+         lines=["型式と測り方は、もう入っています。"], art="table"),
     dict(id="dial_mem", ch=3, kind="machine", title="つまみをメモリ運転に合わせる",
          lines=["測るときは、このモードです。"], part="dial", zoom="dial", to="メモリ運転", detect="aut_mem"),
     dict(id="prog_select", ch=3, kind="machine", title="プログラムを呼び出す",
          lines=["キーを ①→②→③ の順に押します。"], part="keys", zoom="keys"),
     dict(id="override", ch=3, kind="machine", title="早送りのつまみを 100% に上げる",
-         lines=["低いままだと、測るのに時間がかかります。"], part="rapid", zoom="knob"),
+         lines=["低いと時間がかかります。"], part="rapid", zoom="knob"),
     dict(id="start1", ch=4, kind="machine", title="緑の起動ボタンを押す",
-         lines=["PC は、もう値を受け取る用意ができています。"], part="start", zoom="start", detect="running"),
+         lines=["PC は、もう受け取れます。"], part="start", zoom="start", detect="running"),
     dict(id="counter0", ch=4, kind="machine", title="表示器を 0 にする",
-         lines=["機械が一度止まりました。表示器の黄色のキーを押します。"], art="counter", zoom="counter"),
+         lines=["機械が止まったら、黄色のキー。"], art="counter", zoom="counter"),
     dict(id="start2", ch=4, kind="machine", title="もう一度、緑の起動ボタンを押す",
          lines=["ここから測りはじめます。"], part="start", zoom="start_again", detect="running"),
     dict(id="measuring", ch=4, kind="run", title="測っています",
@@ -243,3 +243,76 @@ def watch_line(step_id, st, ctx=None, track=None):
 
 def aut_name(v):
     return {0: "MDI", 1: "メモリ運転", 3: "記憶編集", 4: "ハンドル", 5: "手動送り", 9: "原点復帰", 10: "リモート"}.get(v, f"その他（{v}）")
+
+
+# ------------------------------------------------------------------ 中に入れたかんたん作成の案内（絵と短い言葉）
+# かんたん作成（受注伝票番号→制御装置→機械に入れる→測定プログラム）の長い説明の代わりに、
+# 絵1つ・見出し・短い一言だけを出す。長い文は、止まっているとき（stop）だけ小さく添える（理由が要るため）。
+# pic: 絵の名前（easy_mode が easy_art から選ぶ）。kind: do / wait / stop / done
+
+WIZ_TITLES = {1: "受注伝票番号を入れる", 2: "機械（号機）を決める", 3: "機械に入れる", 4: "測定の動きを入れる"}
+
+# (文に含まれる言葉, 短い一言)。上から順に最初に合ったもの。
+_MISSING_SHORT = (
+    ("受注伝票番号を入れて", "伝票の番号を入れて「探す」を押す"),
+    ("『探す』を押して", "「探す」を押す"),
+    ("傾斜／回転", "傾斜か回転に ✓ を入れる"),
+    ("FANUC 以外", "この製品は作れません"),
+    ("モーターを選んで", "付いているモーターを選ぶ"),
+    ("セミクロにできません", "セミクロにできません"),
+    ("制御装置（号機）を選んで", "号機を選ぶ"),
+    ("BASIC が見つかりません", "元の設定ファイルが見つかりません"),
+)
+_GUIDE_SHORT = (
+    ("非常停止", "非常停止がかかっています"),
+    ("機械につながりません", "機械につながりません。電源とケーブルを見る"),
+    ("機械につないでいます", "機械につないでいます…"),
+    ("控えています", "機械の中身を写しています…"),
+    ("機械に書いています", "機械に書いています。さわらない"),
+    ("元の値に戻しています", "元にもどしています…"),
+    ("機械と話しています", "機械と話しています…"),
+    ("電源を切って", "電源を入れ直す"),
+    ("電源を入れ直して", "電源を入れ直す"),
+    ("つなぎ直して続ける", "電源を入れ直して、「つなぎ直して続ける」"),
+    ("読み戻したら、送ったものと違", "読み戻すと違いました。「LF のみで送り直す」を押す"),
+    ("機械に入らなかった", "入らなかったものがあります"),
+    ("もう入っています", "もう入っています ✓"),
+    ("機械に、同じ番号で中身の違う", "同じ番号で中身が違うものがあります"),
+    ("書けませんでした", "書けませんでした"),
+    ("書けなかった所", "書けなかった所があります"),
+    ("機械には、もう同じ値", "もう同じ値が入っています ✓"),
+    ("機械に書けました", "入りました ✓"),
+    ("『この", "「機械に書く」を押す"),
+    ("『控えを取る』", "「控えを取る」を押す"),
+    ("『つなぐ』を押して", "「つなぐ」を押す"),
+    ("『送る』を押す", "「送る」を押す"),
+    ("測定プログラムを作れません", "測定プログラムを作れません"),
+    ("今は機械に書けません", "今は書けません"),
+    ("機械の様子を読めて", "機械の様子を読めません"),
+)
+
+
+def wizard_brief(step, kind="", text="", missing=(), done=False):
+    """かんたん作成の今の様子 → {"title","say","pic","kind","detail"}。
+    step=1〜4。kind/text は③④の帯（長い文）。missing は①②の足りないもの。done=機械に入れ終えた（測定へ進める）。"""
+    title = WIZ_TITLES.get(step, "")
+    pic = {1: "product", 2: "table", 3: "auto", 4: "auto"}.get(step, "auto")
+    if done:
+        return dict(title="入りました", say="下の「測定へ進む」を押す", pic="auto_done", kind="done", detail="")
+    if step in (1, 2):
+        m = list(missing or [])
+        if not m:
+            return dict(title=title, say="そろいました。「次へ」を押す", pic=pic, kind="done", detail="")
+        say = next((s for key, s in _MISSING_SHORT if key in m[0]), "画面の下の説明を見る")
+        return dict(title=title, say=say, pic=pic, kind="do", detail="")
+    t = text or ""
+    say = next((s for key, s in _GUIDE_SHORT if key in t), "")
+    if not say:
+        say = {"wait": "待っています…", "stop": "止まっています", "done": "できました ✓", "do": "つぎの操作をする"}.get(kind, "")
+    if "電源" in say and "入れ直" in say:
+        pic = "power"
+    elif "ケーブル" in say or "つなが" in say:
+        pic = "scene"
+    elif "非常停止" in say:
+        pic = "estop"
+    return dict(title=title, say=say, pic=pic, kind=kind or "wait", detail=(t if kind == "stop" else ""))

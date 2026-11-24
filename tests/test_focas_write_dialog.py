@@ -486,6 +486,18 @@ class TestKeepMotor(WriteDialogBase):
         self.assertNotIn("書きません", d.lbl_motor.text())
 
 
+class TestMotorIdCheck(WriteDialogBase):
+    VALUES = {"20": "4"}
+
+    def test_warns_when_typed_motor_id_differs_from_machine(self):
+        d = self.dialog(keep_motor=True, motor_id="99999", product_axes=(4,))
+        self.go(d)
+        d._raw = "N02020Q1A1P1A2P2A3P3A4P299A5P5\n"          # この機械の 2020（A4=299）
+        d._show_motor_note()
+        self.assertIn("99999", d.lbl_motor.text())
+        self.assertIn("違います", d.lbl_motor.text())
+
+
 class TestZeroScope(WriteDialogBase):
     VALUES = {"20": "4"}
 

@@ -2988,7 +2988,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
     COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
-                 basic_text=None, product_axes=(), auto=False, keep_motor=False):
+                 basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id=""):
         super().__init__(parent)
         self.settings = settings
         # auto: 入れた IP に居なければ LAN の中を探す・台帳（CNC ID→号機）を使う（FocasDialog と同じ）。
@@ -3025,6 +3025,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._wplan = None
         self._zero_all = False
         self._keep_motor = bool(keep_motor)
+        self._motor_id = str(motor_id or "").strip()
         self._result = None              # 直近の書込の WriteResult
         self._undone = False
         self._rewrite_blocked = False    # この控えでは、もう書いた（もう一度書くなら控えを取り直す）
@@ -3650,8 +3651,17 @@ class FocasWriteDialog(QtWidgets.QDialog):
     def _show_motor_note(self):
         """機械の 2020 と製品の 2020 が違うことを、はっきり出す（黙って外さない）。"""
         it = next((x for x in (self._wplan or {}).get("items", []) if x["no"] == MOTOR_ID_PARAM), None)
+        mach = None
+        if self._raw is not None and self._product_axes:
+            mach = fanuc_param.value_on_axis(self._raw, MOTOR_ID_PARAM, self._product_axes[0])
         if self._keep_motor:
-            self.lbl_motor.setText("モーター番号（N02020）は書きません。機械のモーターのままです。")
+            txt = "モーター番号（N02020）は書きません。機械のモーターのままです。"
+            if self._motor_id and mach is not None and str(mach).strip() != self._motor_id:
+                txt += (f"\n⚠ 入力した仮モーターの番号 {self._motor_id} と、機械の今の 2020（{mach}）が違います。"
+                        "付いているモーターを確かめてください。")
+            elif self._motor_id and mach is not None:
+                txt += f"（入力した番号 {self._motor_id} は機械の今の 2020 と同じです）"
+            self.lbl_motor.setText(txt)
         elif it is not None:
             self.lbl_motor.setText(
                 f"モーターが製品データと違います: 機械の今 {it['old']} ／ 製品 {it['new']}。"
@@ -5143,6 +5153,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
             "仮モーターなら 2020（モーター番号）は書かず、機械の値のままにします。\n"
             "製品のモーターに替えるなら、DGPR（2000 の #1）を 0 にして電源を入れ直す必要があります。")
         f3.addRow("モーター", self.cmb_motor)
+        self.e_motor_id = QtWidgets.QLineEdit()
+        self.e_motor_id.setPlaceholderText("仮モーターの番号（2020）。空でも進めます")
+        self.e_motor_id.setToolTip("機械に付けた仮モーターの番号（パラメータ 2020）。入れると、機械の今の値と照らし合わせて、"
+                                   "違えば書く前に警告します（この番号は書きません）")
+        self.e_motor_id.setEnabled(False)
+        self.cmb_motor.currentIndexChanged.connect(
+            lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
+        f3.addRow("仮モーターの番号", self.e_motor_id)
         op, ob = settings.get("origin_param", "1815"), settings.get("origin_bit", 5)
         self.cmb_origin = QtWidgets.QComboBox()
         self.cmb_origin.addItem("変更しない", "")
@@ -5809,6 +5827,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         FocasWriteDialog(
             self, self.settings, plan_fn, seiban=seiban, basic_text=raw,
             product_axes=sorted(axis_values), auto=True, keep_motor=(motor == "temp"),
+            motor_id=(self.e_motor_id.text().strip() if motor == "temp" else ""),
             subtitle=f"{self.e_model.text().strip() or '—'}（{'＋'.join(f['kind'] for f in sel)}・"
                      f"{ctl.label()}・{shown} 軸）／ BASIC {Path(master).name}"
                      " の製品値のうち、機械の今と違う所だけを書きます。").exec()

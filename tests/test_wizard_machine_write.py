@@ -141,6 +141,16 @@ class TestWizardMachineWrite(WizardBase):
         self.assertEqual(G.drop_param_numbers({3: {2020: "1", 2022: "2"}}, [2020]), {3: {2022: "2"}})
         self.assertEqual(G.drop_param_numbers({2020: 1, (2020, "L1"): 2, 2021: 3}, [2020]), {2021: 3})
 
+    def test_motor_id_field_only_for_temp_motor_and_is_passed_on(self):
+        w = self.ready(self.wizard())
+        w.e_out.setText("")
+        self.assertFalse(w.e_motor_id.isEnabled())
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("temp"))
+        self.assertTrue(w.e_motor_id.isEnabled())
+        w.e_motor_id.setText("299")
+        self.run_machine(w)
+        self.assertEqual(self.opened[0][1]["motor_id"], "299")
+
     def test_motor_must_be_chosen_first(self):
         w = self.ready(self.wizard())
         w.e_out.setText("")

@@ -86,11 +86,8 @@ def read_machine(settings, client_factory, *, port_open=None, on_client=None):
                 pass
 
 
-def product_motor_id(files):
-    """選んだ製品データの 2020。1件だけ選んだときだけ決める。分からなければ ''（＝不明）。"""
-    if len(files) != 1:
-        return ""
-    f = files[0]
+def file_motor_id(f):
+    """製品データ1つの 2020。分からなければ ''。"""
     mid = _clean((f.get("meta") or {}).get("motor_id"))
     if mid:
         return mid
@@ -99,6 +96,56 @@ def product_motor_id(files):
         if k in vals:
             return _clean(vals[k])
     return ""
+
+
+def product_motor_id(files):
+    """選んだ製品データの 2020。1件だけ選んだときだけ決める。分からなければ ''（＝不明）。"""
+    if len(files) != 1:
+        return ""
+    return file_motor_id(files[0])
+
+
+def product_motor_ids(files):
+    """選んだ製品データごとの 2020（2軸テーブルは選んだ順に2つ）。分からないものは ''。"""
+    return [file_motor_id(f) for f in files]
+
+
+def resolve_distinct(cands, decided=None):
+    """製品ごとの候補軸 cands（[[軸番号...], ...]）から、**同じ軸にならない**ように軸を決める（純関数）。
+
+    decided: すでに決まっている軸（0 は未定）。候補が1つになった製品はその軸に決め、ほかの製品の候補から除く
+    （片方が決まったらもう片方から除く）。2つの製品が同じ1つの軸しか候補に無い／最初から同じ軸に決まっている
+    ときは、どちらも決めず conflict に入れる（人が選ぶ）。戻り値 (決めた軸のリスト, 残った候補, conflictの位置)。
+    """
+    n = len(cands)
+    dec = list(decided or [])[:n]
+    dec += [0] * (n - len(dec))
+    rest = [list(c) for c in cands]
+    conflict = set()
+    firsts = [d for d in dec if d]
+    for i in range(n):
+        if dec[i] and firsts.count(dec[i]) > 1:           # 最初から同じ軸に決まっている → どちらも決めない
+            conflict.add(i)
+            rest[i] = [dec[i]]
+    dec = [0 if i in conflict else d for i, d in enumerate(dec)]
+    changed = True
+    while changed:
+        changed = False
+        taken = {d for d in dec if d}
+        for i in range(n):
+            if not dec[i] and i not in conflict:
+                rest[i] = [k for k in rest[i] if k not in taken]
+        singles = {}
+        for i in range(n):
+            if not dec[i] and len(rest[i]) == 1:
+                singles.setdefault(rest[i][0], []).append(i)
+        for ax, who in singles.items():
+            if len(who) > 1:
+                conflict.update(who)                      # 同じ1つの軸を取り合う → 決めない
+            elif who[0] not in conflict:
+                dec[who[0]] = ax
+                changed = True
+    return dec, rest, sorted(conflict)
 
 
 def decide(axes, product_id):

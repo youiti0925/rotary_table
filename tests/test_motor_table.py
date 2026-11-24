@@ -37,3 +37,11 @@ class TestEquivalentCap(unittest.TestCase):
         self.assertEqual(sf.equivalent_cap("80A", "200V", "400V"), "40A")
         self.assertEqual(sf.equivalent_cap("40A", "400V", "400V"), "40A")
         self.assertEqual(sf.equivalent_cap("", "400V", "200V"), "")
+
+
+class TestCapacityUppercaseIF(unittest.TestCase):
+    def test_uppercase_IF_is_read(self):
+        from nd287_app import seiban_flow as sf
+        self.assertEqual(sf.standard_capacity("αIF8/3000 HV-B"), "20A")
+        self.assertEqual(sf.standard_capacity("αiF8/3000 HV-B"), "20A")
+        self.assertEqual(sf.standard_capacity("αIF12/4000"), "40A")

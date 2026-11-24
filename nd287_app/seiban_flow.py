@@ -287,8 +287,8 @@ def standard_capacity(motor_model: str) -> str:
     if is_dd_motor(s):                              # DiS等は番手→容量が当てはまらない
         return ""
     # αiS/αiF の「i + S/F + 番手 + /」形だけを対象（誤ヒット防止のため '/' 必須）
-    m = re.search(r"[iＩ]\s*[SsFf]\s*(\d+)\s*/", s) \
-        or re.search(r"[αＡ]\s*i?\s*[SsFf]\s*(\d+)\s*/", s)
+    m = re.search(r"[iIＩ]\s*[SsFf]\s*(\d+)\s*/", s) \
+        or re.search(r"[αＡ]\s*[iI]?\s*[SsFf]\s*(\d+)\s*/", s)       # 大文字の αIF8/3000 も読む（実データ183件）
     if not m:
         return ""
     size = int(m.group(1))

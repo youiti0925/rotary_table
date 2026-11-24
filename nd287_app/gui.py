@@ -121,6 +121,7 @@ from . import param_build
 from . import ftpserver
 from . import focas_backup, focas_client, focas_ops, focas_find
 from . import wizard_steps as W
+from . import flow_guide
 from . import wizard_programs as WP
 from . import controllers
 from . import wizard_probe
@@ -3079,6 +3080,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         lead.setWordWrap(True)
         lead.setTextFormat(QtCore.Qt.RichText)
         v.addWidget(lead)
+        self.lbl_lead = lead                      # かんたん作成の中に入れるときは、何を書くかの1行だけにする
+        self._subtitle = subtitle
         self.lbl_semi_band = QtWidgets.QLabel("")          # セミクロに変換した製品を書くときの帯（確認ボタンは増やさない）
         self.lbl_semi_band.setWordWrap(True)
         self.lbl_semi_band.setTextFormat(QtCore.Qt.PlainText)
@@ -3676,6 +3679,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.bar.setValue(1)
         self.bar.setFormat("終わりました")
         self._backup = (res.folder, res.info)
+        self._result_fresh = False               # 控えを取り直した: 帯は「いまの機械との差」から決め直す
         # 控えを取り直しても、前回の書込結果（元に戻すのに要る）は消さない。元に戻したあとだけ捨てる。
         # 結果が無いときは、書込ジョブ.json から探して戻す（画面を閉じたあとでも元に戻せる）
         self._rewrite_blocked = False
@@ -4020,6 +4024,35 @@ class FocasWriteDialog(QtWidgets.QDialog):
             reasons += w["reasons"]
         return not reasons, reasons
 
+    def guide_state(self):
+        """いまの状態と、次に人がやること（かんたん作成の段③の帯に出す。flow_guide.writer_guide）。読むだけ。"""
+        res = self._result
+        fresh = (res is not None and getattr(self, "_result_fresh", False) and bool(res.items)
+                 and not self._undone)        # この控えで、いま書いた結果だけ（前の回・1段目の結果は使わない）
+        ok, reasons = self._writable()
+        backup_problem = plan_problem = ""
+        if self._backup is None and self._connected:
+            t = self.lbl_backup.text()
+            if t.startswith("控えは途中で止まりました"):
+                backup_problem = t
+        elif self._backup is not None and self._wplan is None:
+            plan_problem = re.sub(r"<[^>]+>", " ", self.lbl_backup.text() if not (self._backup[1] or {}).get("complete")
+                                  else self.lbl_summary.text()).strip()
+        return flow_guide.writer_guide(
+            connected=self._connected, busy_mode=(self._mode if self._busy and not self._busy_quiet else ""),
+            state_err=(self.lbl_state.text() if self._state_err and not self._connected else ""),
+            estop=(self.lbl_estop.text() if self._connected and self.lbl_estop.text() else ""),
+            has_backup=self._backup is not None, backup_problem=backup_problem,
+            plan_ready=self._wplan is not None, plan_problem=plan_problem,
+            n_items=len(self._wplan["items"]) if self._wplan else 0, reasons=reasons,
+            rewrite_blocked=self._rewrite_blocked,
+            result_state=(res.state if fresh else ""),
+            result_all_ok=bool(fresh and res.state == "done" and all(it["status"] == "ok" for it in res.items)
+                               and not self._stage1),
+            power_cycle=bool(fresh and res.power_cycle), stage1=bool(self._stage1),
+            stage1_done=self._stage1_done, unverified=self.cmb_verify.count(),
+            no_cnc_id=bool(self._connected and self._ident is not None and not self._ident.get("cnc_id")))
+
     def _first_unit_wanted(self):
         """台帳にも無い・号機の候補が空・控えが完全なときだけ、登録ボタンを出す。"""
         b = self._backup
@@ -4213,6 +4246,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def _write_ok(self, res):
         self._result = res
+        self._result_fresh = True
         if res.folder is None and self._backup:
             res.folder = str(self._backup[0])
         self.bar.setRange(0, 1)
@@ -6157,7 +6191,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addLayout(mid, 1)
 
         # --- ① 受注伝票番号 ---
-        box1 = self.box1 = QtWidgets.QGroupBox("① 受注伝票番号(Seiban) を入れて「探す」")
+        box1 = self.box1 = QtWidgets.QGroupBox("① 受注伝票番号を入れて「探す」")
         f1 = QtWidgets.QVBoxLayout(box1)
         srow = QtWidgets.QHBoxLayout()
         self.e_seiban = QtWidgets.QLineEdit()
@@ -6165,7 +6199,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.e_seiban.returnPressed.connect(self.search)
         b_search = QtWidgets.QPushButton("探す")
         b_search.setObjectName("primary"); b_search.clicked.connect(self.search)
-        srow.addWidget(QtWidgets.QLabel("Seiban")); srow.addWidget(self.e_seiban, 1)
+        srow.addWidget(QtWidgets.QLabel("受注伝票番号")); srow.addWidget(self.e_seiban, 1)
         srow.addWidget(b_search)
         f1.addLayout(srow)
         # 型式でも探せる（特注パラ＝製番が無いので型式で引く）
@@ -6383,10 +6417,32 @@ class ParamWizardDialog(QtWidgets.QDialog):
         row.addWidget(b_adv); row.addWidget(b_view); row.addWidget(self.b_back)
         row.addStretch(1); row.addWidget(self.b_file); row.addWidget(self.b_prog); row.addWidget(self.b_next)
         row.addWidget(b_make); row.addWidget(self.b_machine); row.addWidget(b_close)
+        self.b_measure = QtWidgets.QPushButton("測定へ進む ▶")      # 段④で機械に入れ終えたら出す
+        self.b_measure.setObjectName("primary")
+        self.b_measure.setMinimumHeight(36)
+        self.b_measure.setVisible(False)
+        self.b_measure.setToolTip("この画面を閉じて、測定の画面に戻ります。型式と測り方は自動で入ります")
+        self.b_measure.clicked.connect(self.accept)
+        row.insertWidget(row.indexOf(self.b_next), self.b_measure)
+        self.handoff = None                        # 測定の画面へ渡すもの（WP.handoff。機械に入れ終えたときだけ）
+        self.lbl_now = QtWidgets.QLabel("")        # 段③: いまの状態と、次に人がやること（1つだけ。大きく）
+        self.lbl_now.setWordWrap(True)
+        self.lbl_now.setTextFormat(QtCore.Qt.PlainText)
+        _f = self.lbl_now.font()
+        if _f.pointSizeF() > 0:
+            _f.setPointSizeF(_f.pointSizeF() * 1.15)
+            self.lbl_now.setFont(_f)
+        self.lbl_now.setVisible(False)
+        v.addWidget(self.lbl_now)
         self.panel = QtWidgets.QWidget()           # 段③: 機械につないで送る（FocasWriteDialog を入れる）
         QtWidgets.QVBoxLayout(self.panel).setContentsMargins(0, 0, 0, 0)
         self.panel.setVisible(False)
         self._writer = None
+        self._params_same = False                  # 段③: 機械にはもう同じ値が入っていた（書くものが無い）
+        self._writer_auto = self._probe_machine    # 本番の画面だけ、段③を開いたら自動でつなぐ（読むだけ。試験は False）
+        self._now_timer = QtCore.QTimer(self)
+        self._now_timer.setInterval(500)
+        self._now_timer.timeout.connect(self._tick_now)
         v.addWidget(self.panel, 1)
         self._build_program_panel()
         v.addWidget(self.panel4, 1)
@@ -7965,7 +8021,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         simple = self._mode == "simple"
         step = self._step
         self.b_mode.setText("全部表示" if simple else "かんたん表示")
-        self.lbl_conn.setVisible(simple)
+        self.lbl_conn.setVisible(simple and step < 3)     # ③④は、下の帯が今のつながり方を言う
         if simple:
             self._refresh_conn()
         if hasattr(self, "_f1"):
@@ -7979,7 +8035,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self._mid.setStretch(0, 3 if not simple else (1 if step == 1 else 0))
             self._mid.setStretch(1, 2 if not simple else (0 if step == 1 else 1))
         self.panel4.setVisible(simple and step == 4)
-        offer, offer_text = W.program_offer(step, params_ok=self._params_ok) if simple else (False, "")
+        offer, offer_text = (W.program_offer(step, params_ok=self._params_ok or self._params_same)
+                             if simple else (False, ""))
+        self.lbl_now.setVisible(simple and ((step == 3 and self._writer is not None)
+                                            or (step == 4 and self._prog_dlg is not None)))
+        self.b_measure.setVisible(simple and step == 4 and self.handoff is not None)
         self.b_prog.setVisible(offer)
         if offer:
             self.b_prog.setText(offer_text)
@@ -8013,7 +8073,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         names = []
         for n in W.STEPS:
             t = W.STEP_TITLES[n]
-            if n == 3 and step == 4 and not self._params_ok:
+            if n == 3 and step == 4 and not (self._params_ok or self._params_same):
                 names.append(f"<span style='color:#94a3b8;'>{t}（送らない）</span>")
             elif n < step:
                 names.append(f"<span style='color:#166534;'>✓ {t}</span>")
@@ -8033,7 +8093,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
             motor_id=self.e_motor_id.text().strip(), ctrl=ctl,
             semi=self._semi_choice() and bool((self._semi_info or {}).get("results"))) or "（まだありません）"))
         if st["missing"] and step < 3:
-            self.lbl_decided.setText(self.lbl_decided.text() + "\n▶ あと: " + st["missing"][0])
+            self.lbl_decided.setText(self.lbl_decided.text() + "\n▶ 次にやること: " + st["missing"][0])
+            self.lbl_decided.setStyleSheet("padding:6px; border-radius:4px; background:#eff6ff; color:#1d4ed8;"
+                                           "font-weight:bold;")
+        elif step < 3:
+            self.lbl_decided.setText(self.lbl_decided.text() + "\n✓ そろいました。右下の『次へ』を押してください。")
+            self.lbl_decided.setStyleSheet("padding:6px; border-radius:4px; background:#dcfce7; color:#166534;"
+                                           "font-weight:bold;")
+        else:
+            self.lbl_decided.setStyleSheet("color:#475569;")
 
     def _on_next(self):
         st = W.step_state(self._step, **self._step_inputs())
@@ -8068,9 +8136,69 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d.setWindowFlags(QtCore.Qt.Widget)
         self.panel.layout().addWidget(d)
         self._params_ok = False
+        self._params_same = False
         d.write_finished.connect(self._on_writer_finished)
+        d.lbl_lead.setText("書くもの: " + (d._subtitle or "—"))   # 上の帯が案内するので、ここは何を書くかだけ
         d.show()
         self._writer = d
+        self._now_timer.start()
+        self._tick_now()
+        if self._writer_auto:                     # 基本自動: つなぐ → 控え まで（読むだけ）。書くのは人が押したときだけ
+            QtCore.QTimer.singleShot(0, lambda: d is self._writer and not d._busy and not d._connected
+                                     and d.connect_machine())
+
+    NOW_STYLE = {
+        "do": "background:#eff6ff; color:#1d4ed8; border:2px solid #3b82f6;",
+        "wait": "background:#f1f5f9; color:#334155; border:2px solid #94a3b8;",
+        "stop": "background:#fef2f2; color:#b91c1c; border:2px solid #ef4444;",
+        "done": "background:#dcfce7; color:#166534; border:2px solid #22c55e;",
+    }
+
+    def _tick_now(self):
+        """段③の帯を、入れた窓の状態から書き直す（0.5秒ごと。読むだけ）。"""
+        d = self._writer
+        if d is None and self._prog_dlg is not None and self._step == 4:
+            return self._tick_now_prog()
+        if d is None:
+            self._now_timer.stop()
+            return
+        try:
+            g = d.guide_state()
+        except Exception:
+            return
+        head = {"do": "▶ 次にやること: ", "wait": "… ", "stop": "■ 止まっています: ", "done": "✓ "}[g["kind"]]
+        self._set_now(head + g["text"], g["kind"])
+        same = bool(g["next"]) and not self._params_ok
+        if same != self._params_same:
+            self._params_same = same
+            self._apply_mode()
+
+    def _tick_now_prog(self):
+        """段④の帯（測定プログラムを送る）。読むだけ。"""
+        d, plan = self._prog_dlg, self._p_plan or {}
+        results = list(self._p_results.values())
+        nums = [n for p in plan.get("programs") or [] for n in p["numbers"]]
+        g = flow_guide.program_guide(
+            connected=d._connected, busy=d._busy, state_text=d.lbl_state.text(),
+            estop=(d.lbl_estop.text() if d._connected else ""), has_backup=d._backup is not None,
+            problems=(self.lbl_p_problem.text() if not plan.get("programs") or plan.get("problems") else ""),
+            done_text=(self.lbl_p_done.text() if self.handoff is not None else ""),
+            mismatch=bool(WP.mismatched_numbers(results)),
+            differs=sum(1 for n in nums if self._p_states.get(n) == "differs" and n not in self._p_results),
+            sent_bad=any(WP.row_status(self._p_results.get(n))[1] == "bad" for n in nums))
+        head = {"do": "▶ 次にやること: ", "wait": "… ", "stop": "■ 止まっています: ", "done": ""}[g["kind"]]
+        self._set_now(head + g["text"], g["kind"])
+
+    def _set_now(self, text, kind):
+        if text != self.lbl_now.text():
+            self.lbl_now.setText(text)
+            self.lbl_now.setStyleSheet("padding:8px; border-radius:4px; font-weight:bold;"
+                                       + self.NOW_STYLE[kind])
+        wd = self.lbl_now.width()
+        if wd > 50:                               # 折り返した文が切れない高さにする（幅が変わっても追いかける）
+            h = self.lbl_now.heightForWidth(wd) + 20      # 枠と余白のぶん
+            if h > 20 and h != self.lbl_now.minimumHeight():
+                self.lbl_now.setMinimumHeight(h)
 
     def _close_writer(self, force=False):
         """入れた窓を片づける。書いている最中は、今の窓と同じ確認をする。片づけたら True。"""
@@ -8087,6 +8215,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d.setParent(None)
         d.deleteLater()
         self._writer = None
+        self._now_timer.stop()
         return True
 
     def _on_writer_finished(self, ok):
@@ -8231,6 +8360,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._p_tilt, self._p_choice = None, None
         self._p_results, self._p_states = {}, {}
         self.lbl_p_done.setVisible(False)
+        self.handoff = None
+        self._now_timer.start()
         d = FocasProgramSendDialog(self, self.settings, b"", fanuc.DEFAULT_EOB, wizard=True, auto=self._prog_auto,
                                    client_factory=self._prog_client_factory)
         d.setWindowFlags(QtCore.Qt.Widget)
@@ -8254,6 +8385,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d.deleteLater()
         self._prog_dlg = None
         self.b_p_lf.setVisible(False)
+        if self._writer is None:
+            self._now_timer.stop()
 
     def _p_kind_chosen(self, _i):
         self._p_tilt = bool(self.cmb_p_kind.currentData())
@@ -8306,6 +8439,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self._p_fill_table(plan)
             self._p_states = {}
             self.lbl_p_done.setVisible(False)
+            self.handoff = None
+            self.b_measure.setVisible(False)
             self.txt_p_code.setPlainText("\n\n".join(p["text"] for p in plan["programs"]))
             prev = None
             if plan["programs"] and not plan["problems"]:
@@ -8388,6 +8523,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _p_on_inspected(self, states):
         self._p_states = dict(states)
         self._p_show_results()
+        plan = self._p_plan or {}
+        nums = [n for p in plan.get("programs") or [] for n in p["numbers"]]
+        if nums and not plan.get("problems") and all(self._p_states.get(n) == "same" for n in nums):
+            mains = "・".join(f"O{p['numbers'][0]:04d}" for p in plan["programs"])
+            self.lbl_p_done.setText(f"✓ 測定プログラム {mains} は、もう同じ中身で機械に入っています。送るものはありません。"
+                                    "右下の『測定へ進む』を押してください（まだ機械は動かしません。"
+                                    "測定の画面で『取込開始』を押してから、機械を起動します）。")
+            self.lbl_p_done.setVisible(True)
+            self.handoff = WP.handoff(self._p_masters or {}, self._p_model(), plan)
+            self.b_measure.setVisible(self._mode == "simple" and self._step == 4)
 
     def _p_on_sent(self, res):
         for it in res.get("items", []):
@@ -8408,9 +8553,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
             and not WP.mismatched_numbers(list(self._p_results.values())) and res.get("ok")
         if done:
             mains = "・".join(f"O{p['numbers'][0]:04d}" for p in plan["programs"])
-            self.lbl_p_done.setText(f"機械の前で {mains} を選んでサイクルスタートしてください。"
-                                    "運転はPCからは始めません。")
+            self.lbl_p_done.setText(f"✓ 測定プログラム {mains} が機械に入りました。次は測定です。"
+                                    "右下の『測定へ進む』を押してください（まだ機械は動かしません。"
+                                    "測定の画面で『取込開始』を押してから、機械を起動します）。")
+            self.handoff = WP.handoff(self._p_masters or {}, self._p_model(), plan)
         self.lbl_p_done.setVisible(bool(done))
+        self.b_measure.setVisible(self._mode == "simple" and self._step == 4 and self.handoff is not None)
         if plan.get("choice"):
             self.settings["wizard_prog_choice"] = plan["choice"]
             try:
@@ -12920,6 +13068,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(spacer)
         toolbar.addWidget(b_settings)
         toolbar.addWidget(b_help)
+        self._build_flow_bar(tools_menu)
 
         # ===== 受信値・データ数 =====
         self.live = QtWidgets.QLabel("")
@@ -13679,6 +13828,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def discard_measurement(self):
         """取込中の測定を破棄して初期状態に戻す"""
         self.seq = None
+        self._flow_measured = False
+        self._flow_saved = False
         self._live_shown = ()   # 逐次表示した完了系列の記録をリセット
         # 表示は補正前に戻す（再描画は下流で行うのでフラグのみ）
         self.show_corrected = False
@@ -14112,6 +14263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def on_connect_done(self, ok, message):
+        self._nd_ok = bool(ok)
         self._connecting = False
         self.b_conn.setEnabled(True)
         if self._conn_dev is not None and self._conn_dev is not self.dev:
@@ -14207,6 +14359,212 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_help(self):
         """アプリ全体＋新機能の詳細ヘルプを開く。"""
         HelpDialog(self).exec()
+
+    # ----- 作業の案内（いま何をすればよいかを、1つだけ出す帯。flow_guide.main_flow）-----
+
+    FLOW_STYLE = {
+        "do": "background:#eff6ff; color:#1d4ed8;",
+        "wait": "background:#f1f5f9; color:#334155;",
+        "stop": "background:#fef2f2; color:#b91c1c;",
+        "done": "background:#dcfce7; color:#166534;",
+    }
+
+    def _build_flow_bar(self, tools_menu):
+        """上のツールバーのすぐ下に、作業の順番と「次にやること」を出す（別の画面は作らない）。"""
+        self._flow_machine_done = False     # 機械の準備（パラメータ・測定プログラム）が済んだ／飛ばした
+        self._flow_saved = False            # いま画面にある結果を保存した
+        self._flow_saved_path = ""
+        self._flow_steps = []               # かんたん作成から渡された、測る順番 [{"mode","programs"}]
+        self._flow_action = ""
+        self._nd_ok = False                 # 表示器（ND287）につながった
+        self.addToolBarBreak(QtCore.Qt.TopToolBarArea)
+        bar = QtWidgets.QToolBar("作業の案内")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        self.flow_bar = bar
+        box = QtWidgets.QWidget()
+        box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(2)
+        self.lbl_flow_steps = QtWidgets.QLabel("")
+        self.lbl_flow_steps.setTextFormat(QtCore.Qt.RichText)
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.lbl_flow_steps, 1)
+        self.lbl_flow = QtWidgets.QLabel("")
+        self.lbl_flow.setWordWrap(True)
+        self.lbl_flow.setTextFormat(QtCore.Qt.PlainText)
+        self.lbl_flow.setMinimumWidth(200)
+        self.lbl_flow.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.b_flow = QtWidgets.QPushButton("")
+        self.b_flow.setObjectName("primary")
+        self.b_flow.clicked.connect(self._flow_do)
+        row.addWidget(self.b_flow)
+        self.b_flow_skip = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
+        self.b_flow_skip.setToolTip("パラメータと測定プログラムが、もう機械に入っているとき。測定の準備へ進みます")
+        self.b_flow_skip.clicked.connect(self._flow_skip)
+        row.addWidget(self.b_flow_skip)
+        b_proc = QtWidgets.QPushButton("手順を見る")
+        b_proc.setToolTip("最初から最後までの手順（1枚）を開きます")
+        b_proc.clicked.connect(lambda: HelpDialog(self, start_title="はじめての手順").exec())
+        row.addWidget(b_proc)
+        lay.addLayout(row)
+        lay.addWidget(self.lbl_flow)        # 文は横いっぱい（狭い画面でも縦に伸びすぎない）
+        bar.addWidget(box)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, bar)
+        self.act_flow = tools_menu.addAction("作業の案内を出す（上の帯）")
+        self.act_flow.setCheckable(True)
+        self.act_flow.setChecked(bool(self.settings.get("show_flow_guide", True)))
+        self.act_flow.toggled.connect(self._flow_toggled)
+        bar.setVisible(self.act_flow.isChecked())
+        self.flow_timer = QtCore.QTimer(self)
+        self.flow_timer.setInterval(700)
+        self.flow_timer.timeout.connect(self._refresh_flow)
+        self.flow_timer.start()
+
+    def _flow_toggled(self, on):
+        self.flow_bar.setVisible(bool(on))
+        self.settings["show_flow_guide"] = bool(on)
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
+    def _flow_verdict(self):
+        """(規格から外れた所の数, 規格と比べた所があるか)。右の表に出ている赤い字・OK/NG を数えるだけ
+        （新しい合否の決め方は作らない。画面に出ているものと同じ）。"""
+        ng, spec = 0, False
+        for tbl in (self.table_series, self.table_series2, self.table_misc):
+            if not tbl.isVisibleTo(self):
+                continue
+            for i in range(tbl.rowCount()):
+                for j in range(tbl.columnCount()):
+                    it = tbl.item(i, j)
+                    if it is None:
+                        continue
+                    text = it.text()
+                    if "≦" in text or "≧" in text or "OK" in text or "NG" in text:
+                        spec = True
+                    if it.foreground().color().name().lower() == "#dc2626":
+                        ng += 1
+        return ng, spec
+
+    def _flow_inputs(self):
+        capturing = self.seq is not None and not self.seq.done()
+        count = (0, 0)
+        if capturing:
+            try:
+                count = (self.seq.idx if hasattr(self.seq, "idx") else 0, len(self.seq))
+            except Exception:
+                count = (0, 0)
+        finished = ((not capturing) and getattr(self, "_flow_measured", False)
+                    and self.has_view_data() and self.b_save.isEnabled())   # 読み込んだ過去の結果は数えない
+        ng, spec = self._flow_verdict() if finished else (0, False)
+        host = getattr(self, "_focas_watch_host", "") or ""
+        unit = ""
+        if host:
+            try:
+                unit = focas_find.unit_for_ip(focas_find.registry_path(self.settings), host)
+            except Exception:
+                unit = ""
+        steps = self._flow_steps
+        mode = self.current_mode()
+        cur = next((x for x in steps if x["mode"] == mode), None)
+        nxt = ""
+        if cur is not None and steps.index(cur) + 1 < len(steps):
+            nxt = steps[steps.index(cur) + 1]["mode"]
+        model = self.e_model.text().strip()
+        unknown = bool(model and not self.is_repeat() and not self.is_tilt() and self.masters
+                       and self.master_cond is None
+                       and not (self.masters.get("user_rotary") or {}).get(model.upper()))
+        return dict(
+            nd_ok=self._nd_ok, nd_dummy=bool(getattr(self.dev, "dummy", False)),
+            machine_host=host, machine_unit=unit or "", machine_done=self._flow_machine_done,
+            missing=tuple(self.missing_required_fields()), capturing=capturing, count=count,
+            finished=finished, ng=ng, has_spec=spec, saved=self._flow_saved,
+            saved_path=self._flow_saved_path, programs=tuple(cur["programs"]) if cur else (),
+            next_mode=nxt, mode=mode, model_unknown=unknown)
+
+    def _refresh_flow(self):
+        if not self.flow_bar.isVisible():
+            return
+        try:
+            g = flow_guide.main_flow(**self._flow_inputs())
+        except Exception:
+            return
+        key = (g["stage"], g["kind"], g["text"], g["button"], g["skip"])
+        if key == getattr(self, "_flow_key", None):
+            return
+        self._flow_key = key
+        self._flow_action = g["action"]
+        names = []
+        for n, t in enumerate(flow_guide.STAGES):
+            if n < g["stage"]:
+                names.append(f"<span style='color:#166534;'>✓ {t}</span>")
+            elif n == g["stage"]:
+                names.append(f"<b style='color:#1d4ed8;'>▶ {t}</b>")
+            else:
+                names.append(f"<span style='color:#94a3b8;'>{t}</span>")
+        self.lbl_flow_steps.setText("　─　".join(names))
+        head = {"do": "次にやること: ", "wait": "", "stop": "", "done": "✓ "}[g["kind"]]
+        self.lbl_flow.setText(head + g["text"])
+        self.lbl_flow.setStyleSheet("padding:4px 8px; border-radius:4px; font-weight:bold;"
+                                    + self.FLOW_STYLE[g["kind"]])
+        self.b_flow.setVisible(bool(g["button"]))
+        self.b_flow.setText(g["button"])
+        self.b_flow_skip.setVisible(bool(g["skip"]))
+
+    def _flow_skip(self):
+        self._flow_machine_done = True
+        self._refresh_flow()
+
+    def _flow_do(self):
+        """帯のボタン。今ある機能を呼ぶだけ（新しい処理は作らない）。"""
+        act = self._flow_action
+        if act == "open_wizard":
+            self.show_param_dialog()
+        elif act == "reconnect":
+            self.connect_device()
+        elif act == "focus":
+            for name, wd in (("型式", self.e_model), ("機番", self.e_machine),
+                             ("名前", self.e_operator), ("測定温度", self.e_temp)):
+                if name in self.missing_required_fields():
+                    wd.setFocus()
+                    break
+        elif act == "start":
+            self.start()
+        elif act == "save":
+            self.save()
+        elif act == "next_mode":
+            g = self._flow_inputs()
+            if g["next_mode"]:
+                self.mode_combo.setCurrentText(g["next_mode"])     # 測り方を切り替える（保存済みの結果は画面から消える）
+                self.on_model_entered()
+        elif act == "new":
+            self._flow_machine_done = False
+            self._flow_steps = []
+            self.discard_measurement()
+        self._refresh_flow()
+
+    def _apply_wizard_handoff(self, h):
+        """かんたん作成で機械に入れ終えたあと: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""
+        if not h or not h.get("steps"):
+            return
+        self._flow_machine_done = True
+        self._flow_steps = list(h["steps"])
+        notes = []
+        if h.get("model") and h["model"] != self.e_model.text().strip():
+            self.e_model.setText(h["model"])
+            notes.append(f"型式を {h['model']} にしました")
+        first = self._flow_steps[0]["mode"]
+        if first != self.current_mode():
+            self.mode_combo.setCurrentText(first)
+            notes.append(f"測り方を「{first}」にしました")
+        self.on_model_entered()
+        if notes:
+            self.statusBar().showMessage("機械に入れたものに合わせて、" + "・".join(notes) + "（違えば直せます）", 15000)
+        self._refresh_flow()
 
     def show_batch_dialog(self):
         """型式ごとの測定プログラムを一括作成する画面を開く。"""
@@ -14453,6 +14811,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.data = self.seq.data
         self.dev.flush_input()  # 取込開始前に届いていた古いデータは捨てる
+        self._flow_saved = False
         self.rebuild_curves()
         self.table_series.clearSpans()
         self.table_series.setRowCount(0)
@@ -14552,6 +14911,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.seq.done():
             self.guide.setText("測定完了 → セーブで保存")
             self.finish()
+            self._flow_measured = True
+            self._flow_saved = False
             self.update_web_snapshot(with_png=True)
             self.notify_measurement_done()
             self.auto_after_complete()
@@ -14750,6 +15111,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def finish(self):
+        self._flow_measured = False     # 測り終えたときだけ、呼んだ側（accept_point）が True にする
         self.b_take.setEnabled(False)
         self.b_cancel.setEnabled(False)
         self.b_save.setEnabled(True)
@@ -15252,6 +15614,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     rsum = repeatability_summary(self.rep_points, self.rep_data)
                     save_repeat_csv(rep_path, self.rep_points, self.rep_data, rsum, meta)
             self.statusBar().showMessage(f"保存しました: {path}")
+            self._flow_saved, self._flow_saved_path = True, str(path)
         except Exception as e:
             self.statusBar().showMessage(f"保存失敗: {e}")
             return
@@ -15724,6 +16087,8 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = ParamWizardDialog(self, self.settings,
                                 model=self.e_model.text().strip(), probe_machine=True)
         dlg.exec()
+        if hasattr(self, "flow_bar"):
+            self._apply_wizard_handoff(getattr(dlg, "handoff", None))
 
     # ----- 印刷 -----
 

@@ -200,8 +200,11 @@ class TestStep4Send(Step4Base):
         self.assertTrue(got.startswith(b"%") and b"\n\r\r" in got)   # LF CR CR のまま
         self.assertFalse(w.b_p_lf.isVisibleTo(w))
         self.assertTrue(w.lbl_p_done.isVisibleTo(w))
-        self.assertIn("O0100 を選んでサイクルスタート", w.lbl_p_done.text())
-        self.assertIn("運転はPCからは始めません", w.lbl_p_done.text())
+        self.assertIn("O0100 が機械に入りました", w.lbl_p_done.text())
+        self.assertIn("まだ機械は動かしません", w.lbl_p_done.text())    # 先に機械を起動させない（取込開始が先）
+        self.assertTrue(w.b_measure.isVisibleTo(w))                    # 「測定へ進む」
+        self.assertEqual(w.handoff["steps"], [{"mode": "回転分割", "programs": [100]}])
+        self.assertEqual(w.handoff["model"], "RTV-510")
         self.assertEqual(w.settings["wizard_prog_choice"], "division")   # 次回の既定
         with open(self.settings["prog_log_csv"], encoding="utf-8-sig") as f:
             rows = f.read()

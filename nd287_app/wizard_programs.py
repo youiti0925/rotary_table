@@ -94,6 +94,54 @@ def _find(entries, model):
     return None
 
 
+def master_model(masters, model, tilt):
+    """測定の画面の「型式」に入れる書き方 ＝ 測定条件の登録に載っている名前。
+    製品データの型式（例「RTV-510,WA」）を、そのまま → カンマを詰めた形 → カンマの前 の順に、
+    まず登録の名前とぴったり同じものを探す。無ければ find_entry と同じゆるい当て方（末尾の英字を外す）で
+    当たった登録の名前を返す。どれも当たらなければ ""（測定の画面の型式は書き換えない）。"""
+    import re
+    masters = masters or {}
+    text = str(model or "").strip()
+    cands = [text]
+    if "," in text:
+        base, rest = (x.strip() for x in text.split(",", 1))
+        cands += [base + rest, base]
+    keys = (("user_tilt", "user_tilt_repeat") if tilt
+            else ("user_rotary", "conditions", "user_rotary_repeat"))
+    tables = [masters.get(k) or {} for k in keys]
+    for c in cands:
+        if c and any(c.upper() in t for t in tables):
+            return c
+    for c in cands:
+        stripped = re.sub(r"(\d)[A-Za-z]+$", r"\1", c.upper())
+        if c and any(stripped in t for t in tables):
+            return stripped
+    return ""
+
+
+MODE_FOR = {  # 分け方 → 測定の画面の「モード」（回転, 傾斜）
+    "one": ("回転分割+再現", "傾斜分割+再現"),
+    "division": ("回転分割", "傾斜分割"),
+    "repeat": ("回転再現性", "傾斜再現性"),
+}
+
+
+def handoff(masters, model, plan):
+    """段④で機械に入れ終えたあと、測定の画面へ渡すもの。
+    {"model", "steps": [{"mode": 測定の画面のモード, "programs": [機械で選ぶ番号]}…]}。
+    「別々に2本」は、分割 → 再現性 の順に2回測る。"""
+    tilt = bool(plan.get("tilt"))
+    choice = plan.get("choice") or ""
+    mains = [int(p["numbers"][0]) for p in plan.get("programs") or [] if p.get("numbers")]
+    steps = []
+    if choice == "two" and len(mains) >= 2:
+        steps = [{"mode": MODE_FOR["division"][tilt], "programs": [mains[0]]},
+                 {"mode": MODE_FOR["repeat"][tilt], "programs": [mains[1]]}]
+    elif choice in MODE_FOR and mains:
+        steps = [{"mode": MODE_FOR[choice][tilt], "programs": [mains[0]]}]
+    return {"model": master_model(masters, model, tilt), "steps": steps}
+
+
 def repeat_conditions(masters, model, tilt):
     """型式の再現性の条件。{"blocks":[角度…], "repeats":回数, "source":説明} か None。
 

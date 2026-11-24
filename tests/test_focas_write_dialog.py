@@ -799,5 +799,40 @@ class TestFocasDialogPollMessage(unittest.TestCase):
         d.deleteLater()
 
 
+class TestFirstUnitButton(WriteDialogBase):
+    def setUp(self):
+        super().setUp()
+        self.settings["controller_master_csv"] = str(self.work / "マスタ.csv")     # 号機の候補が空になる
+        self.settings["param_basic_dir"] = str(self.work / "data" / "BASIC")
+        self.settings["focas_registry_csv"] = str(self.work / "台帳.csv")
+        (self.work / "data" / "BASIC").mkdir(parents=True)
+
+    def test_button_shown_only_when_unknown_and_backup_complete(self):
+        d = self.dialog()
+        self.go(d, backup=False)
+        self.assertFalse(d.box_first.isVisible())          # 控えがまだ
+        d.b_backup.click()
+        self.wait(d)
+        self.assertTrue(d._backup[1]["complete"])
+        self.assertTrue(d.box_first.isVisible())
+
+    def test_button_hidden_when_registry_knows_machine(self):
+        d = self.dialog()
+        self.go(d)
+        d._reg_unit = "7"
+        d._refresh_enabled()
+        self.assertFalse(d.box_first.isVisible())
+
+    def test_register_creates_file_elsewhere(self):
+        d = self.dialog()
+        self.go(d)
+        d.e_first_unit.setText("31")
+        d.b_first_unit.click()
+        self.assertTrue((self.work / "data" / "機械から取ったBASIC" / "F31BASIC.dat").is_file())
+        self.assertEqual(list((self.work / "data" / "BASIC").iterdir()), [])
+        self.assertFalse(d.box_first.isVisible())
+        self.assertEqual(d.cmb_unit.currentData(), "31")
+
+
 if __name__ == "__main__":
     unittest.main()

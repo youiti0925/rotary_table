@@ -6509,7 +6509,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
                         pd, model=meta.get("model", ""), gear=meta.get("gear") or meta.get("gear_db", ""),
                         motor_no=meta.get("motor_no", ""), kind=kind, exclude_path=path,
                         loop_number=loop[0], loop_bit=loop[1], full_when=loop[2],
-                        cancel=lambda: gen != self._semi_gen)
+                        cancel=lambda: gen != self._semi_gen,
+                        index_path=str(app_dir() / "製品の型式索引.json"))
                 except Exception:
                     found[i] = None
             try:

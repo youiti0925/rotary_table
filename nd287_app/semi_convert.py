@@ -436,11 +436,84 @@ def vote_rules(per_pair):
     return sorted(taken, key=key), sorted(left, key=key)
 
 
+def motor_key(m):
+    """モーター品番の比べ方: '#0100' など # 以降（仕様違いの印）は無視する。実データで 'A06B-2229-B000#0100' が
+    33件中31件あり、完全一致で比べて 0組になっていた（2026-11-24）。"""
+    return str(m or "").split("#")[0].strip().upper()
+
+
+INDEX_VERSION = 1
+
+
+def _load_index(path):
+    try:
+        import json
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+        if d.get("v") == INDEX_VERSION and isinstance(d.get("f"), dict):
+            return d["f"]
+    except Exception:
+        pass
+    return {}
+
+
+def _save_index(path, files):
+    try:
+        import json
+        tmp = str(path) + ".tmp"
+        Path(tmp).write_text(json.dumps({"v": INDEX_VERSION, "f": files}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass                                       # 索引が書けなくても探せる（毎回読むだけ遅い）
+
+
+def header_index(folder, prefixes=("T", "R"), *, index_path="", cancel=None):
+    """製品の場所の全ファイルの『型式・減速比・モーター品番』を返す {名前: (型式, 減速比, モーター)}。
+    先頭4KBだけ読む。共有では1件約20ms かかる（1.1万件で約220秒）ので、更新日時と大きさが同じものは
+    index_path の索引から返し、変わったものだけ読み直す。索引を作る途中で cancel() が真なら None。"""
+    cache = _load_index(index_path) if index_path else {}
+    out, new, dirty = {}, {}, False
+    with os.scandir(folder) as it:
+        entries = sorted((e for e in it
+                          if e.name[:1].upper() in prefixes
+                          and ("." + e.name.rpartition(".")[2].lower()) in (".prm", ".txt", ".dat")),
+                         key=lambda e: e.name)
+    for n, e in enumerate(entries):
+        if cancel and cancel():
+            return None
+        try:
+            st = e.stat()
+            sig = [int(st.st_mtime_ns), int(st.st_size)]
+        except OSError:
+            continue
+        c = cache.get(e.name)
+        if c and c[0] == sig:
+            out[e.name] = (c[1], c[2], c[3]); new[e.name] = c
+            continue
+        try:
+            with open(e.path, "rb") as fh:
+                hb = fh.read(4096)
+            doc = prm_format.parse_prm(hb.decode("cp932", errors="replace"))
+            g = lambda k: prm_format.header_get(doc, k, "").strip()
+            rec = (g("Model"), g("Gear Rate"), g("Motor Number"))
+        except Exception:
+            rec = ("", "", "")
+        out[e.name] = rec
+        new[e.name] = [sig, *rec]
+        dirty = True
+        if index_path and dirty and n % 2000 == 1999:
+            _save_index(index_path, new)            # 途中まで保存（止めても続きから）
+    if index_path and (dirty or len(new) != len(cache)):
+        _save_index(index_path, new)
+    return out
+
+
 def find_pair_rules(folder, *, model, gear="", motor_no="", kind="", exclude_path="",
-                    loop_number="1815", loop_bit=1, full_when=1, cancel=None, max_files=None, cap=6):
+                    loop_number="1815", loop_bit=1, full_when=1, cancel=None, max_files=None, cap=6,
+                    index_path=""):
     """製品の場所から、型式（そのまま→詰めた形→カンマ前の順）・減速比・モーター・傾斜/回転が同じ
     フルとセミの組を探し、「フル→セミで変わるところ」を多数決で決める。読むだけ。
     画面を固めないよう、呼ぶ側が別スレッドで呼ぶ（cancel() が真なら None）。
+    index_path を渡すと、型式などの索引を保存して2回目から速くする（header_index）。
 
     戻り値 None（同じ型式のものが1本も無い）、または dict:
       level / n_pairs / fulls / semis（ファイル名）／ rules [(規則, 件数)] ／ unapplied [(規則, 件数)]
@@ -452,10 +525,21 @@ def find_pair_rules(folder, *, model, gear="", motor_no="", kind="", exclude_pat
         return None
     ex = os.path.normcase(os.path.abspath(exclude_path)) if exclude_path else ""
     head_u = _head(model)
-    with os.scandir(folder) as it:
-        names = sorted(e.name for e in it
-                       if e.name[:1].upper() in ((prefix,) if prefix else ("T", "R"))
-                       and ("." + e.name.rpartition(".")[2].lower()) in (".prm", ".txt", ".dat"))
+    heads = header_index(folder, (prefix,) if prefix else ("T", "R"), index_path=index_path, cancel=cancel)
+    if heads is None:
+        return None
+    names = []
+    for name, (hmodel, hgear, hmotor) in heads.items():
+        if head_u not in str(hmodel).upper():
+            continue
+        if model_level(model, hmodel) is None:
+            continue
+        if gear and hgear and _norm_gear(hgear) != _norm_gear(gear):
+            continue
+        if motor_no and hmotor and motor_key(hmotor) != motor_key(motor_no):
+            continue
+        names.append(name)
+    names.sort()
     found, seen = [], 0
     for name in names:
         if cancel and cancel():
@@ -466,12 +550,8 @@ def find_pair_rules(folder, *, model, gear="", motor_no="", kind="", exclude_pat
         if ex and os.path.normcase(os.path.abspath(p)) == ex:
             continue
         seen += 1
-        try:                                  # 先頭だけ読んで型式が違えば捨てる（共有に約1.5万件あるため）
-            with open(p, "rb") as fh:
-                hb = fh.read(4096)
-                if head_u not in hb.decode("cp932", errors="replace").upper():
-                    continue
-                text = (hb + fh.read()).decode("cp932", errors="replace")
+        try:                                  # 索引で絞った候補だけ全文を読む
+            text = Path(p).read_bytes().decode("cp932", errors="replace")
         except (OSError, UnicodeError):
             continue
         try:
@@ -484,7 +564,7 @@ def find_pair_rules(folder, *, model, gear="", motor_no="", kind="", exclude_pat
             continue
         if gear and _norm_gear(hv("Gear Rate")) != _norm_gear(gear):
             continue
-        if motor_no and hv("Motor Number") and hv("Motor Number") != str(motor_no).strip():
+        if motor_no and hv("Motor Number") and motor_key(hv("Motor Number")) != motor_key(motor_no):
             continue
         mode = fanuc_param.closed_loop_mode(prm_format.param_value(doc, loop_number),
                                             int(loop_bit), int(full_when))

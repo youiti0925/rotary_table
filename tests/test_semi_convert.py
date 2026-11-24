@@ -275,6 +275,43 @@ class TestPairs(unittest.TestCase):
         self.assertEqual([r for r, _n in taken], [("val", 1821, "2000")])
         self.assertEqual(sorted(r for r, _n in left), [("val", 2022, "5"), ("val", 2022, "7")])
 
+    def test_motor_number_hash_suffix_is_ignored(self):
+        """実データ: 製品の Motor Number は 'A06B-2229-B000#0100' のように # 付きが多い（0組になっていた）。"""
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル", motor="A06B-2229-B000#0100"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", motor="A06B-2229-B000"))
+        r = self.find(motor_no="A06B-2229-B000")
+        self.assertEqual(r["n_pairs"], 1)
+        self.assertEqual(S.motor_key("A06B-2229-B000#0100"), S.motor_key("a06b-2229-b000"))
+
+    def test_index_is_saved_and_reused_without_reading_unchanged_files(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))
+        self.w("R50000003.prm", prm_vals("RTV-999", "1/180", "セミ"))
+        idx = os.path.join(self.d, "索引.json")
+        a = S.find_pair_rules(self.d, model="RTV-231,WF", gear="1/180", motor_no="M1", kind="回転", index_path=idx)
+        self.assertEqual(a["n_pairs"], 1)
+        self.assertTrue(os.path.isfile(idx))
+        opened = []
+        real = open
+
+        def spy(path, *args, **kw):
+            opened.append(str(path))
+            return real(path, *args, **kw)
+        with mock.patch("builtins.open", spy):
+            h = S.header_index(self.d, ("R",), index_path=idx)
+        self.assertEqual([x for x in opened if x.endswith(".prm")], [])       # 変わっていない → 先頭を読まない
+        self.assertEqual(len(h), 3)
+        self.w("R50000004.prm", prm_vals("RTV-231,WF", "1/180", "セミ"))      # 新しいファイルだけ読み直す
+        opened.clear()
+        with mock.patch("builtins.open", spy):
+            h = S.header_index(self.d, ("R",), index_path=idx)
+        self.assertEqual(len([x for x in opened if x.endswith(".prm")]), 1)
+        self.assertEqual(len(h), 4)
+
+    def test_index_build_can_be_cancelled(self):
+        self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル"))
+        self.assertIsNone(S.header_index(self.d, ("R",), cancel=lambda: True))
+
     def test_find_pairs_and_apply_only_pair_numbers(self):
         self.w("R50000001.prm", prm_vals("RTV-231,WF", "1/180", "フル", {"1850": "11"}))
         self.w("R50000002.prm", prm_vals("RTV-231,WF", "1/180", "セミ", {"1850": "99"}))

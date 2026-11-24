@@ -121,6 +121,7 @@ from . import ftpserver
 from . import focas_backup, focas_client, focas_ops, focas_find
 from . import wizard_steps as W
 from . import controllers
+from . import wizard_probe
 from . import seiban_flow
 from . import batch_build
 from . import param_origin
@@ -5746,6 +5747,37 @@ class ParamViewerDialog(QtWidgets.QDialog):
                           + (f"　差分 {ndiff} 件" if compare else "")))
 
 
+_PROBE_ORPHANS = []          # 画面を閉じても止まりきらない読み取りスレッド（終わるまで壊さない）
+
+
+class _ProbeJob(QtCore.QThread):
+    """開いたとき1回だけ機械を読む（読むだけ）。結果 dict か None を done_probe で返す。"""
+    done_probe = QtCore.Signal(object)
+
+    def __init__(self, settings, factory, port_open=None):
+        super().__init__()
+        self._settings, self._factory, self._port_open = settings, factory, port_open
+        self._client = None
+
+    def abort(self):
+        c = self._client
+        if c is not None and hasattr(c, "abort"):
+            try:
+                c.abort()
+            except Exception:
+                pass
+
+    def run(self):
+        res = None
+        try:
+            res = wizard_probe.read_machine(
+                self._settings, self._factory, port_open=self._port_open,
+                on_client=lambda c: setattr(self, "_client", c))
+        except Exception:
+            res = None
+        self.done_probe.emit(res)
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -5756,9 +5788,19 @@ class ParamWizardDialog(QtWidgets.QDialog):
     むずかしい設定（フォルダ・CSV・手動指定）は「詳細設定…」の従来画面で行う。
     """
 
-    def __init__(self, parent, settings, *, model=""):
+    def __init__(self, parent, settings, *, model="", probe_machine=False):
         super().__init__(parent)
         self.settings = settings
+        self._probe_machine = bool(probe_machine)   # 開いたとき、つながる機械を読むだけで見る（本番画面からだけ True）
+        self._probe_client_factory = None           # 試験用: 偽クライアントを返す関数
+        self._probe_port_open = None                # 試験用: 声かけ（ポート確認）の差し替え
+        self._probe_started = False
+        self._probe_job = None
+        self._probe_closed = False
+        self._machine_probe = None                  # {"host","unit","axes":{軸番号:{"motor_id","amr"}},...}
+        self._auto_key = None                       # 自動設定をもう済ませた製品データ
+        self._motor_by_user = False                 # 人がモーターの欄を触ったら、自動で上書きしない
+        self._motor_id_by_user = False
         self.setWindowTitle("受注番号から かんたん作成")
         fit_to_screen(self, 1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
         self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
@@ -5806,6 +5848,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_steps)
         self.lbl_conn = QtWidgets.QLabel("")
         v.addWidget(self.lbl_conn)
+        self.lbl_auto = QtWidgets.QLabel("")           # 機械から読んで自動で決めたことの案内
+        self.lbl_auto.setWordWrap(True)
+        self.lbl_auto.setStyleSheet("color:#1d4ed8;")
+        self.lbl_auto.setVisible(False)
+        v.addWidget(self.lbl_auto)
         self.lbl_decided = QtWidgets.QLabel("")
         self.lbl_decided.setStyleSheet("color:#475569;")
         self.lbl_decided.setWordWrap(True)
@@ -5960,6 +6007,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_motor.addItem("製品のモーター（製品データどおり）", "product")
         self.cmb_motor.addItem("社内の仮モーター（機械のまま。モーター番号 2020 は書かない）", "temp")
         self.cmb_motor.currentIndexChanged.connect(self._update_candidates)
+        self.cmb_motor.activated.connect(lambda _i: setattr(self, "_motor_by_user", True))   # 人が選んだとき
         self.cmb_motor.setToolTip(
             "機械に付いているのが製品のモーターか、社内の仮モーターかを選びます。\n"
             "仮モーターなら 2020（モーター番号）は書かず、機械の値のままにします。\n"
@@ -5971,6 +6019,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                    "違えば書く前に警告します（この番号は書きません）")
         self.e_motor_id.setEnabled(False)
         self.e_motor_id.textChanged.connect(self._on_motor_id_changed)
+        self.e_motor_id.textEdited.connect(lambda _t: setattr(self, "_motor_id_by_user", True))   # 人が打ったとき
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
@@ -6055,6 +6104,102 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._mode = "full" if str(settings.get("wizard_mode", "simple")) == "full" else "simple"
         self._update_guide()
         self._apply_mode()
+        if self._probe_machine:
+            QtCore.QTimer.singleShot(0, self._start_probe)
+
+    # ----- 機械を読むだけで見て、自動で決める -----
+    def _start_probe(self):
+        """開いたとき1回だけ、別スレッドで機械を読む（書かない・控えも取らない）。読めなければ静かに諦める。"""
+        if self._probe_started or self._probe_closed:
+            return
+        self._probe_started = True
+        factory = self._probe_client_factory or (
+            lambda st: focas_client.make_client(st, log_path=str(app_dir() / "focas_helper.log")))
+        job = _ProbeJob(self.settings, factory, self._probe_port_open)
+        job.done_probe.connect(self._probe_done)
+        self._probe_job = job
+        job.start()
+
+    @QtCore.Slot(object)
+    def _probe_done(self, probe):
+        if self._probe_closed or not probe:
+            return
+        self._machine_probe = probe
+        self._conn_cache = None
+        self._refresh_conn()
+        self._apply_probe()
+        self._update_candidates()           # 号機（台帳）が分かったので、つながっている機械を先頭にする
+
+    def _stop_probe(self):
+        self._probe_closed = True
+        job = self._probe_job
+        if job is not None and job.isRunning():
+            job.abort()
+            job.wait(3000)
+            if job.isRunning():
+                _PROBE_ORPHANS.append(job)            # 止まりきらない間は壊さない
+                job.finished.connect(lambda j=job: _PROBE_ORPHANS.remove(j) if j in _PROBE_ORPHANS else None)
+
+    def done(self, r):
+        self._stop_probe()
+        super().done(r)
+
+    def _axis_letter(self, k):
+        names = (self._machine_probe or {}).get("axis_names") or []
+        if 1 <= k <= len(names) and names[k - 1]:
+            return str(names[k - 1])
+        return nc_param.axis_name(k)
+
+    def _refresh_conn(self):
+        pr = self._machine_probe
+        if pr:
+            self.lbl_conn.setText(wizard_probe.conn_text(pr, self._axis_letter))
+            self.lbl_conn.setStyleSheet("color:#166534; font-weight:bold;")
+            return
+        cu = self._connected_unit()
+        self.lbl_conn.setText(
+            (f"● 機械につながっています: {cu}号機（台帳）" if cu else "○ 機械は、まだつながっていません（③でつなぎます）"))
+        self.lbl_conn.setStyleSheet("color:#166534; font-weight:bold;" if cu else "color:#64748b;")
+
+    def _apply_probe(self):
+        """製品の 2020 と機械の各軸の 2020 を比べ、モーター（製品／仮）と仮の番号・軸を自動で決める。
+        決めるのは選んだ製品データごとに1回だけ。人が触った欄は上書きしない。"""
+        pr = self._machine_probe
+        sel = self._selected_files()
+        if not pr or len(sel) != 1:
+            return
+        key = (sel[0].get("path") or sel[0].get("name") or "", sel[0].get("kind"))
+        if key == self._auto_key:
+            return
+        pid = wizard_probe.product_motor_id(sel)
+        if not pid:
+            return
+        dec = wizard_probe.decide(pr.get("axes") or {}, pid)
+        if not dec["kind"]:
+            return
+        self._auto_key = key
+        notes = []
+        if not self._motor_by_user:
+            self.cmb_motor.setCurrentIndex(self.cmb_motor.findData(dec["kind"]))
+            if dec["kind"] == "product":
+                ax = "・".join(self._axis_letter(k) for k in dec["axes"])
+                notes.append(f"{ax}軸の 2020 が製品と同じ（{pid}）なので「製品のモーター」にしました")
+            else:
+                notes.append(f"機械のどの軸にも製品の 2020（{pid}）は付いていないので「社内の仮モーター」にしました")
+        if dec["kind"] == "temp" and dec["temp_id"] and not self._motor_id_by_user \
+                and self.cmb_motor.currentData() == "temp":
+            self.e_motor_id.setText(dec["temp_id"])
+            notes.append(f"{self._axis_letter(dec['axis'])}軸の {dec['temp_id']} を仮モーターの番号に入れました")
+        self._update_candidates()
+        if dec["kind"] == "product" and len(dec["axes"]) == 1 and pr.get("unit"):
+            letter = self._axis_letter(dec["axes"][0])
+            for i, (c, asg) in enumerate(self._cand):          # 同じ号機・同じ軸の候補があれば選んでおく
+                if str(c.unit) == pr["unit"] and [nc_param.axis_name(seiban_flow_axis(a)) for a in asg] == [letter]:
+                    self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(i))
+                    break
+        if notes:
+            self.lbl_auto.setText("機械から読んで自動で決めました（違えば直してください）: " + "／".join(notes))
+            self.lbl_auto.setVisible(True)
 
     # ----- 補助 -----
     def _with_browse(self, line, slot):
@@ -6281,6 +6426,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if len(items) == 1 and items[0].get("meta", {}).get("system", "FANUC") == "FANUC":
             items[0]["chk"].setChecked(True)           # 1件だけなら、チェックも自動で入れる
         self._update_candidates()
+        self._apply_probe()
 
     def search_by_model(self):
         """型式で特注パラ索引＋パラメータDBを引いて候補を出す（受注番号が無い/特注やDBを直接出す）。"""
@@ -6591,6 +6737,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _connected_unit(self):
         """いま LAN でつながる機械の号機（台帳の IP に 8193 で声をかけるだけ。台帳に無ければ ''）。10秒は覚えておく。"""
         import time as _t
+        pr = getattr(self, "_machine_probe", None)
+        if pr and pr.get("unit"):                      # 開いたとき機械を読んで号機が分かっている
+            return pr["unit"]
         cache = getattr(self, "_conn_cache", None)
         if cache and _t.monotonic() - cache[0] < 10:
             return cache[1]
@@ -6808,10 +6957,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.b_mode.setText("全部表示" if simple else "かんたん表示")
         self.lbl_conn.setVisible(simple)
         if simple:
-            cu = self._connected_unit()
-            self.lbl_conn.setText(
-                (f"● 機械につながっています: {cu}号機（台帳）" if cu else "○ 機械は、まだつながっていません（③でつなぎます）"))
-            self.lbl_conn.setStyleSheet("color:#166534; font-weight:bold;" if cu else "color:#64748b;")
+            self._refresh_conn()
         if hasattr(self, "_f1"):
             self._f1.setStretchFactor(self.found_scroll, 0 if simple else 1)
         self.found_scroll.setMaximumHeight(150 if simple else 16777215)
@@ -14202,7 +14348,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_param_dialog(self):
         """受注番号から かんたん作成（ガイド付き）。詳細は中の「詳細設定…」から。"""
         dlg = ParamWizardDialog(self, self.settings,
-                                model=self.e_model.text().strip())
+                                model=self.e_model.text().strip(), probe_machine=True)
         dlg.exec()
 
     # ----- 印刷 -----

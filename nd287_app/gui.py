@@ -5245,6 +5245,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_steps)
         self.lbl_decided = QtWidgets.QLabel("")
         self.lbl_decided.setStyleSheet("color:#475569;")
+        self.lbl_decided.setWordWrap(True)
         v.addWidget(self.lbl_decided)
         flow = self.lbl_flow = QtWidgets.QLabel("① 受注番号で探す → ② 号機を選ぶ → ③ 作成。"
                                 "（特注/DD・登録(DB)は『型式で探す』でも出ます）")
@@ -5299,6 +5300,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         col_right = QtWidgets.QVBoxLayout()
         mid.addLayout(col_left, 3)
         mid.addLayout(col_right, 2)
+        self._mid = mid
         v.addLayout(mid, 1)
 
         # --- ① 受注伝票番号 ---
@@ -6188,6 +6190,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
             wd.setVisible(simple)
         for wd in (self.b_adv, self.b_view, self.b_make, self.b_machine):
             wd.setVisible(not simple)
+        if hasattr(self, "_mid"):          # かんたん表示では、見せている側が横いっぱいを使う
+            self._mid.setStretch(0, 3 if not simple else (1 if step == 1 else 0))
+            self._mid.setStretch(1, 2 if not simple else (0 if step == 1 else 1))
         if not simple:
             self.lbl_flow.setVisible(True)
             for wd in (self.box0, self.box1, self.box2, self.box3, self.lbl_basic_dir):

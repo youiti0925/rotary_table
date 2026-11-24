@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1228件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
+- 現在 **1258件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -113,6 +113,12 @@ rm -f settings.json settings.json.bak      # ★必ず消す
 - 仮モーターのときは製品の容量・電圧で号機を外さず、号機×軸を全部出す（軸は人が選ぶ）。台帳の IP に 8193 で声をかけて
   つながった機械の号機は先頭に★で出し、製品モーターなら自動で選ぶ（`_connected_unit`）。
 - 非常停止・運転中・許可外アラームは、つないだ直後に赤い帯で最初に出す（`lbl_estop`）。
+
+- かんたん作成は既定が「かんたん表示」（段①受注番号とモーター→②制御装置→③機械につないで送る。`wizard_steps.py`）。
+  部品は全部表示と同じものを出し入れするだけ（`_apply_mode`）。③は `FocasWriteDialog` を画面の中に入れる。
+- モーター番号が機械と違う製品のモーターは2段階: 1段目で 2020 と DGPR=0 だけ書く→人が電源を入れ直す→2段目で残り
+  （DGPR は標準のサーボ値で上書きするので、製品のサーボ値は電源入れ直しのあとに書く）。実機は未確認。
+- 初めての制御装置: 控えを「機械から取ったBASIC」（BASICフォルダの外）へ F<号機>BASIC.dat として登録（`first_unit.py`）。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

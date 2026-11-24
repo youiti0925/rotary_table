@@ -30,8 +30,11 @@ class Base(unittest.TestCase):
         self.dst = self.tmp / "LocalAppData" / "ND287分割測定"
         self.home = self.tmp / "home"
         self.links = []
+        self._orig_custom = I.CUSTOM_DIR_CANDIDATES
+        I.CUSTOM_DIR_CANDIDATES = []        # このPCに実在する特注パラの場所を拾わない（環境依存にしない）
 
     def tearDown(self):
+        I.CUSTOM_DIR_CANDIDATES = self._orig_custom
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_install(self, **kw):

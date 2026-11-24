@@ -47,7 +47,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -q
 rm -f settings.json settings.json.bak      # ★必ず消す
 ```
 
-- 現在 **1218件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
+- 現在 **1224件**（Linux 環境では focas_backup 2・ftpserver 32 の計34件が環境要因で落ちる）。1件でも落ちたら先に進まない。
 - offscreen実行が `settings.json` を作る（gitignore対象）。
   消し忘れると**本番設定を上書きする事故**になる。過去に実際に起きた。
 
@@ -106,6 +106,11 @@ rm -f settings.json settings.json.bak      # ★必ず消す
   データは画面の「場所」欄（既定: `\\svn03\文書共有\工機部内\共用\システム\パラメータ表\data`）から取る。
 - 配布セットを作るPCの `param_basic_dir` の BASIC を `app\BASIC` に同梱し、入れるとき場所を自動登録する（`install.register_locations`）。
 - 受注番号の検索は `os.scandir`（共有に約1.5万ファイル。以前は約29秒）。
+
+- 仮モーター（2026-11-24 利用者）: 製品のモーター番号（2020）が機械に付いているモーターと違うことがある。かんたん作成の
+  「モーター」欄（未選択だと機械へ書けない）→ `FocasWriteDialog(keep_motor=)`。仮モーターなら 2020 を prepare に渡す前に除く
+  （`drop_param_numbers`）。2020 に連動する他の値は**未確認**なので自動では除かない。製品のモーターに替えるなら DGPR=0＋電源入れ直し。
+- 非常停止・運転中・許可外アラームは、つないだ直後に赤い帯で最初に出す（`lbl_estop`）。
 
 ### 出どころ判定（`param_origin.py`）
 - **BASICフォルダにアプリの出力を置かない。** アプリも実機と同じ `LF CR CR` で

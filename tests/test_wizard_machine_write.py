@@ -103,9 +103,11 @@ class TestWizardMachineWrite(WizardBase):
     def test_opens_the_write_window_with_the_same_plan_input(self):
         w = self.ready(self.wizard())
         w.e_out.setText("")                       # 出力先は要らない
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
         self.run_machine(w)
         self.assertEqual(w.warnings, [])
         self.assertEqual(len(self.opened), 1)
+        self.assertFalse(self.opened[0][1]["keep_motor"])
         (args, kw) = self.opened[0]
         self.assertTrue(kw["auto"])                              # 自動接続・台帳を使う
         self.assertEqual(kw["seiban"], "50014984")
@@ -117,6 +119,34 @@ class TestWizardMachineWrite(WizardBase):
         plan = plan_fn(machine_raw)
         nums = {str(r[0]) for r in plan["rows"]}
         self.assertTrue({"2020", "2022"} <= nums, nums)
+
+    def test_keep_motor_leaves_2020_out_of_the_plan(self):
+        # 仮モーターが付いていて製品の 2020 と違うとき、2020 を書かない選択ができる
+        w = self.ready(self.wizard())
+        w.e_out.setText("")
+        w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("temp"))
+        self.run_machine(w)
+        self.assertTrue(self.opened[0][1]["keep_motor"])
+        plan_fn = self.opened[0][0][2]
+        machine_raw = (HERE / "fixtures" / "focas_param_31i.DAT").read_text(encoding="cp932")
+        with_motor = {str(r[0]) for r in plan_fn(machine_raw)["rows"] if r[5]}
+        kept = plan_fn(machine_raw, keep_motor=True)
+        without = {str(r[0]) for r in kept["rows"] if r[5]}
+        self.assertIn("2020", with_motor)
+        self.assertNotIn("2020", without)
+        self.assertTrue(without)                      # ほかの項目は残る
+
+    def test_drop_param_numbers(self):
+        import nd287_app.gui as G
+        self.assertEqual(G.drop_param_numbers({3: {2020: "1", 2022: "2"}}, [2020]), {3: {2022: "2"}})
+        self.assertEqual(G.drop_param_numbers({2020: 1, (2020, "L1"): 2, 2021: 3}, [2020]), {2021: 3})
+
+    def test_motor_must_be_chosen_first(self):
+        w = self.ready(self.wizard())
+        w.e_out.setText("")
+        self.run_machine(w)
+        self.assertEqual(self.opened, [])
+        self.assertTrue(any("モーター" in t for t in w.warnings))
 
     def test_refuses_when_nothing_is_selected(self):
         w = self.wizard()

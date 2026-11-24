@@ -73,8 +73,9 @@ class WriteDialogBase(unittest.TestCase):
         from nd287_app import param_build as P
         values = values or self.VALUES
 
-        def plan_fn(raw, zero_scope="product"):
+        def plan_fn(raw, zero_scope="product", keep_motor=False):
             self.plan_calls.append((raw, zero_scope))
+            self.keep_motor_calls = getattr(self, "keep_motor_calls", []) + [keep_motor]
             return P.prepare(raw, values, axis=4, reference="", zero_params=zero_params,
                              zero_scope=zero_scope)
         return plan_fn
@@ -446,6 +447,43 @@ class TestUnknown(WriteDialogBase):
         self.wait(d)
         self.assertIn("書けていませんでした", d.txt_result.toPlainText())
         self.assertEqual(self.client.lib.called("cnc_wrparam"), 0)
+
+
+class TestEstopBanner(WriteDialogBase):
+    VALUES = {"20": "4"}
+
+    def test_emergency_stop_is_announced_first_after_connecting(self):
+        d = self.dialog()
+        self.client.machine.status.update({"emergency": 1})
+        self.go(d, backup=False)
+        self.assertFalse(d.lbl_estop.isHidden())
+        self.assertIn("非常停止", d.lbl_estop.text())
+        self.assertIn("解除", d.lbl_estop.text())
+        self.client.machine.status.update({"emergency": 0})
+        self.poll(d)
+        self.assertTrue(d.lbl_estop.isHidden())
+
+    def test_no_banner_when_machine_is_fine(self):
+        d = self.dialog()
+        self.go(d, backup=False)
+        self.assertTrue(d.lbl_estop.isHidden())
+
+
+class TestKeepMotor(WriteDialogBase):
+    VALUES = {"20": "4"}
+
+    def test_checkbox_passes_keep_motor_and_says_so(self):
+        d = self.dialog()
+        self.go(d)
+        self.assertFalse(d.chk_keep_motor.isChecked())
+        d.chk_keep_motor.setChecked(True)
+        self.app.processEvents()
+        self.assertTrue(self.keep_motor_calls[-1])
+        self.assertIn("書きません", d.lbl_motor.text())
+        self.assertFalse(d.lbl_motor.isHidden())
+        d.chk_keep_motor.setChecked(False)
+        self.app.processEvents()
+        self.assertNotIn("書きません", d.lbl_motor.text())
 
 
 class TestZeroScope(WriteDialogBase):

@@ -6278,6 +6278,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         for fdict in items:
             self.found_lay.addWidget(self._make_found_checkbox(fdict))
             self._files.append(fdict)
+        if len(items) == 1 and items[0].get("meta", {}).get("system", "FANUC") == "FANUC":
+            items[0]["chk"].setChecked(True)           # 1件だけなら、チェックも自動で入れる
         self._update_candidates()
 
     def search_by_model(self):
@@ -6551,8 +6553,10 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 if star and pick < 0:
                     pick = i
             # つながっている機械は自動で選ぶ。仮モーターで軸が何通りもあるときは、軸は人が選ぶ
-            if pick >= 0 and not temp:
+            if pick >= 0 and (not temp or by_unit):
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(pick))
+            elif len(self._cand) == 1:                 # 候補が1つなら、聞かずに選ぶ
+                self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(0))
             if prev is not None:
                 same = [i for i, (c, a) in enumerate(self._cand)
                         if (str(c.unit), tuple(a)) == prev] or \

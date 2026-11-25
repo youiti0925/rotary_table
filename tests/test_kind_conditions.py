@@ -116,6 +116,22 @@ class TestTwoAxis(unittest.TestCase):
         self.assertEqual(K.find(t, "TW-1", False, "セミ・モーター")["歯数"], "72")
 
 
+class TestPlanPerAxis(unittest.TestCase):
+    def test_plan_rotary_and_tilt_separately_with_fallback(self):
+        p = make([])
+        K.save_model(p, "TW-2", None, None, {"回転": {"フルで測る": "両方", "セミで測る": "分割だけ"},
+                                              "傾斜": {"フルで測る": "分割だけ"}})
+        t = K.load(p)
+        self.assertEqual(K.find_plan(t, "TW-2", False)["セミで測る"], "分割だけ")
+        self.assertEqual(K.find_plan(t, "TW-2", True)["フルで測る"], "分割だけ")
+        self.assertEqual(K.find_plan(t, "TW-2", True)["セミで測る"], "")
+        # 傾斜の行が空なら回転と同じ
+        K.save_model(p, "TW-3", None, None, {"回転": {"フルで測る": "両方"}})
+        t = K.load(p)
+        self.assertEqual(K.find_plan(t, "TW-3", True)["フルで測る"], "両方")
+        self.assertIsNone(K.find_plan(t, "NONE", True))
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

@@ -80,24 +80,35 @@ class KindConditionDialog(QtWidgets.QDialog):
         lay.addLayout(top)
         self.tabs = QtWidgets.QTabWidget()
         self.g_rot, self.g_tilt = _Grid(ROTARY_FIELDS), _Grid(TILT_FIELDS)
-        self.tabs.addTab(self.g_rot, "回転")
-        self.tabs.addTab(self.g_tilt, "傾斜")
+        self.plan = {}
+        for name, grid in (("回転", self.g_rot), ("傾斜", self.g_tilt)):
+            page = QtWidgets.QWidget()
+            pl = QtWidgets.QVBoxLayout(page)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.addWidget(grid, 1)
+            g = QtWidgets.QGridLayout()
+            g.addWidget(QtWidgets.QLabel(f"{name}の測る予定　フルで"), 0, 0)
+            full = QtWidgets.QComboBox()
+            full.addItems(K.PLAN_CHOICES)
+            g.addWidget(full, 0, 1)
+            g.addWidget(QtWidgets.QLabel("セミで"), 1, 0)
+            semi = QtWidgets.QComboBox()
+            semi.addItems(K.PLAN_CHOICES)
+            g.addWidget(semi, 1, 1)
+            g.addWidget(QtWidgets.QLabel("セミの種類"), 2, 0)
+            sk = QtWidgets.QComboBox()
+            sk.addItems(["", "セミ・モーター", "セミ・駆動装置"])
+            g.addWidget(sk, 2, 1)
+            g.setColumnStretch(2, 1)
+            if name == "傾斜":
+                g.addWidget(QtWidgets.QLabel("（傾斜の予定が空なら、回転と同じ）"), 3, 0, 1, 3)
+            pl.addLayout(g)
+            self.plan[name] = {"フルで測る": full, "セミで測る": semi, "セミの種類": sk}
+            self.tabs.addTab(page, name)
+        self.cmb_full = self.plan["回転"]["フルで測る"]            # 以前の名前（回転の予定）
+        self.cmb_semi = self.plan["回転"]["セミで測る"]
+        self.cmb_semi_kind = self.plan["回転"]["セミの種類"]
         lay.addWidget(self.tabs, 1)
-        plan = QtWidgets.QGridLayout()
-        plan.addWidget(QtWidgets.QLabel("測る予定　フルで"), 0, 0)
-        self.cmb_full = QtWidgets.QComboBox()
-        self.cmb_full.addItems(K.PLAN_CHOICES)
-        plan.addWidget(self.cmb_full, 0, 1)
-        plan.addWidget(QtWidgets.QLabel("セミで"), 1, 0)
-        self.cmb_semi = QtWidgets.QComboBox()
-        self.cmb_semi.addItems(K.PLAN_CHOICES)
-        plan.addWidget(self.cmb_semi, 1, 1)
-        plan.addWidget(QtWidgets.QLabel("セミの種類"), 2, 0)
-        self.cmb_semi_kind = QtWidgets.QComboBox()
-        self.cmb_semi_kind.addItems(["", "セミ・モーター", "セミ・駆動装置"])
-        plan.addWidget(self.cmb_semi_kind, 2, 1)
-        plan.setColumnStretch(2, 1)
-        lay.addLayout(plan)
         self.lbl_msg = QtWidgets.QLabel("")
         self.lbl_msg.setWordWrap(True)
         lay.addWidget(self.lbl_msg)
@@ -122,29 +133,36 @@ class KindConditionDialog(QtWidgets.QDialog):
         model = self.e_model.text().strip()
         self.g_rot.clear_values()
         self.g_tilt.clear_values()
-        self.cmb_full.setCurrentIndex(0)
-        self.cmb_semi.setCurrentIndex(0)
-        self.cmb_semi_kind.setCurrentIndex(0)
+        for cs in self.plan.values():
+            for c in cs.values():
+                c.setCurrentIndex(0)
         if not model:
             return
         t = K.load(self.path())
         self.g_rot.fill(t, model, False)
         self.g_tilt.fill(t, model, True)
-        plan = K.find_plan(t, model)
-        if plan:
-            for cmb, key in ((self.cmb_full, "フルで測る"), (self.cmb_semi, "セミで測る"), (self.cmb_semi_kind, "セミの種類")):
-                i = cmb.findText(plan.get(key, ""))
-                cmb.setCurrentIndex(max(i, 0))
+        for name, tilt in (("回転", False), ("傾斜", True)):
+            plan = K.find_plan(t, model, False) if not tilt else self._own_plan(t, model)
+            if plan:
+                for key, cmb in self.plan[name].items():
+                    cmb.setCurrentIndex(max(cmb.findText(plan.get(key, "")), 0))
         msg = "".join(f"{x}\n" for x in t.get("problems", []))
         self.lbl_msg.setText(msg.strip())
+
+    def _own_plan(self, table, model):
+        """傾斜タブに出すのは、傾斜の行そのもの（無ければ空。回転と同じ扱いは読むときだけ）。"""
+        m = model.upper()
+        for r in table.get("plan") or []:
+            if r["型式"].upper() == m and r.get("回転/傾斜") == "傾斜":
+                return r
+        return None
 
     def save(self):
         model = self.e_model.text().strip()
         if not model:
             self.lbl_msg.setText("型式を入れてください。")
             return False
-        plan = {"フルで測る": self.cmb_full.currentText(), "セミで測る": self.cmb_semi.currentText(),
-                "セミの種類": self.cmb_semi_kind.currentText()}
+        plan = {name: {k: c.currentText() for k, c in cs.items()} for name, cs in self.plan.items()}
         try:
             n = K.save_model(self.path(), model, self.g_rot.by_kind(), self.g_tilt.by_kind(), plan)
         except Exception as e:                       # 黙らない: 理由を画面に出す

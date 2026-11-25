@@ -14,7 +14,7 @@ from pathlib import Path
 KINDS = ("セミ・モーター", "セミ・駆動装置", "フル・スケール付き")
 FILE_NAME = "測定条件_種類別.xlsx"
 SHEET_ROTARY, SHEET_TILT, SHEET_HELP, SHEET_PLAN = "回転", "傾斜", "説明", "測る予定"
-PLAN_COLUMNS = ["型式", "フルで測る", "セミで測る", "セミの種類", "メモ"]
+PLAN_COLUMNS = ["型式", "回転/傾斜", "フルで測る", "セミで測る", "セミの種類", "メモ"]
 PLAN_CHOICES = ("", "分割だけ", "再現性だけ", "両方")
 
 ROTARY_COLUMNS = ["型式", "測定の種類", "スケール名", "歯数", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
@@ -222,13 +222,26 @@ def rows_from_existing(masters):
     return rot, tilt
 
 
-def find_plan(table, model):
-    """測る予定 1行 {"フルで測る","セミで測る","セミの種類"}。無ければ None（予定なし＝今までどおり1回測る）。"""
+def find_plan(table, model, tilt=None):
+    """測る予定 1行 {"フルで測る","セミで測る","セミの種類"}。無ければ None（予定なし＝今までどおり1回測る）。
+
+    予定は 型式×回転/傾斜 で1行ずつ（2軸製品は回転と傾斜で予定が違うことがある）。
+    tilt=True（傾斜）で、傾斜の行が無い・空のときは、回転の行（無ければ「回転/傾斜」が空の行）と同じ。
+    tilt=False（回転）は、回転の行 → 「回転/傾斜」が空の行（以前の形式の行）。tilt=None は、どの行でも最初の1つ。"""
     m = _s(model).upper()
-    for r in table.get("plan") or []:
-        if r["型式"].upper() == m:
-            return r
-    return None
+    rows = [r for r in (table.get("plan") or []) if r["型式"].upper() == m]
+    if not rows:
+        return None
+
+    def pick(axis):
+        for r in rows:
+            if _s(r.get("回転/傾斜")) == axis and (_s(r.get("フルで測る")) or _s(r.get("セミで測る"))):
+                return r
+        return None
+    if tilt is None:
+        return rows[0]
+    first = pick("傾斜") if tilt else pick("回転")
+    return first or (pick("回転") if tilt else None) or pick("")
 
 
 def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
@@ -271,13 +284,20 @@ def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
         if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
             ws.append(PLAN_COLUMNS)
         header = [_s(c.value) for c in ws[1]]
+        if "回転/傾斜" not in header:                              # 以前の形式（軸の列なし）: 列を足す。既存の行は「空＝両方」のまま
+            ws.insert_cols(2)
+            ws.cell(1, 2).value = "回転/傾斜"
+            header = [_s(c.value) for c in ws[1]]
         for r in range(ws.max_row, 1, -1):
             if _s(ws.cell(r, 1).value).upper() == m:
                 ws.delete_rows(r)
-        rec = dict(plan)
-        rec["型式"] = _s(model)
-        if any(_s(rec.get(k)) for k in ("フルで測る", "セミで測る")):
-            ws.append([rec.get(h, "") for h in header])
-            written += 1
+        # plan: {"回転": {...}, "傾斜": {...}}（軸ごと）か、{"フルで測る":…}（両方に同じ＝軸の列を空で1行）
+        by_axis = plan if ("回転" in plan or "傾斜" in plan) else {"": plan}
+        for axis in ("", "回転", "傾斜"):
+            rec = dict(by_axis.get(axis) or {})
+            if any(_s(rec.get(k)) for k in ("フルで測る", "セミで測る")):
+                rec["型式"], rec["回転/傾斜"] = _s(model), axis
+                ws.append([rec.get(h, "") for h in header])
+                written += 1
     wb.save(str(p))
     return written

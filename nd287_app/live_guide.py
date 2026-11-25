@@ -98,6 +98,20 @@ def usual_seconds(rows, model, mode, points):
     return (float(median(vals)), len(vals)) if vals else (None, 0)
 
 
+def usual_seconds_any(rows, model, mode):
+    """測る前（点数がまだ分からないとき）用: 同じ型式・同じ測り方の、これまでの (真ん中の秒, 件数)。"""
+    model = str(model or "").strip().upper()
+    vals = []
+    for r in rows or ():
+        try:
+            if str(r.get("型式") or "").strip().upper() == model and str(r.get("測り方") or "") == str(mode or ""):
+                vals.append(float(r.get("秒") or 0))
+        except ValueError:
+            continue
+    vals = [v for v in vals if v > 0]
+    return (float(median(vals)), len(vals)) if (vals and model) else (None, 0)
+
+
 # ------------------------------------------------------------------ 見張り
 def _dev_sec(target, measured):
     """指令角度と測った角度の差[秒]（360°のまたぎをならす）。"""

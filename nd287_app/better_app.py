@@ -9,6 +9,7 @@ gui.py には「ボタン1つ」と attach() の1行だけを足し、中身は�
   「何をしましたか？」と聞いて記録帳に残す。
 - 測っているあいだの実況と見張り（live_guide.py / live_guide_ui.py）: 右の列（精度の表が出る所）の上に、
   測っている間だけ札を出す。向き・何点目・あと何分・見張り（大きく動いた所／値が来ない）。
+- 測る前の点検（precheck.py / precheck_ui.py）: 同じ右の列に、まだ測っていないときだけ出す札。
 - 登録の育ち具合（growth.py / growth_ui.py）:「その他 ▾」→「登録の育ち具合…」。数えて見せるだけ。
 """
 from __future__ import annotations
@@ -28,6 +29,8 @@ class Better(QtCore.QObject):
         self._was = False
         from . import live_guide_ui
         self.live = live_guide_ui.LiveWatch(win)       # 測っているあいだの実況と見張り（右の列の上。読むだけ）
+        from . import precheck_ui
+        self.pre = precheck_ui.PreWatch(win)           # 測る前の点検（同じ場所。まだ測っていないときだけ）
         menu = win.b_tools.menu() if getattr(win, "b_tools", None) is not None else None
         if menu is not None:                           # 登録の育ち具合（数えて見せるだけ）
             self.act_growth = menu.addAction("登録の育ち具合…")
@@ -46,6 +49,10 @@ class Better(QtCore.QObject):
             self.live.tick()
         except Exception:
             self.live.panel.hide()
+        try:
+            self.pre.tick()
+        except Exception:
+            self.pre.panel.hide()
         b = getattr(w, "b_read", None)
         try:
             can = bool(w.has_view_data()) and getattr(w, "view_kind", "") != "repeat"

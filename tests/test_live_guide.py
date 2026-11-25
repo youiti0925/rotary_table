@@ -26,6 +26,16 @@ class TestTimeBook(unittest.TestCase):
         self.assertFalse(LG.add_time(self.p, model="A", mode="x", points=5, seconds=0))
         self.assertFalse(self.p.exists())
 
+    def test_name_is_kept_and_old_files_stay_aligned(self):
+        LG.add_time(self.p, model="A", mode="回転分割", points=96, seconds=600, name="YU")
+        self.assertEqual(LG.load_times(self.p)[0]["名前"], "YU")
+        old = self.p.parent / "old.csv"
+        old.write_text("日時,型式,測り方,点数,秒\n2026-11-25 10:00,A,回転分割,96,600\n", encoding="utf-8-sig")
+        LG.add_time(old, model="A", mode="回転分割", points=96, seconds=660, name="YU")
+        rows = LG.load_times(old)
+        self.assertEqual([r["秒"] for r in rows], ["600", "660"])          # 前の形のファイルは、列をずらさない
+        self.assertNotIn(None, rows[1])
+
     def test_minutes(self):
         self.assertEqual(LG.minutes_text(30), "1 分より短い")
         self.assertEqual(LG.minutes_text(700), "約 12 分")

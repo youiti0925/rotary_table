@@ -3020,7 +3020,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     item_done = QtCore.Signal(int, object)
     write_finished = QtCore.Signal(bool)     # 書込が終わった。True=全部書けて読み戻しも合った（かんたん作成の段④への案内用）
-    COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果"]
+    COLS = ["番号", "軸", "区分", "今の機械の値（控え）", "書く値", "型", "確認済み", "結果", "何を決める値か"]
 
     def __init__(self, parent, settings, plan_fn, *, subtitle="", seiban="", client_factory=None,
                  basic_text=None, product_axes=(), auto=False, keep_motor=False, motor_id="",
@@ -3969,6 +3969,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         folder = self._backup[0] if self._backup else ""
         items = wp["items"]
         kinds = self._kind_map()
+        from . import param_words                      # 番号の意味（マスタ/パラメータの意味.csv で直せる。無い番号は空）
+        words = param_words.load(param_words.path(self.settings))
         self.tbl.setRowCount(len(items))
         for i, it in enumerate(items):
             ok = bool(it["verified"]) and not it["problems"]
@@ -3987,6 +3989,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
                                     + "・".join(f"0x{b:X}" for b in it["unknown_bits"])
                                     + "）が付いています。書けないという意味ではありません")
                 self.tbl.setItem(i, j, cell)
+            self.tbl.setItem(i, 8, QtWidgets.QTableWidgetItem(param_words.word(words, it["no"])))
         self.tbl.resizeColumnsToContents()
         self.tbl.horizontalHeader().setStretchLastSection(True)
         n_missing = len(wp["missing"])

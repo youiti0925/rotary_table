@@ -176,8 +176,10 @@ class TestFlow(WriteDialogBase):
         self.assertIn("号機23", d.lbl_target.text())
         self.assertIn("控えは完全です", d.lbl_backup.text())
         # 確認の表: 番号 / 軸 / 区分 / 今の値 / 書く値 / 型 / 確認済み
-        self.assertEqual(d.tbl.columnCount(), 8)
+        self.assertEqual(d.tbl.columnCount(), 9)                 # 最後の列は「何を決める値か」（param_words）
+        self.assertEqual(d.tbl.horizontalHeaderItem(8).text(), "何を決める値か")
         rows = self.rows(d)
+        self.assertEqual([r[8] for r in rows], ["", ""])         # 意味が登録されていない番号には、何も出さない
         self.assertEqual([r[0] for r in rows], ["N00020", "N00021"])
         self.assertEqual(rows[0][1:5], ["-", "製品値", "9", "4"])
         self.assertTrue(rows[0][5].startswith("バイト"), rows[0][5])      # 利用者には日本語の型名

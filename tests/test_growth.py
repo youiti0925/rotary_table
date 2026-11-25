@@ -39,3 +39,19 @@ class TestGrowth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPeople(unittest.TestCase):
+    def test_counts_finished_measurements_per_person(self):
+        rows = [{"日時": "2026-11-20 10:00", "測り方": "回転分割", "名前": "YU"},
+                {"日時": "2026-11-26 09:00", "測り方": "回転分割", "名前": "YU"},
+                {"日時": "2026-11-25 09:00", "測り方": "回転再現性", "名前": "YU"},
+                {"日時": "2026-11-25 09:00", "測り方": "回転分割", "名前": "SATO"},
+                {"日時": "2026-11-25 09:00", "測り方": "回転分割", "名前": ""},
+                {"日時": "2026-11-25 09:00", "測り方": "回転分割"}]              # 前の形の行（名前なし）は数えない
+        p = GR.people(rows)
+        self.assertEqual([d["name"] for d in p], ["YU", "SATO"])
+        self.assertEqual(p[0]["by_mode"], {"回転分割": 2, "回転再現性": 1})
+        self.assertEqual((p[0]["first"], p[0]["last"]), ("2026-11-20", "2026-11-26"))
+        self.assertEqual(GR.people_modes(p), ["回転分割", "回転再現性"])
+        self.assertEqual(GR.people([]), [])

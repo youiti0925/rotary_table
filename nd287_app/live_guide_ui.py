@@ -184,6 +184,6 @@ class LiveWatch(QtCore.QObject):
             return
         try:
             LG.add_time(time_path(w.settings), model=w.e_model.text(), mode=self._mode(), points=len(seq),
-                        seconds=now - self._t0)
+                        seconds=now - self._t0, name=w.e_operator.text())
         except OSError:
             pass

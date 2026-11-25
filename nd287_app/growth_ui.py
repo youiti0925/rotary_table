@@ -58,7 +58,7 @@ def gather(host, search=None):
         except Exception:
             has_cond = False
         has_cond = has_cond or bool(user.get(model.upper())) or getattr(host, "master_cond", None) is not None
-    return dict(model=model, counts=counts, has_conditions=has_cond,
+    return dict(model=model, counts=counts, has_conditions=has_cond, people=GR.people(times),
                 times=len(GR.rows_for_model(times, model)), fixes=len(GR.rows_for_model(fixes, model)))
 
 
@@ -213,6 +213,31 @@ class GrowthDialog(QtWidgets.QDialog):
             grid.addWidget(self._label(it["gives"]), i, 2, QtCore.Qt.AlignTop)
             grid.addWidget(self._label(it["grow"], color=GREY), i, 3, QtCore.Qt.AlignTop)
         v.addLayout(grid)
+        self.lay.addWidget(card)
+
+        card, v = self._card()
+        v.addWidget(self._label("人ごとの、できること表", bold=True, delta=1))
+        people = s.get("people") or []
+        if not people:
+            v.addWidget(self._label("まだ記録がありません。名前を入れて、最後まで測り終わると、その人の回数がここに出ます。", color=GREY))
+        else:
+            modes = GR.people_modes(people)[:4]
+            grid = QtWidgets.QGridLayout()
+            grid.setHorizontalSpacing(18)
+            grid.setVerticalSpacing(4)
+            for j, t in enumerate(["名前"] + modes + ["初めて測った日", "最後に測った日"]):
+                grid.addWidget(self._label(t, color=GREY, wrap=False), 0, j)
+            for i, d in enumerate(people[:12], start=1):
+                grid.addWidget(self._label(d["name"], bold=True, wrap=False), i, 0)
+                for j, m in enumerate(modes, start=1):
+                    n = d["by_mode"].get(m, 0)
+                    grid.addWidget(self._label(f"{n} 回" if n else "—", bold=bool(n), color=GREEN if n else GREY,
+                                               wrap=False), i, j)
+                grid.addWidget(self._label(d["first"], wrap=False), i, len(modes) + 1)
+                grid.addWidget(self._label(d["last"], wrap=False), i, len(modes) + 2)
+            grid.setColumnStretch(len(modes) + 3, 1)
+            v.addLayout(grid)
+            v.addWidget(self._label("このPCで、最後まで測り終えた回数です（「測定にかかった時間」の記録から数えています）。", color=GREY))
         self.lay.addWidget(card)
         self.lay.addStretch(1)
         from .result_guide_ui import lift_fonts

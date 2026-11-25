@@ -102,3 +102,32 @@ def count_models(kind_table, user_rotary=None):
 def rows_for_model(rows, model, field="型式"):
     m = _norm(model)
     return [r for r in rows or () if m and _norm(r.get(field)) == m]
+
+
+def people(time_rows):
+    """人ごとのできること表: 「測定にかかった時間」の記録から、名前ごとに、最後まで測り終えた回数を数える。
+    返り値 [dict(name, total, by_mode={測り方: 回数}, first=初めての日, last=最後の日)]（回数の多い順）。
+    名前の無い行は数えない。数えるだけ（上手・下手は言わない）。"""
+    by = {}
+    for r in time_rows or ():
+        name = str(r.get("名前") or "").strip()
+        if not name:
+            continue
+        d = by.setdefault(name, dict(name=name, total=0, by_mode={}, first="", last=""))
+        d["total"] += 1
+        mode = str(r.get("測り方") or "").strip() or "（測り方なし）"
+        d["by_mode"][mode] = d["by_mode"].get(mode, 0) + 1
+        day = str(r.get("日時") or "")[:10]
+        if day:
+            d["first"] = min(d["first"], day) if d["first"] else day
+            d["last"] = max(d["last"], day)
+    return sorted(by.values(), key=lambda d: (-d["total"], d["name"]))
+
+
+def people_modes(rows):
+    """表の列にする測り方の並び（回数の多い順）。"""
+    tot = {}
+    for d in rows or ():
+        for m, n in d["by_mode"].items():
+            tot[m] = tot.get(m, 0) + n
+    return [m for m, _n in sorted(tot.items(), key=lambda kv: (-kv[1], kv[0]))]

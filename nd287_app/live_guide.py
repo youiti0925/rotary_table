@@ -14,7 +14,7 @@ from pathlib import Path
 from statistics import median
 
 TIME_FILE = "測定にかかった時間.csv"
-TIME_HEADER = ("日時", "型式", "測り方", "点数", "秒")
+TIME_HEADER = ("日時", "型式", "測り方", "点数", "秒", "名前")      # 名前＝測った人（人ごとの「できること表」に使う）
 MIN_POINTS_FOR_PACE = 3          # 今回の進み方から「あと何分」を出し始める点数
 STALL_FACTOR = 4                 # いつもの間隔の何倍あいたら知らせるか
 STALL_MIN_SEC = 30
@@ -66,20 +66,31 @@ def load_times(path):
         return []
 
 
-def add_time(path, *, model, mode, points, seconds, now=None):
-    """測り終えた1回ぶんを残す。型式が空・点数0・秒が0以下は残さない。残したら True。"""
+def add_time(path, *, model, mode, points, seconds, name="", now=None):
+    """測り終えた1回ぶんを残す。型式が空・点数0・秒が0以下は残さない。残したら True。
+    前の形（名前の列が無い）のファイルには、名前を付けずに足す（列をずらさない）。"""
     model = str(model or "").strip()
     if not model or int(points) <= 0 or float(seconds) <= 0:
         return False
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     new = not p.exists()
-    with open(p, "a", newline="", encoding="utf-8-sig") as f:
+    with_name = True
+    if not new:
+        try:
+            with open(p, newline="", encoding="utf-8-sig") as f:
+                with_name = "名前" in (next(csv.reader(f), []) or [])
+        except (OSError, csv.Error, UnicodeDecodeError):
+            with_name = False
+    with open(p, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as f:
         w = csv.writer(f)
         if new:
             w.writerow(TIME_HEADER)
-        w.writerow([(now or _dt.datetime.now()).strftime("%Y-%m-%d %H:%M"), model, str(mode or ""),
-                    int(points), int(round(float(seconds)))])
+        row = [(now or _dt.datetime.now()).strftime("%Y-%m-%d %H:%M"), model, str(mode or ""),
+               int(points), int(round(float(seconds)))]
+        if with_name:
+            row.append(str(name or "").strip())
+        w.writerow(row)
     return True
 
 

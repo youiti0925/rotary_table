@@ -132,3 +132,27 @@ class SuffixDialog(QtWidgets.QDialog):
 
     def result_name(self):
         return f"{self.serial}{self.picker.suffix()}"
+
+
+class SuffixPanel(QtWidgets.QGroupBox):
+    """保存の画面の機番欄の横に、表そのものを常に見える形で置く部品。狭いときだけ、見出しのチェックで折りたためる。
+    使い方: panel.picker.changed でファイル名の末尾を更新、panel.picker.set_auto(...) で自動の記号を選んでおく。"""
+
+    def __init__(self, parent=None, selection=None, compact=True):
+        super().__init__("機番の末尾（表を押して選ぶ）", parent)
+        self.setCheckable(True)
+        self.setChecked(True)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        self.picker = SuffixPicker(self, selection)
+        if compact:
+            f = self.picker.tbl.font()
+            f.setPointSizeF(max(f.pointSizeF() * 0.85, 6.0))
+            self.picker.tbl.setFont(f)
+            self.picker.tbl.setMinimumHeight(190)
+            self.picker.tbl.verticalHeader().setMinimumWidth(80)
+        lay.addWidget(self.picker)
+        self.toggled.connect(self.picker.setVisible)
+
+    def suffix(self):
+        return self.picker.suffix()

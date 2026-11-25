@@ -221,6 +221,11 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         from nd287_app import serial_suffix_ui as U
         self.assertEqual(self._check(lambda s: U.SuffixDialog(None, "123456")), [])
 
+    def test_serial_suffix_panel(self):
+        """保存画面に常に置く表（折りたためる）。"""
+        from nd287_app import serial_suffix_ui as U
+        self.assertEqual(self._check(lambda s: U.SuffixPanel(None)), [])
+
     def test_kind_conditions_dialog(self):
         """測定条件の種類別の登録画面。"""
         from nd287_app import kind_conditions_ui as U

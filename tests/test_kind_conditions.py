@@ -70,5 +70,54 @@ class T(unittest.TestCase):
             self.assertEqual(r["測定の種類"], "")
 
 
+class TestSave(unittest.TestCase):
+    def test_save_model_roundtrip_keeps_others(self):
+        p = make([{"型式": "RTV-231", "測定の種類": "", "ホイール刻み": 10},
+                  {"型式": "OTHER", "測定の種類": "セミ・モーター", "歯数": 60}])
+        n = K.save_model(p, "RTV-231",
+                         rotary_by_kind={"セミ・モーター": {"歯数": 72, "ブロック数": 4, "回数": 7},
+                                         "セミ・駆動装置": {"ホイール刻み": 1},
+                                         "フル・スケール付き": {}},
+                         plan={"フルで測る": "両方", "セミで測る": "分割だけ", "セミの種類": "セミ・モーター"})
+        self.assertEqual(n, 3)
+        t = K.load(p)
+        self.assertEqual(t["problems"], [])
+        self.assertEqual(K.find(t, "RTV-231", False, "セミ・モーター")["歯数"], "72")
+        self.assertEqual(K.find(t, "OTHER", False, "セミ・モーター")["歯数"], "60")        # ほかの型式はそのまま
+        self.assertEqual(K.find(t, "RTV-231", False, "フル・スケール付き")["ホイール刻み"], "10")   # 種類なしの行は残る
+        self.assertEqual(K.find_plan(t, "rtv-231")["セミで測る"], "分割だけ")
+        self.assertTrue(Path(str(p) + ".bak").exists())
+        # 2回目: 同じ型式の種類の行は置き換わり、増えない
+        K.save_model(p, "RTV-231", rotary_by_kind={"セミ・モーター": {"歯数": 80}}, plan={})
+        t = K.load(p)
+        self.assertEqual(K.find(t, "RTV-231", False, "セミ・モーター")["歯数"], "80")
+        self.assertEqual(len([r for r in t["rotary"] if r["型式"] == "RTV-231"]), 2)       # 種類なし＋セミ・モーター
+        self.assertIsNone(K.find_plan(t, "RTV-231"))                                       # 予定を空で保存 → 消える
+
+
+class TestDialog(unittest.TestCase):
+    def test_dialog_save_and_reload(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        from nd287_app import kind_conditions_ui as U
+        d = tempfile.mkdtemp()
+        st = {U.SETTING_KEY: str(Path(d) / K.FILE_NAME)}
+        dlg = U.KindConditionDialog(None, st, "RTV-231")
+        self.assertFalse(dlg.save() is False)                   # ファイルが無くても作って保存できる
+        dlg.g_rot.item(U.ROTARY_FIELDS.index("歯数"), 0).setText("72")
+        dlg.g_rot.item(U.ROTARY_FIELDS.index("ブロック数"), 0).setText("4")
+        dlg.g_rot.item(U.ROTARY_FIELDS.index("回数"), 0).setText("7")
+        dlg.cmb_full.setCurrentText("両方")
+        dlg.cmb_semi.setCurrentText("分割だけ")
+        self.assertTrue(dlg.save())
+        dlg2 = U.KindConditionDialog(None, st, "RTV-231")
+        self.assertEqual(dlg2.g_rot.item(U.ROTARY_FIELDS.index("歯数"), 0).text(), "72")
+        self.assertEqual(dlg2.cmb_semi.currentText(), "分割だけ")
+        t = K.load(st[U.SETTING_KEY])
+        self.assertEqual(K.repeat(K.find(t, "RTV-231", False, "セミ・モーター"))["repeats"], 7)
+
+
 if __name__ == "__main__":
     unittest.main()

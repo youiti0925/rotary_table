@@ -13,7 +13,9 @@ from pathlib import Path
 
 KINDS = ("セミ・モーター", "セミ・駆動装置", "フル・スケール付き")
 FILE_NAME = "測定条件_種類別.xlsx"
-SHEET_ROTARY, SHEET_TILT, SHEET_HELP = "回転", "傾斜", "説明"
+SHEET_ROTARY, SHEET_TILT, SHEET_HELP, SHEET_PLAN = "回転", "傾斜", "説明", "測る予定"
+PLAN_COLUMNS = ["型式", "フルで測る", "セミで測る", "セミの種類", "メモ"]
+PLAN_CHOICES = ("", "分割だけ", "再現性だけ", "両方")
 
 ROTARY_COLUMNS = ["型式", "測定の種類", "スケール名", "歯数", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
                   "ブロック数", "回数", "再現開始", "再現終了", "メモ"]
@@ -70,7 +72,7 @@ def _read_sheet(ws, columns):
 
 def load(path):
     """表を読む。戻り値 {"rotary": [行…], "tilt": [行…], "problems": [文…]}。無い・読めないときは空（黙って直さない: problems に理由）。"""
-    res = {"rotary": [], "tilt": [], "problems": []}
+    res = {"rotary": [], "tilt": [], "plan": [], "problems": []}
     p = Path(path)
     if not p.exists():
         return res
@@ -84,6 +86,8 @@ def load(path):
         for key, sheet in (("rotary", SHEET_ROTARY), ("tilt", SHEET_TILT)):
             if sheet in wb.sheetnames:
                 res[key] = _read_sheet(wb[sheet], None)
+        if SHEET_PLAN in wb.sheetnames:
+            res["plan"] = _read_sheet(wb[SHEET_PLAN], None)
     finally:
         wb.close()
     seen = set()
@@ -183,6 +187,8 @@ def build_template(path, rotary_rows=(), tilt_rows=()):
         for r in rows:
             ws.append([r.get(c, "") for c in cols])
         ws.freeze_panes = "B2"
+    ps = wb.create_sheet(SHEET_PLAN)
+    ps.append(PLAN_COLUMNS)
     hs = wb.create_sheet(SHEET_HELP)
     for line in HELP_LINES:
         hs.append([line])
@@ -214,3 +220,64 @@ def rows_from_existing(masters):
                      "ウォーム範囲": rec.get("ウォーム範囲", ""), "ウォーム開始": rec.get("ウォーム開始", ""),
                      "メモ": "今までの登録（ユーザー傾斜条件）"})
     return rot, tilt
+
+
+def find_plan(table, model):
+    """測る予定 1行 {"フルで測る","セミで測る","セミの種類"}。無ければ None（予定なし＝今までどおり1回測る）。"""
+    m = _s(model).upper()
+    for r in table.get("plan") or []:
+        if r["型式"].upper() == m:
+            return r
+    return None
+
+
+def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
+    """1つの型式の、種類別の条件と測る予定を、まとめて1回で保存する（アプリの登録画面も、Excel に直接書くのも、同じファイル）。
+
+    rotary_by_kind / tilt_by_kind: {種類: {列名: 値}}（値が全部空の種類は書かない＝その型式のその種類の行を消す）。
+    plan: {"フルで測る","セミで測る","セミの種類","メモ"} か None（None なら予定は触らない）。
+    その型式の「種類が空」の行（今までの登録の写し）と、ほかの型式の行・説明は、そのまま残す。
+    保存前に、元のファイルを「.bak」に1世代残す。戻り値: 書いた行数。
+    """
+    import shutil
+    import openpyxl
+    p = Path(path)
+    if not p.exists():
+        build_template(p)
+    shutil.copy2(str(p), str(p) + ".bak")
+    wb = openpyxl.load_workbook(str(p))
+    m = _s(model).upper()
+    written = 0
+    for sheet, cols, by_kind in ((SHEET_ROTARY, ROTARY_COLUMNS, rotary_by_kind), (SHEET_TILT, TILT_COLUMNS, tilt_by_kind)):
+        if by_kind is None:
+            continue
+        ws = wb[sheet] if sheet in wb.sheetnames else wb.create_sheet(sheet)
+        if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
+            ws.append(cols)
+        header = [_s(c.value) for c in ws[1]]
+        for r in range(ws.max_row, 1, -1):                        # 下から消す（行番号がずれない）
+            vals = {header[i]: _s(c.value) for i, c in enumerate(ws[r]) if i < len(header)}
+            if vals.get("型式", "").upper() == m and normalize_kind(vals.get("測定の種類", "")):
+                ws.delete_rows(r)
+        for kind in KINDS:
+            rec = dict(by_kind.get(kind) or {})
+            if not any(_s(v) for k, v in rec.items() if k not in ("型式", "測定の種類")):
+                continue
+            rec["型式"], rec["測定の種類"] = _s(model), kind
+            ws.append([rec.get(h, "") for h in header])
+            written += 1
+    if plan is not None:
+        ws = wb[SHEET_PLAN] if SHEET_PLAN in wb.sheetnames else wb.create_sheet(SHEET_PLAN)
+        if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
+            ws.append(PLAN_COLUMNS)
+        header = [_s(c.value) for c in ws[1]]
+        for r in range(ws.max_row, 1, -1):
+            if _s(ws.cell(r, 1).value).upper() == m:
+                ws.delete_rows(r)
+        rec = dict(plan)
+        rec["型式"] = _s(model)
+        if any(_s(rec.get(k)) for k in ("フルで測る", "セミで測る")):
+            ws.append([rec.get(h, "") for h in header])
+            written += 1
+    wb.save(str(p))
+    return written

@@ -216,6 +216,11 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         themes.apply_font(self.app, 7)
         return bad
 
+    def test_kind_conditions_dialog(self):
+        """測定条件の種類別の登録画面。"""
+        from nd287_app import kind_conditions_ui as U
+        self.assertEqual(self._check(lambda s: U.KindConditionDialog(None, s, "RTV-231")), [])
+
     def test_param_dialog(self):
         import nd287_app.gui as G
         self.assertEqual(self._check(lambda s: G.ParamDialog(None, s)), [])

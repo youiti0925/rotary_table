@@ -123,6 +123,7 @@ DEFAULTS = dict(
     nc_out_ext=".NC",
     # 制御装置マスタ（号機・CNC・軸ごとの容量等）。必要容量で制御装置を絞り込むのに使う
     controller_master_csv=r"マスタ/制御装置マスタ.csv",
+    kind_conditions_xlsx=r"マスタ/測定条件_種類別.xlsx",   # 測定条件の種類別（セミ・モーター／セミ・駆動装置／フル）と測る予定
     motor_rules_csv=r"マスタ/モーター規則.csv",
     param_write_estop="estop_only",   # パラメータを書くときの非常停止: estop_only（既定。社内の手順）/ released_only / either
     # モーター→容量 対応表（例外の上書き用）。通常は容量をモーター型式の番手から標準組合せで

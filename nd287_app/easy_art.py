@@ -378,8 +378,12 @@ def printer():
     return _wide(body, "印刷とPDF")
 
 
-def alarm_screen(has_alarm=True):
+def alarm_screen(has_alarm=True, online=True):
     mark = ""
+    if not online:                       # 機械につながっていない: 「出ていません」とは言えない（読めていないだけ）
+        mark = (f'<circle cx="260" cy="110" r="70" fill="#8A96A3"/><path d="M260 70 L260 118 M260 140 L260 146" fill="none" '
+                f'stroke="#fff" stroke-width="14" stroke-linecap="round"/>')
+        return _wide(mark + _t(260, 250, 18, "機械につながっていません", fill=FG, weight=900), "アラーム")
     if has_alarm:
         mark = (f'<path d="M260 40 L330 160 L190 160 Z" fill="{YELLOW}" stroke="{INK}" stroke-width="5" stroke-linejoin="round"/>'
                 f'<rect x="254" y="80" width="12" height="42" rx="4" fill="{INK}"/><circle cx="260" cy="140" r="7" fill="{INK}"/>')

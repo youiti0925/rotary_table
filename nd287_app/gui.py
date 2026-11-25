@@ -13318,6 +13318,19 @@ class _NoSerial(Exception):
     """機番が空のときの表示用（保存する名前の欄）。"""
 
 
+def _counts_short_forms(text):
+    """「データ数: ホイール CW 15/37　…」を、入る幅に合わせた短い形の一覧にする（長い順）。
+    4つの系列は、どの幅でも全部出す（会社PC 150% で4つ目が消えた）。いちばん短い形は「ホCW15 ホCCW15 ウCW37 ウCCW37」
+    （今の点数だけ。全文は吹き出し）。"""
+    import re
+    body = text.replace("データ数:", "").strip()
+    a = body.replace("ホイール", "ホ").replace("ウォーム", "ウ")
+    b = re.sub(r"\s*(CCW|CW)\s", r"\1", a)            # 「ホ CW 15/37」→「ホCW15/37」
+    b = re.sub(r"\s+", " ", b)
+    c = re.sub(r"/\d+", "", b)                         # 必要数を省く: 「ホCW15」
+    return [a, b, c]
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -13915,7 +13928,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live = main_top.ElidedLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
         self.counts = main_top.ElidedLabel(
-            "", short_of=lambda t: t.replace("データ数:  ", "").replace("ホイール", "ホ").replace("ウォーム", "ウ"))
+            "", short_of=_counts_short_forms)
         # 受信点数はグラフ拡大ボタンの右に小さめで出す（例 ホイール CW 3/36）。
         # 4系列で横に長くなるので、フォントは控えめ(9pt)にして場所を取らない。
         self.counts.setStyleSheet(

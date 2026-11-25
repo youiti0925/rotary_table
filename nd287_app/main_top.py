@@ -216,7 +216,7 @@ class StepStrip(QtWidgets.QWidget):
 class ElidedLabel(QtWidgets.QLabel):
     """入る幅に合わせて「…」に省く一行の文字（全文はマウスを乗せると出る。text() は省く前の全文を返す）。
 
-    short_of（文を短くする関数）を渡すと、全文が入らないとき先に短い形を試す。
+    short_of（文を短くする関数。短い形の一つ、または長い順の一覧を返す）を渡すと、全文が入らないとき先に短い形を試す。
     2026-11-25 会社PC（150%表示）: 操作の帯の「データ数…」「受信…」の文字が長く、帯が見える幅を 239 超えて右で切れた。"""
 
     def __init__(self, text="", parent=None, short_of=None):
@@ -249,8 +249,16 @@ class ElidedLabel(QtWidgets.QLabel):
         fm = self.fontMetrics()
         shown = full
         if self.width() > 1 and full and fm.horizontalAdvance(full) > room:
-            short = self._short_of(full) if self._short_of else full
-            shown = short if fm.horizontalAdvance(short) <= room else fm.elidedText(short, QtCore.Qt.ElideRight, room)
+            cands = self._short_of(full) if self._short_of else full
+            if isinstance(cands, str):
+                cands = [cands]
+            shown = None
+            for c in cands:                      # 長い形から順に、入る最初のものを使う
+                if fm.horizontalAdvance(c) <= room:
+                    shown = c
+                    break
+            if shown is None:
+                shown = fm.elidedText(cands[-1], QtCore.Qt.ElideRight, room)
         super().setText(shown)
         self.setToolTip(full if shown != full else "")
 

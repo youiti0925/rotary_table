@@ -14,6 +14,7 @@ def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seib
                ctrl_chosen=False, basic_ok=False, semi_stop=""):
     """戻り値 {"can_next": 次へ進めるか, "missing": [足りないものの文…]}。"""
     missing = []
+    warnings = []
     if step == 1:
         if not seiban.strip():
             missing.append("受注伝票番号を入れて『探す』を押してください")
@@ -30,10 +31,10 @@ def step_state(step, *, found=False, selected=0, non_fanuc=False, motor="", seib
     elif step == 2:
         if not ctrl_chosen:
             missing.append("制御装置（号機）を選んでください")
-        elif not basic_ok:
-            missing.append("その号機の BASIC が見つかりません。『使うBASIC』を指定してください")
+        elif not basic_ok:             # 止めない（BASIC が無くても進める）。注意として出す
+            warnings.append("その号機の BASIC が見つかりません。『使うBASIC』を指定するか、「取って登録する」で機械から取ってください")
     # 段③・④は「次へ」で進む段ではない（③は書き終えたあとの案内、④は最後の段）
-    return {"can_next": not missing, "missing": missing}
+    return {"can_next": not missing, "missing": missing, "warnings": warnings}
 
 
 def program_offer(step, *, params_ok=False):

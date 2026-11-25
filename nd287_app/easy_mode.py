@@ -17,7 +17,8 @@ from .easy_flow import STEPS, INDEX, CHAPTERS
 
 # 機械の「状態の数値」→ 絵のつまみの位置（easy_art.MODES の番号）
 AUT_TO_DIAL = {0: 3, 1: 5, 3: 6, 4: 4, 5: 1, 9: 2}
-WATCH_COLORS = {"wait": ("#E9EEF5", "#5A6876"), "ok": ("#E3F4EA", "#16864C"), "stop": ("#FBE9E7", "#C8362B")}
+WATCH_COLORS = {"wait": ("#E9EEF5", "#5A6876"), "ok": ("#E3F4EA", "#16864C"), "done": ("#E3F4EA", "#16864C"),
+                "stop": ("#FBE9E7", "#C8362B")}
 FALLBACK_SEC = 25        # 機械から「できた」を読めないまま、これだけたったら、人が押す小さなボタンを出す
 FALLBACK_MISMATCH_SEC = 6   # つまみの位置を読めているのに「合っていない」と出つづけるとき、早めに「やりました」を出す（読みが違う機械でも進める）
 
@@ -1825,6 +1826,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         w = self.host.easy_make_wizard(self.embed)
         w.embedded = True                                  # 長い説明は出さない（上の絵と短い言葉が案内する）
         w.setWindowFlags(QtCore.Qt.Widget)
+        w.setMaximumSize(16777215, 16777215)               # 単独の窓用の幅の上限を外す（中に入れたら、見せている側が横いっぱいを使う）
         for name in ("b_mode", "b_close"):               # 「全部表示」への切り替えと「閉じる」は出さない（初心者用。進むのは「測定へ進む」）
             try:
                 getattr(w, name).hide()

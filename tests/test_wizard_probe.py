@@ -226,7 +226,9 @@ class TestWizardAutoProbe(WizardBase):
     def test_unit_unknown_when_not_in_registry(self):
         w, _ = self.make({1: 293, 5: 299}, unit="")
         self.run_probe(w)
-        self.assertIn("台帳にありません", w.lbl_conn.text())
+        # 台帳に無くても、系列・軸数・各軸の容量が制御装置マスタの23号機と同じなので 23号機と推す（台帳には書かない）
+        self.assertIn("23号機（容量から推定）", w.lbl_conn.text())
+        self.assertEqual(w._machine_probe["unit_from"], "guess")
 
     NUMS = (1420, 1421, 1422, 1423)
 
@@ -303,23 +305,26 @@ class TestWizardAutoProbe(WizardBase):
         self.assertIn("2165 が 40A の軸は Z軸", w.lbl_auto.text())
         self.assertTrue(w.cmb_axis_pick.isHidden())
 
-    def test_not_decided_shows_choice_of_candidate_axes_only(self):
-        w, client = self.make_axes(())                                  # 候補は A・B。どちらにも製品の値が無い
+    def test_not_decided_is_broken_by_rule_and_choice_stays_for_changing(self):
+        w, client = self.make_axes(())                                  # 候補は A・B。どちらにも製品の値が無い（同じ条件）
         self.search(w)
         self.finish_axis(w)
-        self.assertEqual(w.e_motor_id.text(), "")
+        self.assertEqual(w.e_motor_id.text(), "293")                    # 人に選ばせず、番号の小さい A に決める
+        self.assertIn("A・B が同じ条件だったので A に決めました", w.lbl_auto.text())
+        self.assertIn("違えば［変える］で選べます", w.lbl_auto.text())
+        self.assert_write_axis(w, "23", "A")
+        w.b_change.click()                                              # ［変える］を押すと、同じ容量の軸の選択が出る（必須ではない）
         self.assertFalse(w.cmb_axis_pick.isHidden())
         texts = [w.cmb_axis_pick.itemText(i) for i in range(w.cmb_axis_pick.count())]
         self.assertIn("A軸（293）", texts)
         self.assertIn("B軸（293）", texts)
         self.assertFalse(any(t.startswith(("X", "Y", "Z", "C")) for t in texts))     # 全軸は出さない
-        self.assertIn("軸を決められませんでした", w.lbl_auto.text())
         i = texts.index("B軸（293）")
         w.cmb_axis_pick.setCurrentIndex(i)
         w.cmb_axis_pick.activated.emit(i)
         self.assertEqual(w.e_motor_id.text(), "293")
         self.assertEqual(client.machine.writes, [])
-        self.assert_write_axis(w, "23", "B")                            # 人が選んだ軸が書く先になる
+        self.assert_write_axis(w, "23", "B")                            # 人が選び直した軸が書く先になる
 
     def test_read_numbers_are_limited_and_unreadable_ones_skipped(self):
         w, client = self.make_axes(self.NUMS)

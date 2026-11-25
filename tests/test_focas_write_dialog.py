@@ -552,7 +552,7 @@ class TestExpectUnitAndAutoBackup(WriteDialogBase):
 class TestFirstContactRegistersExpectedUnit(WriteDialogBase):
     VALUES = {"20": "4"}
 
-    def test_unknown_machine_gets_the_unit_chosen_in_the_wizard(self):
+    def test_unknown_machine_gets_the_unit_chosen_in_the_wizard_but_registry_is_not_written(self):
         from nd287_app import focas_find
         d = self.dialog(expect_unit="23", auto=True)
         d.b_connect.click()
@@ -561,7 +561,9 @@ class TestFirstContactRegistersExpectedUnit(WriteDialogBase):
         if "23" not in cands:
             self.skipTest("偽機械の CNC ID では号機23が候補に出ない")
         self.assertEqual(d.cmb_unit.currentData(), "23")
-        self.assertIn("台帳に残しました", d.lbl_target.text())
+        self.assertIn("台帳には残していません", d.lbl_target.text())       # 台帳に書くのは「取って登録する」を押したときだけ
+        cid = d._ident.get("cnc_id")
+        self.assertEqual(focas_find.unit_for(focas_find.registry_path(self.settings), cid), "")
 
 
 class TestZeroScope(WriteDialogBase):

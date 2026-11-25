@@ -126,6 +126,7 @@ from . import flow_guide
 from . import wizard_programs as WP
 from . import controllers
 from . import wizard_probe
+from . import machine_decide
 from . import semi_convert
 from . import seiban_flow
 from . import batch_build
@@ -3557,11 +3558,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         elif self._expect_unit and self._expect_unit in cands and ident.get("cnc_id"):
             # 台帳に無い機械（初めてつないだ）: かんたん作成で選んだ号機を、この機械の号機として台帳に残す。
             # 人が選んだ号機なので、違っていれば号機の欄で直せる（直すと台帳も直る）
-            _select_unit(self.cmb_unit, self._expect_unit)
-            if self._auto:
-                _focas_registry_set_unit(self.settings, ident, self._expect_unit, self.e_host.text().strip())
-            self._unit_note = (f"この機械を {self._expect_unit}号機として台帳に残しました"
-                               "（かんたん作成で選んだ号機です。違うときは号機の欄で直してください）")
+            _select_unit(self.cmb_unit, self._expect_unit)      # 台帳には書かない（書くのは「取って登録する」を押したときだけ）
+            self._unit_note = (f"かんたん作成で選んだ {self._expect_unit}号機を、仮に選んであります"
+                               "（台帳には残していません。違うときは号機の欄で直してください）")
         self.cmb_unit.blockSignals(False)
         if old != ident.get("cnc_id"):                   # 別の機械につながったら、控えも結果も引き継がない
             self._backup, self._wplan, self._plan, self._raw = None, None, None, None
@@ -6076,6 +6075,49 @@ class _AxisProbeJob(QtCore.QThread):
         self.done_axis.emit(res)
 
 
+class _RegisterJob(QtCore.QThread):
+    """台帳に無い機械の控え（BASIC）を読むだけで取って、号機の BASIC として登録する。機械には書かない。"""
+    progress_text = QtCore.Signal(str)
+    done_reg = QtCore.Signal(object)
+
+    def __init__(self, settings, factory, host, port, unit, ctls, app_dir_):
+        super().__init__()
+        self._a = (settings, factory, host, port, unit, list(ctls or []), app_dir_)
+        self._client = None
+        self._cancel = False
+
+    def abort(self):
+        self._cancel = True
+        c = self._client
+        if c is not None and hasattr(c, "abort"):
+            try:
+                c.abort()
+            except Exception:
+                pass
+
+    def run(self):
+        from . import first_unit
+        st, fac, host, port, unit, ctls, ad = self._a
+        out, client = None, None
+        try:
+            client = fac(st)
+            self._client = client
+            res = first_unit.register_from_machine(
+                st, client, unit, host=host, port=port, controllers_list=ctls, cancel=lambda: self._cancel,
+                progress=lambda d, t, note: self.progress_text.emit(f"控えを取っています… {d}/{t} {note}"),
+                app_dir=ad)
+            out = {"ok": True, "res": res}
+        except Exception as e:
+            out = {"ok": False, "error": str(e) or type(e).__name__}
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        self.done_reg.emit(out)
+
+
 class ParamWizardDialog(QtWidgets.QDialog):
     """受注番号から かんたん作成（ガイド付き）。
 
@@ -6101,6 +6143,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._probe_port_open = None                # 試験用: 声かけ（ポート確認）の差し替え
         self._probe_started = False
         self._probe_job = None
+        self._reg_job = None                        # 台帳に無い機械の BASIC を取って登録する（読むだけ）
+        self._reg_diff = None                       # 号機のマスタ行と機械の食い違い（直せるもの）
+        self._diff_lines = []                       # 赤い帯に出す食い違いの文
+        self._pick_why = ""                          # 自動で決めた軸の理由（1行）
+        self._unit_open = False                     # 人が［号機を変える］を押して、制御装置の一覧を開いた
+        self._pick_open = False                     # 人が［変える］を押して、号機・軸の一覧を開いた
+        self._auto_sel = None                       # 機械から決めて選んだ制御装置（号機, 軸の並び）
         self._axis_job = None                       # 製品の軸を決めるための読み取り（読むだけ）
         self._axis_jobs = []                        # 2軸テーブルで、製品ごとに順に読むときの全部（途中で壊さない）
         self._probe_closed = False
@@ -6160,6 +6209,20 @@ class ParamWizardDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_steps)
         self.lbl_conn = QtWidgets.QLabel("")
         v.addWidget(self.lbl_conn)
+        # つないだ機械の値が、マスタ・BASIC と違うとき（つなぐたびに見る。黙って直さない）
+        self.band_diff = QtWidgets.QFrame()
+        self.band_diff.setStyleSheet("QFrame{background:#fef2f2; border:1px solid #fca5a5; border-radius:4px;}"
+                                     "QLabel{border:none; color:#b91c1c; font-weight:bold;}")
+        bdv = QtWidgets.QVBoxLayout(self.band_diff)
+        bdv.setContentsMargins(8, 6, 8, 6)
+        self.lbl_fix = QtWidgets.QLabel("")
+        self.lbl_fix.setWordWrap(True)
+        bdv.addWidget(self.lbl_fix)
+        self.b_fix = QtWidgets.QPushButton("マスタの行を、機械の値に直す")
+        self.b_fix.clicked.connect(self._fix_master)
+        bdv.addWidget(self.b_fix, 0, QtCore.Qt.AlignLeft)
+        v.addWidget(self.band_diff)
+        self.band_diff.setVisible(False)
         self.lbl_auto = QtWidgets.QLabel("")           # 機械から読んで自動で決めたことの案内
         self.lbl_auto.setWordWrap(True)
         self.lbl_auto.setStyleSheet("color:#1d4ed8;")
@@ -6280,6 +6343,22 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_need.setWordWrap(True)
         self.lbl_need.setStyleSheet("color:#1d4ed8;")
         f2.addRow("選択 → 必要軸", self.lbl_need)
+        self.row_pick = QtWidgets.QWidget()
+        hpk = QtWidgets.QHBoxLayout(self.row_pick)
+        hpk.setContentsMargins(0, 0, 0, 0)
+        self.lbl_pick = QtWidgets.QLabel("")
+        self.lbl_pick.setWordWrap(True)
+        self.lbl_pick.setStyleSheet("font-weight:bold; color:#1d4ed8;")
+        hpk.addWidget(self.lbl_pick, 1)
+        self.b_change = QtWidgets.QPushButton("変える")
+        self.b_change.setToolTip("同じ容量の軸だけの一覧を出します（軸の状態が悪いときなど）")
+        self.b_change.clicked.connect(self._open_pick)
+        hpk.addWidget(self.b_change)
+        self.b_change_unit = QtWidgets.QPushButton("号機を変える")
+        self.b_change_unit.clicked.connect(self._open_unit)
+        hpk.addWidget(self.b_change_unit)
+        f2.addRow("使う機械・軸", self.row_pick)
+        self._f2 = f2
         self.cmb_ctrl = QtWidgets.QComboBox()
         self.cmb_ctrl.setToolTip("製品の必要容量を満たす制御装置だけ出します。選ぶと使う軸を自動割当。"
                                  "傾斜＋回転を両方選ぶと2軸とも載る号機、片方なら1軸でよい号機が出ます")
@@ -6294,6 +6373,31 @@ class ParamWizardDialog(QtWidgets.QDialog):
         b_scan.clicked.connect(self._scan_basics)
         f2.addRow("", b_scan)
         col_right.addWidget(box2)
+
+        # --- 台帳に無い機械の登録（機械から BASIC を取る。人が押したときだけ） ---
+        self.box_reg = QtWidgets.QGroupBox("この機械は台帳にありません")
+        rv = QtWidgets.QVBoxLayout(self.box_reg)
+        self.lbl_reg = QtWidgets.QLabel("")
+        self.lbl_reg.setWordWrap(True)
+        rv.addWidget(self.lbl_reg)
+        rrow = QtWidgets.QHBoxLayout()
+        self.cmb_reg_unit = QtWidgets.QComboBox()
+        self.cmb_reg_unit.setEditable(True)
+        self.cmb_reg_unit.setMinimumWidth(90)
+        self.cmb_reg_unit.setToolTip("候補から選ぶか、号機の数字を入れてください")
+        rrow.addWidget(self.cmb_reg_unit)
+        rrow.addWidget(QtWidgets.QLabel("号機として登録しますか？"))
+        self.b_reg = QtWidgets.QPushButton("取って登録する")
+        self.b_reg.setObjectName("primary")
+        self.b_reg.clicked.connect(self._reg_start)
+        rrow.addWidget(self.b_reg)
+        rrow.addStretch(1)
+        rv.addLayout(rrow)
+        self.lbl_reg_msg = QtWidgets.QLabel("")
+        self.lbl_reg_msg.setWordWrap(True)
+        rv.addWidget(self.lbl_reg_msg)
+        col_right.addWidget(self.box_reg)
+        self.box_reg.setVisible(False)
 
         # --- ③ 出力 ---
         box3 = self.box3 = QtWidgets.QGroupBox("③ 出力先を確認して「作成」")
@@ -6522,15 +6626,179 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _probe_done(self, probe):
         if self._probe_closed or not probe:
             return
+        # 号機: 台帳（CNC ID）→ 無ければ 2165 の並びをマスタと照らす（machine_decide.identify_unit。IP は使わない）。
+        idn = machine_decide.identify_unit(probe, self._controllers, probe.get("unit") or "")
+        if idn["how"] in ("容量", "複数"):
+            # machine_decide は系列（31i と 35i など）を見ないので、ここで機械の系列と違う号機を外す
+            ty = re.sub(r"\D", "", str(probe.get("cnc_type") or "")) or "0"
+            def same_series(u):
+                c = next((x for x in self._controllers if str(x.unit) == str(u)), None)
+                m = re.match(r"\s*(\d+)", str(c.cnc or "")) if c is not None else None
+                return not m or m.group(1).lstrip("0") == ty.lstrip("0")
+            units = [u for u in idn["units"] if same_series(u)]
+            if units:
+                probe["unit_guess"] = units
+                probe["unit_from"] = "guess"
+                if len(units) == 1:         # 1台に決まった（推定。台帳には書かない。登録で確かめる）
+                    probe["unit"] = units[0]
+        guess = list(probe.get("unit_guess") or [])
         self._machine_probe = probe
         self._conn_cache = None
+        self._fill_reg_box()
         self._refresh_conn()
+        self._check_mismatch()
         self._apply_probe()
         self._update_candidates()           # 号機（台帳）が分かったので、つながっている機械を先頭にする
 
+    # ----- 台帳に無い機械: 機械から BASIC を取って、号機として登録する（読むだけ。人が押したときだけ） -----
+    def _reg_wanted(self):
+        pr = self._machine_probe
+        return bool(pr and pr.get("cnc_id") and pr.get("unit_from") in ("", "guess"))
+
+    def _fill_reg_box(self):
+        pr = self._machine_probe
+        if not self._reg_wanted():
+            return
+        guess = list(pr.get("unit_guess") or [])
+        self.cmb_reg_unit.clear()
+        for g in guess:
+            self.cmb_reg_unit.addItem(g)
+        if guess:
+            self.cmb_reg_unit.setCurrentIndex(0)
+        else:
+            self.cmb_reg_unit.setEditText("")
+        if len(guess) == 1:
+            tail = f"\n容量が合う号機: {guess[0]}号機だけなので、仮に選んであります（推定です。確かめるには登録してください）"
+        elif guess:
+            tail = f"\n容量が合う号機: {'・'.join(guess)}号機（複数あるので、号機は選んでいません。号機を選んでください）"
+        else:
+            tail = "\n容量が合う号機は見つかりませんでした。号機の数字を入れてください"
+        self.lbl_reg.setText(
+            f"この機械は登録がありません（CNC ID {pr['cnc_id']}）。BASIC（パラメータの控え）を機械から取って、"
+            "次の号機として登録しますか？（機械には書きません。読むだけです）" + tail)
+        self.lbl_reg_msg.setText("")
+
+    def _update_reg_box(self):
+        if not hasattr(self, "box_reg"):
+            return
+        here = self._mode != "simple" or self._step == 2
+        show = self._reg_wanted() and not self._probe_closed and here
+        self.box_reg.setVisible(bool(show))
+        self.b_reg.setEnabled(self._reg_job is None or not self._reg_job.isRunning())
+        self.band_diff.setVisible(bool(self._diff_lines) and (self._mode != "simple" or self._step < 3))
+
+    def _jobs_running(self):
+        return [j for j in [self._probe_job, self._reg_job, self._axis_job] + list(self._axis_jobs)
+                if j is not None and j.isRunning()]
+
+    def _reg_start(self):
+        from . import first_unit
+        pr = self._machine_probe
+        if not self._reg_wanted():
+            return
+        if self._jobs_running():
+            self.lbl_reg_msg.setText("機械を読んでいる途中です。終わってからもう一度押してください")
+            return
+        try:
+            u = first_unit.clean_unit(self.cmb_reg_unit.currentText())
+        except first_unit.FirstUnitError as e:
+            self.lbl_reg_msg.setText(str(e))
+            self.lbl_reg_msg.setStyleSheet("color:#b91c1c;")
+            return
+        try:
+            port = int(self.settings.get("focas_port", focas_find.DEFAULT_PORT))
+        except (TypeError, ValueError):
+            port = focas_find.DEFAULT_PORT
+        factory = self._probe_client_factory or (
+            lambda st: focas_client.make_client(st, log_path=str(app_dir() / "focas_helper.log")))
+        job = _RegisterJob(self.settings, factory, pr.get("host", ""), port, u, self._controllers, app_dir())
+        job.progress_text.connect(self.lbl_reg_msg.setText)
+        job.done_reg.connect(self._reg_done)
+        self._reg_job = job
+        self.lbl_reg_msg.setStyleSheet("")
+        self.lbl_reg_msg.setText("機械から控えを取っています…（読むだけです）")
+        self.b_reg.setEnabled(False)
+        job.start()
+
+    @QtCore.Slot(object)
+    def _reg_done(self, out):
+        if self._probe_closed:
+            return
+        self.b_reg.setEnabled(True)
+        if not out or not out.get("ok"):
+            self.lbl_reg_msg.setStyleSheet("color:#b91c1c;")
+            self.lbl_reg_msg.setText("登録できませんでした: " + str((out or {}).get("error") or ""))
+            return
+        res, pr = out["res"], self._machine_probe
+        u = res["unit"]
+        pr["unit"], pr["unit_from"], pr["unit_guess"] = u, "registry", []
+        try:
+            self._controllers = controllers.load_controllers(self._mpath) if self._mpath else self._controllers
+        except Exception:
+            pass
+        self._conn_cache = None
+        self._check_mismatch()
+        self._ctrl_auto_pick = True          # 登録した号機を選び直す（前の選択を引き継がない）
+        self.lbl_reg_msg.setStyleSheet("")
+        self.lbl_reg_msg.setText(
+            f"号機{u}として登録しました" + (f"（BASIC は {res['file']} に保存）" if res.get("file")
+                                          else f"（号機{u}の BASIC はもうあるので、上書きせず台帳にだけ残しました）"))
+        self._refresh_conn()
+        self._auto_key = None
+        self._apply_probe()                 # 号機が決まったので、軸・モーターの自動入力を続ける
+        self._update_candidates()
+        self._apply_mode()
+
+    def _check_mismatch(self):
+        """つないだ機械（台帳で号機が分かるもの）の値が、マスタの行・BASIC と違わないか見る（つなぐたび）。
+        違えば赤い帯に全部並べる。直せるのはマスタの行だけ（人が押したときだけ）。BASIC は直さない。"""
+        pr = self._machine_probe
+        self._reg_diff, lines = None, []
+        if pr and pr.get("unit") and pr.get("unit_from") == "registry":
+            u = str(pr["unit"])
+            c = next((x for x in self._controllers if str(x.unit) == u), None)
+            if c is not None:
+                d = wizard_probe.master_diff(c, pr, self._axis_letter)
+                if d["lines"]:
+                    d["unit"] = u
+                    self._reg_diff = d
+                    lines += d["lines"]
+            try:
+                bpath = controllers.basic_file_for_unit(self._abs_dir("param_basic_dir"), u)
+                if bpath:
+                    text = Path(bpath).read_bytes().decode("cp932", errors="replace")
+                    lines += wizard_probe.basic_diff(text, u, pr.get("axes"), self._axis_letter)
+            except Exception:
+                pass
+        self._diff_lines = lines
+        self.lbl_fix.setText("機械の値が、マスタ／BASIC と違います:\n" + "\n".join(lines) if lines else "")
+        self.b_fix.setVisible(bool(self._reg_diff))
+        if self._reg_diff:
+            self.b_fix.setText(f"マスタの{self._reg_diff['unit']}号機の行を、機械の値に直す")
+        self.band_diff.setVisible(bool(lines) and (self._mode != "simple" or self._step < 3))
+
+    def _fix_master(self):
+        from . import first_unit
+        d = self._reg_diff
+        if not d:
+            return
+        try:
+            bak = first_unit.apply_master_fix(self._mpath, d["unit"], d["caps"], "", order=d["order"])
+        except Exception as e:
+            self.lbl_fix.setText(self.lbl_fix.text() + f"\n直せませんでした: {e}")
+            return
+        try:
+            self._controllers = controllers.load_controllers(self._mpath)
+        except Exception:
+            pass
+        self._check_mismatch()
+        self.lbl_reg_msg.setText(f"マスタの{d['unit']}号機の行を直しました。前のマスタは {bak} に残してあります")
+        self._update_candidates()
+        self._apply_mode()
+
     def _stop_probe(self):
         self._probe_closed = True
-        for job in [self._probe_job, self._axis_job] + list(self._axis_jobs):
+        for job in [self._probe_job, self._reg_job, self._axis_job] + list(self._axis_jobs):
             if job is not None and job.isRunning():
                 job.abort()
                 job.wait(3000)
@@ -6546,7 +6814,91 @@ class ParamWizardDialog(QtWidgets.QDialog):
             lab.setVisible(bool(on))
 
     def _set_axis_pick_visible(self, on):
-        self._set_row_visible(self.cmb_axis_pick, on)
+        # 機械から号機と軸が決まっているときは、人が［変える］を押すまで一覧を出さない
+        self._set_row_visible(self.cmb_axis_pick, bool(on) and (self._pick_open or not self._auto_pick()))
+
+    def _auto_pick(self):
+        """つないだ機械から号機と軸が決まり、その制御装置が選ばれているとき (号機, 軸の文字リスト)。でなければ None。"""
+        pr = self._machine_probe
+        guess = [str(u) for u in (pr or {}).get("unit_guess") or []] if (pr or {}).get("unit_from") == "guess" else []
+        if self._mode != "simple" or not pr or not (pr.get("unit") or len(guess) > 1):
+            return None
+        idx = self.cmb_ctrl.currentData()
+        if idx is None or idx < 0 or idx >= len(self._cand):
+            return None
+        c, asg = self._cand[idx]
+        sel = self._selected_files()
+        kinds = [f["kind"] for f in sel]
+        if len(sel) == 2 and all(k in self._decided_axes for k in kinds):
+            letters = [self._decided_axes[k] for k in kinds]
+        elif len(sel) == 1 and self._decided_axis:
+            letters = [self._decided_axis]
+        elif self._auto_sel and self._auto_sel[0] == str(c.unit):
+            letters = list(self._auto_sel[1])
+        else:
+            return None
+        if pr.get("unit"):
+            if str(c.unit) != str(pr["unit"]) or list(asg) != letters:
+                return None
+            return f"{c.unit}号機", letters
+        if str(c.unit) not in guess or list(asg) != letters:
+            return None
+        return "か".join(f"{u}号機" for u in guess) + "（同じ仕様）", letters
+
+    def _open_pick(self):
+        """［変える］: 同じ容量の軸だけの一覧を出す（号機の変更は別。［号機を変える］）。"""
+        self._pick_open = True
+        self._update_pick_ui()
+
+    def _open_unit(self):
+        self._unit_open = True
+        self._update_pick_ui()
+
+    def _update_pick_ui(self):
+        """② 制御装置: 機械から決まっていれば1行だけ。決まっていなければ候補と「何を選ぶか」の1行。"""
+        if not hasattr(self, "row_pick"):
+            return
+        auto = self._auto_pick()
+        simple = self._mode == "simple"
+        idx = self.cmb_ctrl.currentData()
+        chosen = idx is not None and 0 <= idx < len(self._cand)
+        hide_list = bool(auto) and not self._unit_open
+        for wd in (self.cmb_ctrl,):
+            wd.setVisible(not hide_list)
+            lab = self._f2.labelForField(wd)
+            if lab is not None:
+                lab.setVisible(not hide_list)
+        axis_list = any(c.count() > 1 for c in (self.cmb_axis_pick, self.cmb_axis_pick2))
+        self.b_change.setVisible(bool(auto) and not self._pick_open and axis_list)
+        self.b_change_unit.setVisible(bool(auto) and not self._unit_open)
+        if auto:
+            pr0 = self._machine_probe or {}
+            guessed = pr0.get("unit_from") == "guess" and bool(pr0.get("unit"))
+            sel = self._selected_files()
+            if len(sel) == 2:
+                axtxt = "／".join(f"{f['kind']}: {l}軸" for f, l in zip(sel, auto[1]))
+            else:
+                axtxt = f"使う軸：{'・'.join(auto[1])}軸"
+            self.lbl_pick.setText(f"使う機械：{auto[0]}　{axtxt}　自動で決めました"
+                                  + ("（容量から推定）" if guessed else "")
+                                  + (f"\n理由: {self._pick_why}" if self._pick_why else ""))
+        elif simple and self._cand and not chosen:
+            units = {str(c.unit) for c, _a in self._cand}
+            multi_axis = len(self._cand) > len(units)
+            what = ("使う機械（号機）と軸を" if len(units) > 1 and multi_axis else
+                    "使う機械（号機）を" if len(units) > 1 else "使う軸を")
+            self.lbl_pick.setText(f"▶ 下の『制御装置』から、{what}1つ選んでください（候補 {len(self._cand)} 通り）")
+        else:
+            self.lbl_pick.setText("")
+        self.row_pick.setVisible(bool(self.lbl_pick.text()))
+        lab = self._f2.labelForField(self.row_pick)
+        if lab is not None:
+            lab.setVisible(bool(self.lbl_pick.text()))
+        for cmb in (self.cmb_axis_pick, self.cmb_axis_pick2):       # 軸の一覧は［変える］を押すまで出さない
+            if auto and not self._pick_open:
+                self._set_row_visible(cmb, False)
+            elif auto and self._pick_open:
+                self._set_row_visible(cmb, cmb.count() > 1)
 
     # ----- フルクロ → セミクロ（semi_convert。変換は _gather の中で prepare に渡す前に行う）-----
     def _set_semi_visible(self, on, detail=False):
@@ -6763,6 +7115,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if mid:
             self._decided_axis = str(self.cmb_axis_pick.currentText()).strip()[:1]
             self.e_motor_id.setText(str(mid))
+            self._pick_why = "人が選びました"
             self._update_candidates()
 
     def _axis_probe_inputs(self, f, pr):
@@ -6806,8 +7159,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
             if by_amr:
                 why.append(f"製品のアンプ最大電流 {amr} と同じ軸は " + "・".join(self._axis_letter(k) for k in by_amr) + "軸")
         if not by_amr:                                  # ① 製品の容量(+電圧)を機械の電圧に読み替えて、機械の 2165 と比べる
-            info = wizard_probe.capacity_axes(meta.get("capacity"), meta.get("voltage"),
-                                              ctrl.voltage if ctrl is not None else "", axes)
+            mach_v = ctrl.voltage if ctrl is not None else wizard_probe.common_voltage(
+                self._controllers, pr.get("unit_guess"))     # 台帳に無い機械は、号機の候補の電圧が同じならそれ
+            info = wizard_probe.capacity_axes(meta.get("capacity"), meta.get("voltage"), mach_v, axes)
             by_amr = info["axes"]
             cap = info["cap"]
             if by_amr:
@@ -6848,6 +7202,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _axis_detected(self, res, ctx):
         """③ 製品の値と機械の各候補軸の値の一致数で決める。決まらなければ ④ へ。"""
         counts = wizard_probe.count_matches(ctx["prod"], res) if res else {}
+        ctx["counts"] = counts
         ax = wizard_probe.decide_axis(counts)
         if ax and ax in ctx["cands"]:
             ctx["why"].append(f"製品らしい値 {ctx['n']} 個中 {counts[ax]} 個が一致する軸（2位との差が明確）は "
@@ -6855,31 +7210,56 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._axis_finish(ctx, ax if ax in ctx["cands"] else 0)
 
     def _axis_finish(self, ctx, ax):
+        """軸を決めて 2020 を仮モーターの番号に入れる。①〜③で決まらなくても人に選ばせず、決めた規則（break_tie）で
+        必ず1つ決める。同じ容量の軸が他にもあるときは、［変える］で選び直せるように一覧（cmb_axis_pick）を用意しておく。"""
         pr = self._machine_probe
         if self._probe_closed or not pr or self._motor_id_by_user or self.cmb_motor.currentData() != "temp":
             return
-        mid = wizard_probe._clean(((pr.get("axes") or {}).get(ax) or {}).get("motor_id")) if ax else ""
+        axes = pr.get("axes") or {}
+        sel = self._selected_files()
+        usable = [k for k in ctx["cands"] if wizard_probe._clean((axes.get(k) or {}).get("motor_id"))]
+        tie = ""
+        if not (ax and wizard_probe._clean((axes.get(ax) or {}).get("motor_id"))):
+            ax, pool, how = wizard_probe.break_tie(usable, ctx.get("counts"))
+            if ax:
+                if len(pool) > 1:
+                    tie = ("・".join(self._axis_letter(k) for k in pool)
+                           + f" が同じ条件だったので {self._axis_letter(ax)} に決めました（{how}）。違えば［変える］で選べます")
+                elif len(usable) > 1:
+                    tie = f"{self._axis_letter(ax)} に決めました（{how}）。違えば［変える］で選べます"
+        mid = wizard_probe._clean((axes.get(ax) or {}).get("motor_id")) if ax else ""
         if ax and mid:
             self._decided_axis = self._axis_letter(ax)
             self.e_motor_id.setText(mid)
-            self._update_candidates()
-            msg = (" → ".join(ctx["why"]) + f" → {mid} が付いている{self._axis_letter(ax)}軸に決めました"
-                   "（違えば直してください）")
+            self._pick_why = tie or (ctx["why"][-1] if ctx["why"] else "")
+            msg = (" → ".join(ctx["why"]) + (" → " if ctx["why"] else "")
+                   + f"{mid} が付いている{self._axis_letter(ax)}軸に決めました（違えば直してください）")
+            if tie:
+                msg += "\n" + tie
             self.lbl_auto.setText((self.lbl_auto.text() + "\n" if self.lbl_auto.isVisible() and self.lbl_auto.text()
                                    else "") + msg)
             self.lbl_auto.setVisible(True)
+            self._fill_axis_pick(usable, ax)
+            self._update_candidates()
+            self._set_axis_pick_visible(self.cmb_axis_pick.count() > 1)
             return
-        choices = wizard_probe.axis_choices(pr.get("axes"), self._axis_letter, only=ctx["cands"])
-        if not choices:
-            return
-        self.cmb_axis_pick.clear()
-        self.cmb_axis_pick.addItem("製品の軸を選んでください（機械から決められませんでした）", "")
-        for text, _k, m in choices:
-            self.cmb_axis_pick.addItem(text, m)
         self.lbl_auto.setText((self.lbl_auto.text() + "\n" if self.lbl_auto.isVisible() and self.lbl_auto.text()
-                               else "") + "軸を決められませんでした: " + " → ".join(ctx["why"]))
+                               else "") + "軸を決められませんでした（機械の軸の 2020 が読めません）: " + " → ".join(ctx["why"]))
         self.lbl_auto.setVisible(True)
-        self._set_axis_pick_visible(True)
+
+    def _fill_axis_pick(self, usable, ax):
+        """［変える］で出す一覧: 同じ容量（これまでの絞り込みで残った）軸だけ。1つしか無ければ空。"""
+        self.cmb_axis_pick.blockSignals(True)
+        self.cmb_axis_pick.clear()
+        if len(usable) > 1:
+            axes = (self._machine_probe or {}).get("axes") or {}
+            self.cmb_axis_pick.addItem("（軸を変えるときだけ選んでください）", "")
+            for text, k, m in wizard_probe.axis_choices(axes, self._axis_letter, only=usable):
+                self.cmb_axis_pick.addItem(text, m)
+            self.cmb_axis_pick.setCurrentIndex(
+                next((n for n in range(self.cmb_axis_pick.count())
+                      if self.cmb_axis_pick.itemText(n).startswith(self._axis_letter(ax))), 0))
+        self.cmb_axis_pick.blockSignals(False)
 
     # ----- 2軸テーブル（傾斜＋回転の2製品）: 製品ごとに同じ決め方で軸を決める（読むだけ） -----
     def _motor_edit(self, pos):
@@ -6938,18 +7318,30 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self._axis_jobs.append(job)
             job.start()
             return
-        # 値でも決まらず、同じ容量の軸が製品の数だけ残っているときは、選んだ順に割り当てる（入れ替えは人が直せる）
+        # 値でも決まらないときは、人に選ばせず自動で割り当てる（同じ軸は2回使わない）:
+        # 番号が最も小さい（若い）軸から順に仮に決める（違えば［変える］で、同じ容量の軸から選べる）
+        used = {it["axis"] for it in items if it["axis"]}
         left = [i for i, it in enumerate(items) if not it["axis"] and i not in conflict and it["rest"]]
-        groups = {}
+        picks = {}
+        if left:                                   # 残りは machine_decide.choose_axes と同じ規則（若い順・同じ軸にしない）
+            sel = self._selected_files()
+            mach_v = wizard_probe.norm_voltage(next((c.voltage for c in self._controllers
+                                                     if str(c.unit) == str(pr.get("unit") or "")), "")
+                                               or wizard_probe.common_voltage(self._controllers, pr.get("unit_guess")))
+            prods = [{"cap": (sel[i].get("meta") or {}).get("capacity", ""),
+                      "voltage": wizard_probe.norm_voltage((sel[i].get("meta") or {}).get("voltage")),
+                      "motor_id": self._motor_edit(i).text().strip(), "values": items[i].get("prod") or {}} for i in left]
+            for i, r in zip(left, machine_decide.choose_axes(prods, pr, mach_v)):
+                if r["axis"]:
+                    picks[i] = 1 + machine_decide.AXES.index(r["axis"])
         for i in left:
-            groups.setdefault(tuple(items[i]["rest"]), []).append(i)
-        for rest_t, who in groups.items():
-            if len(who) >= 2 and len(who) == len(rest_t):
-                for i, ax in zip(who, rest_t):
-                    items[i]["axis"] = ax
-                    items[i]["why"].append(f"同じ容量の軸が{len(rest_t)}つで製品も{len(who)}つなので、選んだ順に割り当てました"
-                                           "（入れ替えるなら②で別の割当を選んでください）")
-                    mx["ordered"] = True
+            pool = [a for a in items[i]["rest"] if a not in used]
+            if not pool:
+                continue
+            ax = picks.get(i) if picks.get(i) in pool else min(pool)
+            items[i]["axis"] = ax
+            used.add(ax)
+            items[i]["why"].append(f"同じ容量の軸が{len(items[i]['rest'])}つ残ったので、番号が最も小さい（若い）軸から割り当てました")
         self._mx_apply()
 
     def _mx_detected(self, res, pos):
@@ -6981,6 +7373,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             return                                       # もう片方の製品が使っている軸は選べない
         it["axis"], it["picked"] = int(axn), True
         it["why"].append("人が選びました")
+        it["human"] = True
         if mx["busy"]:
             self._mx_apply()
         else:
@@ -7040,14 +7433,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
         text = ("機械から読んで自動で決めました（違えば直してください）: " + "／".join(parts)) if parts else ""
         for pos, cmb in enumerate((self.cmb_axis_pick, self.cmb_axis_pick2)):
             it = items[pos]
-            choices = wizard_probe.axis_choices(pr.get("axes"), self._axis_letter, only=it["rest"]) \
-                if (pos in picks and pos not in mx["conflict"]) else []
+            same = list(dict.fromkeys(list(it["cands"]) + ([it["axis"]] if it["axis"] else [])))
+            choices = wizard_probe.axis_choices(pr.get("axes"), self._axis_letter, only=same) \
+                if (pos not in mx["conflict"] and len(same) > 1) else []
             cmb.blockSignals(True)
             cmb.clear()
             if choices:
-                cmb.addItem(f"{it['kind']}の軸を選んでください（機械から決められませんでした）", 0)
+                cmb.addItem(f"{it['kind']}の軸を変えるときだけ選んでください" if it["axis"] else
+                            f"{it['kind']}の軸を選んでください（機械から決められませんでした）", 0)
                 for t, k, _m in choices:
                     cmb.addItem(t, k)
+                if it["axis"]:
+                    cmb.setCurrentIndex(next((n for n in range(cmb.count()) if cmb.itemData(n) == it["axis"]), 0))
             cmb.blockSignals(False)
             self._set_row_visible(cmb, bool(choices))
             lab = self.fm.labelForField(cmb)
@@ -7055,6 +7452,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 lab.setText(f"{it['kind']}の軸は？（機械の各軸の 2020）")
         self.lbl_auto.setText(text)
         self.lbl_auto.setVisible(bool(text))
+        self._pick_why = "／".join(f"{it['kind']}: {it['why'][-1]}" for it in items if it["axis"] and it["why"])
         self._update_candidates()
 
     def done(self, r):
@@ -7119,6 +7517,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             for i, (c, asg) in enumerate(self._cand):          # 同じ号機・同じ軸の候補があれば選んでおく
                 if str(c.unit) == pr["unit"] and [nc_param.axis_name(seiban_flow_axis(a)) for a in asg] == [letter]:
                     self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(i))
+                    self._auto_sel = (str(c.unit), list(asg))
                     break
         if notes:
             self.lbl_auto.setText("機械から読んで自動で決めました（違えば直してください）: " + "／".join(notes))
@@ -7613,13 +8012,14 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if temp and self._decided_axis:
             # 機械から決めた軸（2165 など）が書く先。仮モーターの容量で軸を選び直さない
             un = str((self._machine_probe or {}).get("unit") or "")
+            uns = [un] if un else [str(u) for u in self._connected_units()]     # 同じ仕様の号機が複数なら、その全部
             ax = self._decided_axis
             fixed = []
             for c in self._controllers:
-                if un and str(c.unit) == un and ax in c.axes():
+                if str(c.unit) in uns and ax in c.axes():
                     fixed.append((c, [ax]))
             if fixed:
-                self._cand = fixed + [(c, a) for c, a in self._cand if str(c.unit) != un]
+                self._cand = fixed + [(c, a) for c, a in self._cand if str(c.unit) not in uns]
         fixed_multi = False
         kinds_sel = [f["kind"] for f in sel]
         if len(sel) == 2 and len(set(kinds_sel)) == 2 and all(k in self._decided_axes for k in kinds_sel):
@@ -7646,6 +8046,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._used_servo_reqs = [r.get("必要サーボ", "") for r in used_rules if r.get("必要サーボ")]
         self._used_rule_notes = [f"末尾 -{r.get('末尾')} → {r.get('見る列')} {r.get('条件')}" for r in used_rules]
         conn_unit = self._connected_unit()
+        conn_units = self._connected_units()
+        if temp and conn_units and len(sel) == 1 and not by_unit and not self._decided_axis:
+            # つながっている機械の軸は、機械から読んだ軸（名前と容量）だけを先に出す。マスタの全部の号機×軸は後ろ
+            pr0 = self._machine_probe or {}
+            letters = [self._axis_letter(k) for k in sorted(pr0.get("axes") or {})]
+            mine = [(c, [a]) for u in conn_units for c in self._controllers if str(c.unit) == u
+                    for a in c.axes() if not letters or a in letters]
+            self._cand = mine + [(c, a) for c, a in self._cand if str(c.unit) not in conn_units]
+        if temp and len(conn_units) > 1:
+            self._cand = [(c, a) for c, a in self._cand if str(c.unit) in conn_units]    # 同じ条件の号機だけ
         if conn_unit:
             self._cand.sort(key=lambda ca: 0 if str(ca[0].unit) == conn_unit else 1)
         # 選択内容→必要な軸数の要約（両方なら2軸とも載る号機、片方なら1軸でよい号機）
@@ -7656,8 +8066,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.lbl_need.setText(
                 f"{kinds}（{len(sel)}軸）仮モーターなので、製品の容量・電圧では絞りません。"
                 + (f"仮モーター（容量 {mcap}）に合う号機だけを出しています。" if by_unit and mcap else "")
-                + ("号機を選んでください（使う軸は、つないだあと、機械の 2020 が仮モーターの番号と同じ軸に自動で決まります）"
-                   f" … {len(self._cand)}台" if by_unit else
+                + (("号機は機械から自動で選びました（使う軸も機械の 2020 から自動で決まります。違えば選び直せます）" if conn_unit else
+                    "号機を選んでください（使う軸は、つないだあと、機械の 2020 が仮モーターの番号と同じ軸に自動で決まります）")
+                   + f" … {len(self._cand)}台" if by_unit else
                    f"号機と軸を選んでください … {len(self._cand)}通り"))
         else:
             self.lbl_need.setText(
@@ -7679,21 +8090,24 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 self.cmb_ctrl.addItem(f"{star}{c.label()}  →  {amap}", i)
                 if star and pick < 0:
                     pick = i
+            if pick < 0 and temp and len(conn_units) > 1 and self._decided_axis:
+                # 同じ仕様の号機が複数（20・21 など）: 止めずに、先頭の号機・決めた軸で先へ進める（号機は登録で決まる）
+                pick = next((i for i, (c, a) in enumerate(self._cand)
+                             if str(c.unit) == conn_units[0] and list(a) == [self._decided_axis]), -1)
             # つながっている機械は自動で選ぶ。仮モーターで軸が何通りもあるときは、軸は人が選ぶ
             if pick >= 0 and (not temp or by_unit or fixed_multi):
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(pick))
             elif len(self._cand) == 1:                 # 候補が1つなら、聞かずに選ぶ
                 self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(0))
             # 前の選択は「候補が1つだけで自動で選ばれたもの」なら引き継がない（つながっている機械の自動選択を消さない）
-            if prev is not None and not (getattr(self, "_ctrl_auto_pick", False) and pick >= 0):
+            if prev is not None and not fixed_multi and not (getattr(self, "_ctrl_auto_pick", False) and pick >= 0):
                 same = [i for i, (c, a) in enumerate(self._cand)
                         if (str(c.unit), tuple(a)) == prev] or \
                        [i for i, (c, a) in enumerate(self._cand) if str(c.unit) == prev[0]]
                 if same:
                     self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(same[0]))
             if conn_unit:
-                self.lbl_need.setText(self.lbl_need.text()
-                                      + f"\n機械につながっています: {conn_unit}号機（台帳）")
+                self.lbl_need.setText(self.lbl_need.text() + "\n" + self._conn_unit_note(conn_unit, conn_units))
         self._ctrl_auto_pick = len(self._cand) == 1
         self.cmb_ctrl.blockSignals(False)
         self._on_ctrl_changed()
@@ -7783,31 +8197,31 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.lbl_motor_info.setText(
                 f"モーター {mid} は番号表にありません。号機は全部出します（つないだあと、機械から確かめます）")
 
+    def _connected_units(self):
+        """機械の号機の候補。台帳／IP で分かれば1つ、台帳に無く容量で推したときは同じ条件の全部（先頭が選ばれた号機）。"""
+        pr = getattr(self, "_machine_probe", None)
+        if pr and pr.get("unit_from") == "guess":
+            g = [str(u) for u in (pr.get("unit_guess") or [])]
+            return g or ([str(pr["unit"])] if pr.get("unit") else [])
+        u = self._connected_unit()
+        return [u] if u else []
+
+    def _conn_unit_note(self, conn_unit, conn_units):
+        pr = getattr(self, "_machine_probe", None) or {}
+        if pr.get("unit_from") == "guess":
+            if len(conn_units) > 1:
+                return ("・".join(f"{u}号機" for u in conn_units) + f" が同じ条件だったので {conn_unit}号機 に決めました"
+                        "（マスタの先頭の号機を選ぶ規則）。違えば選び直してください")
+            return (f"この機械は {conn_unit}号機 と判断しました"
+                    "（各軸の容量が制御装置マスタと一致。違えば選び直してください）")
+        return f"機械につながっています: {conn_unit}号機（台帳）"
+
     def _connected_unit(self):
         """いま LAN でつながる機械の号機（台帳の IP に 8193 で声をかけるだけ。台帳に無ければ ''）。10秒は覚えておく。"""
         import time as _t
         pr = getattr(self, "_machine_probe", None)
-        if pr and pr.get("unit"):                      # 開いたとき機械を読んで号機が分かっている
-            return pr["unit"]
-        cache = getattr(self, "_conn_cache", None)
-        if cache and _t.monotonic() - cache[0] < 10:
-            return cache[1]
-        unit = ""
-        try:
-            reg = focas_find.registry_path(self.settings)
-            ips = focas_find.known_ips(reg)[:4]
-            host = str(self.settings.get("focas_host") or "").strip()
-            if host and host not in ips:
-                ips.append(host)
-            for ip in ips:
-                if focas_find.port_open(ip, timeout=0.3):
-                    unit = focas_find.unit_for_ip(reg, ip)
-                    if unit:
-                        break
-        except Exception:
-            unit = ""
-        self._conn_cache = (_t.monotonic(), unit)
-        return unit
+        # 開いたとき機械を読んで、台帳（CNC ID）・容量から決めた号機だけ。IP から号機は決めない
+        return (pr.get("unit") or "") if pr else ""
 
     def _on_ctrl_changed(self, *_):
         idx = self.cmb_ctrl.currentData()
@@ -7815,6 +8229,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         if idx is None or idx < 0 or idx >= len(self._cand):
             self.lbl_assign.setText("")
             self._update_guide()
+            self._update_pick_ui()
             return
         c, asg = self._cand[idx]
         parts = []
@@ -7830,6 +8245,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.lbl_assign.setText(self.lbl_assign.text()
                                     + f"\n※ 号機 {c.unit} のBASICが見つかりません。『使うBASIC』を指定してください。")
         self._update_guide()
+        self._update_pick_ui()
 
     # ----- ③ 作成 -----
     def _gather(self, *, need_out, title="作成"):
@@ -8055,6 +8471,16 @@ class ParamWizardDialog(QtWidgets.QDialog):
             basic_ok=bool(self.e_basic.text().strip() and Path(self.e_basic.text().strip()).is_file()),
             semi_stop=self._semi_stop_text())
 
+    def _fit_columns(self):
+        """左右の列は、見せているものがある列だけ幅をもらう（空の列に横幅を取られない）。"""
+        if not hasattr(self, "_mid"):
+            return
+        simple = self._mode == "simple"
+        left = any(not w.isHidden() for w in (self.box1, self.box_motor))
+        right = any(not w.isHidden() for w in (self.box2, self.box_reg, self.box3))
+        self._mid.setStretch(0, (1 if simple else 3) if (left or not simple) else 0)
+        self._mid.setStretch(1, (1 if simple else 2) if (right or not simple) else 0)
+
     def _apply_mode(self):
         """表示を、いまのモード・段に合わせる（部品は作り直さない。出し入れするだけ）。"""
         simple = self._mode == "simple"
@@ -8070,9 +8496,6 @@ class ParamWizardDialog(QtWidgets.QDialog):
             wd.setVisible(simple)
         for wd in (self.b_adv, self.b_view, self.b_make, self.b_machine):
             wd.setVisible(not simple)
-        if hasattr(self, "_mid"):          # かんたん表示では、見せている側が横いっぱいを使う
-            self._mid.setStretch(0, 3 if not simple else (1 if step == 1 else 0))
-            self._mid.setStretch(1, 2 if not simple else (0 if step == 1 else 1))
         self.panel4.setVisible(simple and step == 4)
         offer, offer_text = (W.program_offer(step, params_ok=self._params_ok or self._params_same)
                              if simple else (False, ""))
@@ -8090,6 +8513,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.panel.setVisible(False)
             self.b_file.setVisible(False)
             self.lbl_guide.setVisible(True)
+            self._update_reg_box()
+            self._fit_columns()
             return
         st = W.step_state(step, **self._step_inputs())
         self.lbl_flow.setVisible(False)
@@ -8098,7 +8523,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         places_missing = not (self._abs_dir("param_product_dir") and Path(self._abs_dir("param_product_dir")).is_dir())
         self.box0.setVisible(step == 1 and places_missing)
         self.box1.setVisible(step == 1)
-        self.box_motor.setVisible(step == 1 and bool(self._files) and bool(self._selected_files()))
+        self.box_motor.setVisible(bool(self._files) and bool(self._selected_files())
+                                  and (step == 1 or (step == 2 and self._pick_open)))
         self._show_motor_info()
         self.box2.setVisible(step == 2)
         basic_missing = not self.e_basic.text().strip()
@@ -8141,6 +8567,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                            "font-weight:bold;")
         else:
             self.lbl_decided.setStyleSheet("color:#475569;")
+        if st.get("warnings") and step < 3:
+            self.lbl_decided.setText(self.lbl_decided.text() + "\n⚠ " + "\n⚠ ".join(st["warnings"]))
+        self._update_reg_box()
+        self._update_pick_ui()
+        self._fit_columns()
         if self.embedded:
             self._hide_long_text()
 
@@ -14683,12 +15114,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     and self.has_view_data() and self.b_save.isEnabled())   # 読み込んだ過去の結果は数えない
         ng, spec = self._flow_verdict() if finished else (0, False)
         host = getattr(self, "_focas_watch_host", "") or ""
-        unit = ""
-        if host:
-            try:
-                unit = focas_find.unit_for_ip(focas_find.registry_path(self.settings), host)
-            except Exception:
-                unit = ""
+        unit = ""                        # IP から号機は決めない
         steps = self._flow_steps
         mode = self.current_mode()
         cur = next((x for x in steps if x["mode"] == mode), None)
@@ -15025,12 +15451,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not host:
             self.b_machine.setVisible(False)
             return
-        try:
-            unit = focas_find.unit_for_ip(focas_find.registry_path(self.settings), host)
-        except Exception:
-            unit = ""
-        self.b_machine.setText(f"機械が見えます {host}" + (f"（前回 号機{unit}）" if unit else "")
-                               + " ▶ つなぐ")
+        self.b_machine.setText(f"機械が見えます {host} ▶ つなぐ")
         self.b_machine.setVisible(True)
         self.statusBar().showMessage(
             f"LAN に機械が見えました（{host}）。右下のボタンで FOCAS につなげます", 8000)

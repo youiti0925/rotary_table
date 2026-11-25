@@ -149,18 +149,23 @@ class TestTwoAxisAuto(TwoAxisBase):
         self.assertEqual(self.cur(w), ("23", ["A", "B"]))
         self.assertNotEqual(*w._decided_axes.values())
 
-    def test_only_the_undecided_product_gets_a_combo_of_its_candidates(self):
-        w, client = self.make(t_hv=False, r_hv=True)            # 回転は A・B のどちらにも製品の値が無い
+    def test_undecided_product_is_assigned_automatically_and_change_lists_same_capacity_axes(self):
+        w, client = self.make(t_hv=False, r_hv=True)            # 回転は A・B のどちらにも製品の値が無い → 人に選ばせず最後の B
         self.search(w)
-        self.assertEqual(w._decided_axes, {"傾斜": "Z"})
-        self.assertTrue(w.cmb_axis_pick.isHidden())              # 傾斜は決まったので出さない
-        self.assertFalse(w.cmb_axis_pick2.isHidden())            # 回転だけ
+        self.assertEqual(w._decided_axes, {"傾斜": "Z", "回転": "A"})        # 回転は A・B のどちらにも値の手がかりが無い → 若い A
+        self.assertEqual(self.cur(w), ("23", ["Z", "A"]))
+        self.assertEqual(w.e_motor_id2.text(), "293")
+        self.assertIn("最も小さい", w.lbl_auto.text())
+        w._step = 2
+        w._apply_mode()
+        self.assertTrue(w.cmb_ctrl.isHidden())
+        self.assertEqual(w.lbl_pick.text().splitlines()[0], "使う機械：23号機　傾斜: Z軸／回転: A軸　自動で決めました")
+        self.assertIn("理由:", w.lbl_pick.text())
+        self.assertTrue(w.cmb_axis_pick.isHidden() and w.cmb_axis_pick2.isHidden())      # ［変える］まで出さない
+        w.b_change.click()
+        self.assertFalse(w.cmb_axis_pick2.isHidden())
         texts = self.combo_texts(w.cmb_axis_pick2)
-        self.assertEqual([t for t in texts if "軸（" in t], ["A軸（293）", "B軸（293）"])
-        self.assertIn("回転の軸を選んでください", texts[0])
-        self.assertIn("傾斜: ", w.lbl_auto.text())
-        self.assertIn("回転: 軸を決められませんでした", w.lbl_auto.text())
-        self.assertEqual(w.e_motor_id2.text(), "")
+        self.assertEqual([t for t in texts if "軸（" in t], ["A軸（293）", "B軸（293）"])         # 同じ容量の軸だけ
         i = texts.index("B軸（293）")
         w.cmb_axis_pick2.setCurrentIndex(i)
         w.cmb_axis_pick2.activated.emit(i)
@@ -168,7 +173,6 @@ class TestTwoAxisAuto(TwoAxisBase):
         self.assertEqual(w._decided_axes, {"傾斜": "Z", "回転": "B"})
         self.assertEqual(self.cur(w), ("23", ["Z", "B"]))       # 人が選んだ軸が書く先
         self.assertEqual(w.e_motor_id2.text(), "293")
-        self.assertTrue(w.cmb_axis_pick2.isHidden())
         self.assertEqual(client.machine.writes, [])
 
     def search_wait(self, w):
@@ -181,23 +185,21 @@ class TestTwoAxisAuto(TwoAxisBase):
             self.app.processEvents()
         self.app.processEvents()
 
-    def test_same_capacity_axes_are_assigned_in_order_when_nothing_else_decides(self):
-        w, _ = self.make(t_hv=True, r_hv=True)                  # 両方 A・B 候補で値の手がかりが無い
+    def test_same_capacity_axes_are_assigned_from_the_lowest_axis_up(self):
+        w, _ = self.make(t_hv=True, r_hv=True)                  # 両方 A・B 候補で値の手がかりが無い → 若い順に仮決め
         self.search(w)
         self.assertEqual(w._decided_axes, {"傾斜": "A", "回転": "B"})
         self.assertEqual(self.cur(w), ("23", ["A", "B"]))
-        self.assertIn("選んだ順に割り当てました", w.lbl_auto.text())
-        self.assertTrue(w.cmb_axis_pick.isHidden() and w.cmb_axis_pick2.isHidden())
-        swapped = [list(a) for c, a in w._cand if str(c.unit) == "23"]
-        self.assertIn(["B", "A"], swapped)                      # 入れ替えは人が選べる
+        self.assertNotEqual(*w._decided_axes.values())          # 同じ軸は2回使わない
+        self.assertIn("番号が最も小さい（若い）軸から割り当てました", w.lbl_auto.text())
 
     def test_cannot_pick_the_axis_the_other_product_uses(self):
         w, _ = self.make(t_hv=False, r_hv=True)
-        self.search(w)                                          # 傾斜は Z。回転は A・B のコンボ
+        self.search(w)                                          # 傾斜は Z。回転は A・B から自動で B
         w.cmb_axis_pick2.addItem("Z軸（273）", 3)               # 無理に出しても、同じ軸にはならない
         w.cmb_axis_pick2.setCurrentIndex(w.cmb_axis_pick2.count() - 1)
         w._pick_axis_multi(1)
-        self.assertEqual(w._decided_axes, {"傾斜": "Z"})
+        self.assertEqual(w._decided_axes, {"傾斜": "Z", "回転": "A"})
 
     def test_one_product_only_keeps_the_existing_behaviour(self):
         w, client = self.make(t_hv=False, r_hv=True, r_hits=(5,))
@@ -263,7 +265,7 @@ class TestTwoAxisSameCapacity(TwoAxisBase):
         w, client = self.make(t_hv=False, r_hv=False, t_model="αiF4/5000", r_model="αiF4/5000",
                               t2020="273", r2020="273")
         self.search(w)
-        self.assertEqual(w._decided_axes, {"傾斜": "X", "回転": "Y"})
+        self.assertEqual(w._decided_axes, {"傾斜": "X", "回転": "Y"})      # 同じ容量が X・Y → 若い順
         self.assertEqual(self.cur(w), ("23", ["X", "Y"]))
         self.assertEqual(w.cmb_motor.currentData(), "temp")           # X・Y の 2020 は 255 で製品の 273 と違う
         self.assertEqual(w._motor_kind, {})                           # 両方仮モーター（製品ごとの区別は要らない）

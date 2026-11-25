@@ -22,7 +22,8 @@ class TestSteps(unittest.TestCase):
     def test_step2_needs_controller_and_basic(self):
         self.assertFalse(W.step_state(2)["can_next"])
         r = W.step_state(2, ctrl_chosen=True)
-        self.assertIn("BASIC", r["missing"][0])
+        self.assertTrue(r["can_next"])                       # BASIC が無くても止めない
+        self.assertIn("BASIC", r["warnings"][0])
         self.assertTrue(W.step_state(2, ctrl_chosen=True, basic_ok=True)["can_next"])
 
     def test_four_steps_and_program_offer(self):

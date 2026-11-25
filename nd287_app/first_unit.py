@@ -134,3 +134,72 @@ def register_first_unit(settings, folder, info, unit, *, app_dir=None):
     blank = [n for n, v in (("電圧", ctl.voltage), ("SERVO", ctl.servo)) if not v]
     blank += [f"{a}軸の容量" for a in controllers.AXES if ctl.amps.get(a) and not ctl.caps.get(a)]
     return {"unit": u, "file": str(dest), "master": master_state, "controller": ctl, "blank": blank}
+
+
+def register_from_machine(settings, client, unit, *, host, port, controllers_list=None, cancel=None, progress=None,
+                          app_dir=None):
+    """つないだ機械の控え（BASIC）を読むだけで取り、号機 unit の BASIC として登録し、台帳に CNC ID と号機を残す。
+
+    機械には何も書かない。client は make_client の戻り（呼ぶ側が最後に close する）。
+    その号機の BASIC が既にあれば（BASIC フォルダ・機械から取ったBASIC のどちらでも）上書きしない: 控えは取らず、
+    台帳にだけ残す（result["existing"] にその BASIC のパス）。戻り値は register_first_unit と同じ dict に
+    "cnc_id" と "existing" を足したもの。失敗は FirstUnitError（控えが不完全・同じ号機がマスタにある 等）。
+    """
+    u = clean_unit(unit)
+    client.call("connect", {"host": host, "port": port, "timeout": focas_client_timeout(settings),
+                            "families": dict(settings.get("focas_families") or {})})
+    reg = focas_find.registry_path(settings, app_dir)
+    basic_dir = str((settings or {}).get("param_basic_dir") or "").strip()
+    have = (controllers.basic_file_for_unit(basic_dir, u)
+            or controllers.basic_file_for_unit(str(machine_basic_dir(settings, app_dir)), u))
+    if have:
+        cnc_id = client.call("identify").get("cnc_id")
+        if not cnc_id:
+            raise FirstUnitError("機械ごとの番号（CNC ID）が読めていないので登録できません")
+        focas_find.remember(reg, cnc_id, ip=host, unit=u)
+        return {"unit": u, "file": "", "existing": str(have), "master": "exists", "controller": None,
+                "blank": [], "cnc_id": cnc_id}
+    res = focas_backup.take_backup(
+        client, focas_backup.resolve_root(settings), settings, purpose="BASIC登録", unit=u, host=host,
+        port=port, controllers=controllers_list, cancel=cancel, progress=progress)
+    if not res.complete:
+        raise FirstUnitError("控えが完全ではないので登録できません: " + "／".join(list(res.problems)[:3]))
+    out = register_first_unit(settings, res.folder, res.info, u, app_dir=app_dir)
+    cnc_id = (res.info or {}).get("cnc_id")
+    focas_find.remember(reg, cnc_id, ip=host, unit=u)
+    out.update({"cnc_id": cnc_id, "existing": ""})
+    return out
+
+
+def focas_client_timeout(settings):
+    from . import focas_client
+    return focas_client.connect_timeout(settings)
+
+
+def apply_master_fix(master_path, unit, caps, cnc="", now=None, order=None):
+    """マスタの号機 unit の行を、機械の値に直す。直す前に、同じフォルダへ <名前>.bak_<日時> の控えを残す。
+
+    caps は {軸名: 容量}（機械で読めた軸）。order は機械の軸名の並び（省略時は caps の軸）。機械に無い軸の容量とアンプ型式は空にする。
+    アンプ・SERVO・電圧など、他の列はそのまま。cnc が空でなければ CNCユニット列も直す。戻り値は控えのパス。
+    """
+    import time
+    p = Path(master_path)
+    ctl = next((c for c in controllers.load_controllers(str(p)) if str(c.unit).strip() == str(unit).strip()), None)
+    if ctl is None:
+        raise FirstUnitError(f"号機{unit}はマスタにありません")
+    stamp = time.strftime("%Y%m%d_%H%M%S", now or time.localtime())
+    bak, n = p.with_name(f"{p.name}.bak_{stamp}"), 1
+    while bak.exists():
+        n += 1
+        bak = p.with_name(f"{p.name}.bak_{stamp}_{n}")
+    shutil.copy2(p, bak)
+    have = set(order if order is not None else caps)
+    for a in controllers.AXES:
+        if a in caps:
+            ctl.caps[a] = controllers._norm_cap(caps[a])
+        elif a not in have:
+            ctl.caps[a], ctl.amps[a] = "", ""
+    if cnc:
+        ctl.cnc = cnc
+    controllers.upsert_controller(str(p), ctl)
+    return str(bak)

@@ -5,6 +5,7 @@
 書かない・控えも取らない。LAN を探し回らない（台帳の IP と settings の focas_host に 8193 で届くときだけ）。
 決め方（decide）は純関数。推測で埋めない: 確実に決まらない所は空のまま返す。
 """
+import re
 from collections import Counter
 
 from . import focas_client, focas_find
@@ -31,11 +32,78 @@ def candidate_hosts(settings, registry_path):
     return ips
 
 
+def basic_axis_caps(text):
+    """BASIC（パラメータの控え）の軸ごとの容量を [(軸名, 容量)] で、軸スロット A1.. の順に返す（1020 が軸名の軸だけ・2165 を容量に）。
+    容量が読めない軸は ''。"""
+    from . import controllers, fanuc_param
+    vm = {}
+    for (num, label), v in fanuc_param.values_map(text).items():
+        vm[(fanuc_param._norm_num(num), label)] = v
+    n1020, n2165 = fanuc_param._norm_num("1020"), fanuc_param._norm_num("2165")
+    out = []
+    for i in range(1, 13):
+        code = vm.get((n1020, f"A{i}"))
+        if code is None or not str(code).strip().lstrip("-").isdigit() or int(code) not in controllers._AXIS_CODE:
+            continue
+        out.append((controllers._AXIS_CODE[int(code)], controllers.amr_to_capacity(vm.get((n2165, f"A{i}")))))
+    return out
+
+
+def axis_diff_lines(who, unit, have, mach, order):
+    """軸ごとの食い違いの文。who は「マスタ」「BASIC」。have {軸名: 容量}（マスタ／BASIC にある軸）、
+    mach {軸名: 容量}（機械で読めた軸）、order は機械の軸名の並び。"""
+    lines = []
+    for a in order:
+        mc = mach.get(a, "")
+        if a not in have:
+            lines.append(f"{who}の{unit}号機に {a}軸はありません（機械は {mc or '容量が読めません'} です）")
+        elif mc and have[a] != mc:
+            lines.append(f"{who}の{unit}号機の {a}軸は {have[a] or '空'}、機械は {mc} です")
+    for a in have:
+        if a not in order:
+            lines.append(f"機械に {a}軸はありません（{who}の{unit}号機は {have[a] or '容量なし'} です）")
+    return lines
+
+
+def machine_caps(axes, letter_of):
+    """機械から読んだ {軸名: 容量}（読めた軸だけ）と、軸名の並び。"""
+    from . import controllers
+    mach, order = {}, []
+    for k in sorted(axes or {}):
+        letter = letter_of(k)
+        cap = controllers.amr_to_capacity(((axes or {})[k] or {}).get("amr"))
+        order.append(letter)
+        if cap:
+            mach[letter] = cap
+    return mach, order
+
+
+def master_diff(ctl, probe, letter_of):
+    """機械から読んだ 2165 と、マスタのその号機の行の食い違い（machine_decide.mismatch を使う。赤い帯の文と、直す値）。
+
+    戻り値 {"lines": 文のリスト（空なら一致）, "caps": {軸名: 容量}（機械で読めた軸）, "order": 機械の軸名の並び}。
+    """
+    from . import machine_decide
+    mach, order = machine_caps((probe or {}).get("axes"), letter_of)
+    lines = [f"マスタの{ctl.unit}号機の {a}軸は {mc or '空'}、機械は {hc} です"
+             for a, mc, hc in machine_decide.mismatch(probe, ctl)]
+    lines += [f"機械に {a}軸はありません（マスタの{ctl.unit}号機は {ctl.caps[a]} です）"
+              for a in ctl.axes() if a not in order]
+    return {"lines": lines, "caps": mach, "order": order}
+
+
+def basic_diff(text, unit, axes, letter_of):
+    """機械から読んだ容量と、その号機の BASIC（text）の食い違いの文のリスト（空なら一致）。BASIC は直さない。"""
+    mach, order = machine_caps(axes, letter_of)
+    return axis_diff_lines("BASIC", unit, dict(basic_axis_caps(text)), mach, order)
+
+
 def read_machine(settings, client_factory, *, port_open=None, on_client=None):
     """機械を読む。つながらない・読めないときは None（静かに諦める）。
 
-    戻り値 {"host","unit","cnc_id","axis_names","axes": {軸番号: {"motor_id","amr"}}}。
-    unit は台帳に無ければ ''。
+    戻り値 {"host","unit","unit_from","unit_guess","cnc_type","cnc_id","axis_names","axes": {軸番号: {"motor_id","amr"}}}。
+    unit は CNC ID が台帳にあるときだけ入る（unit_from "registry"）。IP から号機は決めない。
+    台帳に無いときの号機は、呼ぶ側が machine_decide.identify_unit（2165 をマスタと照らす）で決める。
     """
     port_open = port_open or focas_find.port_open
     try:
@@ -73,9 +141,15 @@ def read_machine(settings, client_factory, *, port_open=None, on_client=None):
             if k in axes:
                 axes[k]["motor_id" if it.get("no") == MOTOR_ID_PARAM else "amr"] = _clean(it.get("value"))
         cnc_id = ident.get("cnc_id") or ""
-        unit = focas_find.unit_for(reg, cnc_id) or focas_find.unit_for_ip(reg, host)
-        return {"host": host, "unit": unit, "cnc_id": cnc_id, "axis_names": list(names),
-                "axes": axes}
+        unit, unit_from = "", ""
+        if cnc_id:
+            unit = focas_find.unit_for(reg, cnc_id)
+            unit_from = "registry" if unit else ""
+        guess = []
+        return {"host": host, "unit": unit, "unit_from": unit_from, "unit_guess": guess,
+                "cnc_type": str(ident.get("cnc_type") or "").strip(),
+                "mt_type": str(ident.get("mt_type") or "").strip(), "cnc_id": cnc_id,
+                "axis_names": list(names), "axes": axes}
     except Exception:
         return None
     finally:
@@ -186,7 +260,16 @@ def decide(axes, product_id):
 def conn_text(probe, axis_name):
     """画面最上段の接続行に出す、読んだ事実だけの文。axis_name(軸番号) → 'B' など。"""
     unit = probe.get("unit") or ""
-    head = "● 機械につながっています: " + (f"{unit}号機" if unit else "号機は台帳にありません")
+    guess = list(probe.get("unit_guess") or [])
+    if unit and probe.get("unit_from") == "guess":
+        head = f"● 機械につながっています: {unit}号機（容量から推定）"
+    elif unit:
+        head = f"● 機械につながっています: {unit}号機"
+    elif guess:
+        head = ("● 機械につながっています: 号機は台帳にありません（" + "か".join(f"{g}号機" for g in guess)
+                + ("（同じ仕様）" if len(guess) > 1 else "（容量から推定）") + "）")
+    else:
+        head = "● 機械につながっています: 号機は台帳にありません"
     by_id = {}
     for k in sorted(probe.get("axes") or {}):
         mid = _clean(probe["axes"][k].get("motor_id"))
@@ -255,6 +338,30 @@ def count_matches(product, machine):
     for ax, vals in (machine or {}).items():
         out[int(ax)] = sum(1 for no, v in (vals or {}).items() if no in prod and same_value(prod[no], v))
     return out
+
+
+def break_tie(cands, counts=None):
+    """値の一致数で決めた残りを、若い順に仮決めする（machine_decide.choose_axes と同じ規則。非同期で読んだ一致数を使うため残してある）。
+    ①製品らしい値の一致数が最も多い軸 → ②番号が最も小さい軸。戻り値 (選んだ軸, 同条件の軸のリスト, 規則の説明)。"""
+    pool = sorted(int(k) for k in (cands or []))
+    if not pool:
+        return 0, [], ""
+    how = "番号が最も小さい（若い）軸を選ぶ規則"
+    if counts:
+        best = max(counts.get(k, 0) for k in pool)
+        top = [k for k in pool if counts.get(k, 0) == best]
+        if len(top) < len(pool):
+            pool, how = top, "製品らしい値の一致が最も多い軸を選ぶ規則"
+    if len(pool) > 1:
+        how = "同じ条件のうち番号が最も小さい（若い）軸を選ぶ規則"
+    return pool[0], pool, how
+
+
+def common_voltage(ctls, units):
+    """号機の候補（同じ仕様の複数）の電圧が全部同じならそれ（'200V'/'400V'）。違う・不明は ''。"""
+    from . import seiban_flow
+    vs = {seiban_flow.controller_voltage(c) for c in (ctls or []) if str(c.unit) in {str(u) for u in (units or [])}}
+    return vs.pop() if len(vs) == 1 else ""
 
 
 def decide_axis(counts, min_hits=MIN_AXIS_HITS, min_lead=MIN_AXIS_LEAD):

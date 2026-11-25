@@ -14632,7 +14632,7 @@ class MainWindow(QtWidgets.QMainWindow):
         どの軸（回転・傾斜）にも、予定の種類の測り方が登録されているかと、フルとセミの保存名が同じにならないかも確かめる。"""
         from . import renzoku as RZ
         model = self.e_model.text().strip()
-        plan = RZ.make_plan(self.kind_table, model)
+        plan = RZ.make_plan(self.kind_table, model, self.is_tilt())
         if plan is None:
             return None
         plan["suffix"] = {}

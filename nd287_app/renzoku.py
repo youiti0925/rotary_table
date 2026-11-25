@@ -36,10 +36,10 @@ def _stage(stage, kind, what):
             "label": f"{STAGE_SHORT[stage]}（{WHAT_JA[ck]}）"}
 
 
-def make_plan(table, model):
+def make_plan(table, model, tilt=None):
     """型式の測る予定 → {"model","stages":[…],"continuous":bool,"problems":[…]}。予定が無ければ None（今までどおり1回測る）。
-    stages は フル → セミ の順（先に測る方は Run で決める）。フルかセミの片方だけ・どちらも無いときは continuous=False。"""
-    rec = K.find_plan(table or {}, str(model or "").strip()) if str(model or "").strip() else None
+    tilt: True=傾斜・False=回転の予定（2軸は別々。傾斜が空なら回転と同じ）・None=最初の1行。stages は フル → セミ の順（先に測る方は Run で決める）。フルかセミの片方だけ・どちらも無いときは continuous=False。"""
+    rec = K.find_plan(table or {}, str(model or "").strip(), tilt) if str(model or "").strip() else None
     if not rec:
         return None
     full, semi = str(rec.get("フルで測る") or "").strip(), str(rec.get("セミで測る") or "").strip()

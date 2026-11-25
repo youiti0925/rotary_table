@@ -13320,7 +13320,8 @@ class MainWindow(QtWidgets.QMainWindow):
         info_grid.addWidget(self.kind_btn_box, 6, 0, 1, 2)
         self.kind_btn_box.setVisible(False)
         self.lbl_kind_source = QtWidgets.QLabel("")
-        self.lbl_kind_source.setWordWrap(True)
+        self.lbl_kind_source.setWordWrap(False)                # 折り返すと窓が高くなる。長いときは切れ、全文は吹き出し
+        self.lbl_kind_source.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.lbl_kind_source.setStyleSheet("color:#555;")
         info_grid.addWidget(self.lbl_kind_source, 7, 0, 1, 2)
         self.lbl_kind_source.setVisible(False)
@@ -14302,7 +14303,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if tilt and g == "backlash":
                 continue
             parts.append(f"{name}: {jr['source'].get(g, '未登録')}")
-        lb.setText("／".join(parts))
+        full = "／".join(parts)
+        short = full.replace("の登録", "").replace("測り方: ", "測り方:").replace("バックラッシの規格: ", "バックラッシ:").replace("傾きの規格: ", "傾き:").replace("前の表（合否判定.csv）", "前の表")
+        lb.setText(short)
+        lb.setToolTip(full)
         lb.setVisible(True)
 
     def _show_kind_problems(self):
@@ -14311,7 +14315,8 @@ class MainWindow(QtWidgets.QMainWindow):
         text = KR.problems_text(self.kind_table, model or None)
         lb = getattr(self, "lbl_kind_problem", None)
         if lb is not None:
-            lb.setText(text)
+            lb.setMaximumWidth(520)                              # 長い文で窓の幅・高さを押し広げない（全文は吹き出し）
+            lb.setText(lb.fontMetrics().elidedText(text, QtCore.Qt.ElideRight, 500))
             lb.setToolTip("\n".join(KR.K.problems_for(self.kind_table, model or None)))
             lb.setVisible(bool(text))
         return text

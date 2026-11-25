@@ -211,3 +211,49 @@ class StepStrip(QtWidgets.QWidget):
                 p.drawLine(QtCore.QPointF(x + gap, cy), QtCore.QPointF(x + gap + bar, cy))
                 x += bar + 2 * gap
         p.end()
+
+
+class ElidedLabel(QtWidgets.QLabel):
+    """入る幅に合わせて「…」に省く一行の文字（全文はマウスを乗せると出る。text() は省く前の全文を返す）。
+
+    short_of（文を短くする関数）を渡すと、全文が入らないとき先に短い形を試す。
+    2026-11-25 会社PC（150%表示）: 操作の帯の「データ数…」「受信…」の文字が長く、帯が見える幅を 239 超えて右で切れた。"""
+
+    def __init__(self, text="", parent=None, short_of=None):
+        super().__init__("", parent)
+        self._full = ""
+        self._short_of = short_of
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.setText(text)
+
+    def text(self):
+        return self._full
+
+    def setText(self, text):
+        self._full = str(text or "")
+        self._apply()
+        self.updateGeometry()
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        w = self.fontMetrics().horizontalAdvance(self._full) + 2 * self.margin() + 4 if self._full else 0
+        return QtCore.QSize(w, sh.height())
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        return QtCore.QSize(0, sh.height())
+
+    def _apply(self):
+        full = self._full
+        room = max(0, self.width() - 2 * self.margin() - 2)
+        fm = self.fontMetrics()
+        shown = full
+        if self.width() > 1 and full and fm.horizontalAdvance(full) > room:
+            short = self._short_of(full) if self._short_of else full
+            shown = short if fm.horizontalAdvance(short) <= room else fm.elidedText(short, QtCore.Qt.ElideRight, room)
+        super().setText(shown)
+        self.setToolTip(full if shown != full else "")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply()

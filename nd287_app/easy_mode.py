@@ -482,6 +482,12 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_words.setStyleSheet("QPushButton{background:#FFFFFF;color:#17212B;font-size:14px;font-weight:700;border:2px solid #C5CCD3;border-radius:10px;padding:8px 14px;}QPushButton:hover{border-color:#1560D4;}")
         self.b_words.setVisible(False)
         foot.addWidget(self.b_words)
+        self.b_alarm = QtWidgets.QPushButton("アラーム")
+        self.b_alarm.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_alarm.setStyleSheet("QPushButton{background:#FFFFFF;color:#17212B;font-size:14px;font-weight:700;border:2px solid #C5CCD3;border-radius:10px;padding:8px 14px;}QPushButton:hover{border-color:#1560D4;}")
+        self.b_alarm.clicked.connect(self.open_alarm)
+        self.b_alarm.setVisible(False)
+        foot.addWidget(self.b_alarm)
         self.b_pause = QtWidgets.QPushButton("■ 一旦やめる")
         self.b_pause.setObjectName("sub")
         self.b_pause.setCursor(QtCore.Qt.PointingHandCursor)
@@ -724,6 +730,18 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._back()
         elif key == "save":
             self._save()
+
+    def _update_alarm_button(self):
+        """どの手順にも出る「アラーム」。出ているときは赤く件数。読めていないときは、出ているともいないとも言わない。"""
+        alarms = (self.st or {}).get("alarms")
+        here = STEPS[self.i]["id"] == "alarm_look"
+        self.b_alarm.setVisible(not here)
+        if alarms:
+            self.b_alarm.setText(f"▲ アラーム {len(alarms)} 件")
+            self.b_alarm.setStyleSheet("QPushButton{background:#FDE8E6;color:#B02A20;font-size:14px;font-weight:900;border:2px solid #D43A2F;border-radius:10px;padding:8px 14px;}")
+        else:
+            self.b_alarm.setText("アラーム")
+            self.b_alarm.setStyleSheet("QPushButton{background:#FFFFFF;color:#17212B;font-size:14px;font-weight:700;border:2px solid #C5CCD3;border-radius:10px;padding:8px 14px;}QPushButton:hover{border-color:#1560D4;}")
 
     def _open_words(self, ids):
         WordsDialog(self, ids).exec()
@@ -1481,7 +1499,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -1493,6 +1511,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_back.setVisible(True)
         self.b_pause.setVisible(True)
         self.b_words.setVisible(True)
+        self._update_alarm_button()
         inside = sid == "machine_in" and self._wiz is not None
         self.right_w.setVisible(not inside)
         self.art.setVisible(not inside)

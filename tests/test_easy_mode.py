@@ -588,10 +588,10 @@ class TestDialog(unittest.TestCase):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
                              if not b.isHidden() and not dlg.embed.isAncestorOf(b))
-        self.assertEqual(len(vis()), 4)               # もどる・一旦やめる・？ことば・次へ
+        self.assertEqual(len(vis()), 5)               # もどる・一旦やめる・？ことば・アラーム・次へ
         self.pass_choose(dlg)
         self.app.processEvents()
-        self.assertEqual(len(vis()), 4)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
+        self.assertEqual(len(vis()), 5)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
         self.assertTrue(dlg.b_next.isHidden())
         dlg.close()
 
@@ -892,6 +892,20 @@ class TestDialog(unittest.TestCase):
                 d.close()
         f.setPointSize(9)
         QtWidgets.QApplication.instance().setFont(f)
+
+    def test_alarm_button_is_always_there_and_shows_count(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        self.assertFalse(dlg.b_alarm.isHidden())
+        self.assertEqual(dlg.b_alarm.text(), "アラーム")
+        poller.st = F.machine_state({"values": {"emergency": 0, "aut": 0}}, [{"code": "SV0436", "text": "x"}], online=True)
+        dlg.st = poller.st
+        dlg._refresh()
+        self.assertIn("1 件", dlg.b_alarm.text())
+        before = dlg.i
+        dlg.b_alarm.click()
+        self.assertEqual(self.sid(dlg), "alarm_look")          # どの手順からでも飛べる
+        self.assertTrue(dlg.b_alarm.isHidden())                # 着いたら、このボタンは要らない
+        dlg.close()
 
     def test_condition_needs_model(self):
         dlg, host, poller = self.make(S(), flow="cond")

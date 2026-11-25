@@ -17299,6 +17299,8 @@ class MainWindow(QtWidgets.QMainWindow):
         height = header_h + 2 * table.frameWidth() + 4
         for r in range(table.rowCount()):
             rh = max(table.rowHeight(r), floor)
+            if rh < 2 * fm.height():         # 1行に収まる行だけ詰める（折り返した行は触らない）。右下の表が下で切れた（150%で縦の送りが70残った）
+                rh = floor + 2
             table.setRowHeight(r, rh)  # 明示設定＝描画もこの高さ。測定との食い違い防止
             height += rh
         table.setFixedHeight(height)

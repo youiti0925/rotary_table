@@ -13868,7 +13868,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide = main_top.ElidedLabel("")      # 長いときは「…」で省く（右が黙って切れた）
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
-        self.guide.setStyleSheet("padding:1px 10px;")
+        self.guide.setStyleSheet("padding:1px 0px;")
+        self.guide.setMargin(10)               # 左右の余白は margin で（省く幅の計算に入る。padding だと「…」がはみ出して隠れた）
         # ===== 1段目: 仕事の順のかたまり（測る／結果を残す／データを見る／機械）。見本は案A（main_top.py） =====
         toolbar = QtWidgets.QToolBar("操作")
         toolbar.setObjectName("topBar")

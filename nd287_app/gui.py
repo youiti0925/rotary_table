@@ -8820,6 +8820,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
         rl.addStretch(1)
         self.box_p_register.setVisible(False)
         lay.addWidget(self.box_p_register)
+        self.box_p_kinds = QtWidgets.QWidget()              # 登録した種類が複数あって決まらない: どれで作るか選ぶ
+        self.box_p_kinds_lay = QtWidgets.QHBoxLayout(self.box_p_kinds)
+        self.box_p_kinds_lay.setContentsMargins(0, 0, 0, 0)
+        self.box_p_kinds.setVisible(False)
+        lay.addWidget(self.box_p_kinds)
         self.lbl_p_done = QtWidgets.QLabel("")
         self.lbl_p_done.setWordWrap(True)
         self.lbl_p_done.setStyleSheet("color:#166534; font-weight:bold;")
@@ -8863,6 +8868,43 @@ class ParamWizardDialog(QtWidgets.QDialog):
                 return h
             w = w.parent() if hasattr(w, "parent") else None
         return None
+
+    def _p_fill_kind_choices(self, has_problem):
+        lay = self.box_p_kinds_lay
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        host = self._p_host()
+        kinds, cur = [], ""
+        if has_problem and host is not None:
+            try:
+                st = host.easy_kind_state()
+                kinds, cur = st.get("kinds") or [], st.get("kind") or ""
+            except Exception:
+                kinds = []
+        show = bool(kinds) and not cur and not self._kind
+        self.box_p_kinds.setVisible(show)
+        if not show:
+            return
+        lay.addWidget(QtWidgets.QLabel("どの種類で作りますか？"))
+        for k in kinds:
+            b = QtWidgets.QPushButton(k["label"])
+            b.setToolTip(k.get("hint", ""))
+            b.clicked.connect(lambda _c=False, kk=k["kind"]: self._p_pick_kind(kk))
+            lay.addWidget(b)
+        lay.addStretch(1)
+
+    def _p_pick_kind(self, kind):
+        host = self._p_host()
+        try:
+            host.easy_set_kind(kind)
+        except Exception:
+            pass
+        self._kind = kind
+        self._kind_table = None
+        self._p_results = {}
+        self._p_refresh()
 
     def _p_register(self, which):
         """測り方の登録画面を開き、閉じたら、送るプログラムを作り直す（登録できていれば、そのまま先へ進める）。"""
@@ -9006,6 +9048,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             self.lbl_p_problem.setText("\n".join(msgs))
             self.lbl_p_problem.setVisible(bool(msgs))
             self.box_p_register.setVisible(bool(msgs) and bool(self._p_model()) and self._p_host() is not None)
+            self._p_fill_kind_choices(bool(msgs))
             if rebuild_table:
                 self._p_fill_table(plan)
             self._p_states = {}
@@ -16205,7 +16248,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "kind_fn": lambda tilt=None: (self.active_kind(tilt), self.measure_scale),
                 "kind_table_fn": lambda: self.kind_table,
                 "register_kind": lambda: (self.show_kind_conditions(self.e_model.text().strip()), self.refresh_kind_choices()),     # 測定条件が無い型式は、その場で登録して先へ進む
-                "register_cond": self.show_condition_editor}
+                "register_cond": self.show_condition_editor,
+                "kinds_fn": lambda: (self.easy_kind_state().get("kinds") or [], self.active_kind()),     # 登録した種類が複数で、決まらないとき、選んでもらう
+                "set_kind": self.easy_set_kind}
 
     def easy_apply_handoff(self, h):
         """専用画面で測定プログラムを送り終えた: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""

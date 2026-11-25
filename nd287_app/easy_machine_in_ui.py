@@ -1376,6 +1376,16 @@ class MachineInPanel(QtWidgets.QWidget):
             self.prog_plan = {"problems": [f"測定プログラムを作れませんでした: {e}"], "programs": [], "slots": [], "allowed": [],
                               "choice": "", "ambiguous": False, "tilt": False}
 
+    def _prog_pick_kind(self, kind):
+        try:
+            self.env["set_kind"](kind)
+        except Exception as e:
+            self._prog_error = f"種類を入れられませんでした: {e}"
+        self._masters_cache = None
+        self._prog_reset()
+        self._prog_make_plan()
+        self._render()
+
     def _prog_register(self, key):
         """測り方の登録画面を開き、閉じたら送るプログラムを作り直す（登録できていれば、そのまま先へ進める）。"""
         try:
@@ -1552,6 +1562,14 @@ class MachineInPanel(QtWidgets.QWidget):
             self.lbl_text.setText("送るプログラムを作れません。")
             for t in plan["problems"]:
                 self._lab(t, RED)
+            try:
+                kinds, cur = self.env["kinds_fn"]() if self.env.get("kinds_fn") else ([], "")
+            except Exception:
+                kinds, cur = [], ""
+            if kinds and not cur and self.env.get("set_kind"):          # 登録した種類が複数で、機械の読みでも決まらない: 選んでもらう
+                self._lab("どの種類で作りますか？", GREY)
+                for k in kinds:
+                    self._btn(k["label"], lambda kk=k["kind"]: self._prog_pick_kind(kk), "back")
             if self._model() and (self.env.get("register_kind") or self.env.get("register_cond")):
                 self._lab("この型式の測り方が登録されていないときは、ここで登録すると、そのまま先へ進めます。", GREY)
                 if self.env.get("register_kind"):

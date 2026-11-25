@@ -857,6 +857,23 @@ class TestPanelPrograms(PanelBase):
         self.assertEqual(called, ["cond"])
         self.assertEqual(p.page, "prog")
 
+    def test_several_registered_kinds_without_a_choice_are_offered_as_buttons(self):
+        """種類を3つ登録したのに、どれも選ばれていない: 段④に選ぶボタンを出す（選べないで止まらない）。"""
+        picked = []
+        self.m.status["emergency"] = 0
+        p = self.panel(model_fn=lambda: "NOCOND-1",
+                       kinds_fn=lambda: ([{"kind": "セミ・モーター", "label": "モーター"}, {"kind": "フル・スケール付き", "label": "フルクロ"}], ""),
+                       set_kind=lambda k: picked.append(k))
+        self.connected(p)
+        p._skip_params()
+        p.env["model"] = "NOCOND-1"
+        p._prog_make_plan()
+        p._render()
+        texts = " ".join(self.labels(p))
+        self.assertIn("どの種類で作りますか", texts)
+        p._prog_pick_kind("フル・スケール付き")
+        self.assertEqual(picked, ["フル・スケール付き"])
+
     def test_stage_names_include_programs(self):
         p = self.panel()
         self.connected(p)

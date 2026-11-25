@@ -86,7 +86,7 @@ class TestSave(unittest.TestCase):
         self.assertEqual(K.find(t, "OTHER", False, "セミ・モーター")["歯数"], "60")        # ほかの型式はそのまま
         self.assertEqual(K.find(t, "RTV-231", False, "フル・スケール付き")["ホイール刻み"], "10")   # 種類なしの行は残る
         self.assertEqual(K.find_plan(t, "rtv-231")["セミで測る"], "分割だけ")
-        self.assertTrue(Path(str(p) + ".bak").exists())
+        self.assertEqual(len(list((p.parent / K.BACKUP_DIR).glob("*.xlsx"))), 1)      # 日付つきの控え
         # 2回目: 同じ型式の種類の行は置き換わり、増えない
         K.save_model(p, "RTV-231", rotary_by_kind={"セミ・モーター": {"歯数": 80}}, plan={})
         t = K.load(p)
@@ -154,14 +154,42 @@ class TestRowsFromExisting(unittest.TestCase):
 
 
 class TestJudgement(unittest.TestCase):
-    def test_kind_values_and_fallback_to_csv(self):
-        base = {"min_a": -0.6, "min_b": 24.0, "max_a": -1.5, "max_b": 75.0, "slope_h": 3.0, "slope_w": 5.0}
-        j = K.judgement({"MINA": "-0.8", "傾きH": "4"}, base)
-        self.assertEqual(j["min_a"], -0.8)            # 種類の行の値
-        self.assertEqual(j["slope_h"], 4.0)
-        self.assertEqual(j["max_b"], 75.0)            # 空欄は合否判定.csv の値
-        self.assertEqual(K.judgement({}, base)["min_a"], -0.6)
+    BASE = {"min_a": -0.6, "min_b": 24.0, "max_a": -1.5, "max_b": 75.0, "slope_h": 3.0, "slope_w": 5.0}
+
+    def test_group_wise_not_field_wise(self):
+        j = K.judgement({"MINA": "-0.8", "MAXB": "80", "傾きH": "4"}, self.BASE)
+        self.assertEqual(j["min_a"], -0.8)            # バックラッシは行のまとまり（空の欄は0）
+        self.assertEqual(j["min_b"], 0.0)             # 前の表の 24 を混ぜない
+        self.assertEqual(j["max_b"], 80.0)
+        self.assertEqual(j["slope_h"], 4.0)           # 傾きは行のまとまり
+        self.assertNotIn("slope_w", j)                # 片方だけ → 書いていないほうは判定しない（前の表 5 を混ぜない）
+        self.assertEqual(K.judgement({}, self.BASE), {k: v for k, v in self.BASE.items()})   # 全部空 → 前の表
         self.assertIsNone(K.judgement({}, None))
+        self.assertIsNone(K.judgement({"MINA": "-0.8"}, None))                            # MAXB が無い → 使わない
+
+    def test_unreadable_number_does_not_fall_back(self):
+        p = make([{"型式": "J-2", "測定の種類": "セミ・モーター", "歯数": 60, "傾きH": "3,5", "MAXB": 80}])
+        t = K.load(p)
+        self.assertTrue(any("数字として読めません" in x for x in t["problems"]))
+        r = K.resolve_judgement(t, "J-2", False, "セミ・モーター", "", self.BASE)
+        self.assertNotIn("slope_h", r["judge"])       # 傾きのまとまりは使わず、前の表 3 にも落とさない
+        self.assertEqual(r["judge"]["max_b"], 80.0)
+        self.assertTrue(r["problems"])
+        self.assertIn("使いません", r["source"]["slope"])
+
+    def test_source_order_and_no_cross_sheet(self):
+        p = make([{"型式": "J-3", "測定の種類": "", "傾きH": 6, "傾きW": 7},
+                  {"型式": "J-3", "測定の種類": "セミ・モーター", "歯数": 60, "MAXB": 90}],
+                 [{"型式": "J-3", "測定の種類": "", "刻み": 5}])
+        t = K.load(p)
+        r = K.resolve_judgement(t, "J-3", False, "セミ・モーター", "", self.BASE)
+        self.assertEqual(r["source"], {"backlash": "この種類の登録", "slope": "種類なしの登録"})
+        self.assertEqual(r["judge"]["slope_h"], 6.0)
+        r2 = K.resolve_judgement(t, "J-3", True, "", "", self.BASE)     # 傾斜: 回転シートの値・合否判定.csv は使わない
+        self.assertIsNone(r2["judge"])
+        self.assertEqual(r2["source"]["slope"], "未登録")
+        r3 = K.resolve_judgement(t, "NONE-1", False, "", "", self.BASE)  # どの行も無い回転 → 合否判定.csv
+        self.assertEqual(r3["source"]["backlash"], "前の表（合否判定.csv）")
 
     def test_save_adds_missing_columns_and_roundtrip_and_copy_from_csv(self):
         import openpyxl
@@ -181,6 +209,53 @@ class TestJudgement(unittest.TestCase):
         self.assertEqual(rot[0]["傾きW"], 5.0)
 
 
+class TestReading(unittest.TestCase):
+    def test_model_forms_hit_same_row(self):
+        p = make([{"型式": "RB-250", "測定の種類": "セミ・モーター", "歯数": 60}])
+        t = K.load(p)
+        for form in ("RB-250", "ｒｂ－２５０", " rb-250 ", "RB‐250", "RB-250Ri", "rb-250ri"):
+            self.assertEqual(K.find(t, form, False, "セミ・モーター")["歯数"], "60", form)
+        rec, is_kind, via = K.find_via(t, "RB-250Ri", False, "セミ・モーター")
+        self.assertIn("末尾の英字", via)
+
+    def test_fullwidth_digits_and_spaces_readable(self):
+        self.assertEqual(K._num("３.５"), 3.5)
+        self.assertEqual(K._num(" 7 "), 7.0)
+
+    def test_header_typos_and_unknown_columns(self):
+        import openpyxl
+        p = make([{"型式": "H-1", "測定の種類": "セミ・モーター", "歯数": 60, "傾きH": 4}])
+        wb = openpyxl.load_workbook(p)
+        ws = wb[K.SHEET_ROTARY]
+        hdr = [c.value for c in ws[1]]
+        ws.cell(1, hdr.index("傾きH") + 1).value = "傾き H"           # 打ち間違い（空白）
+        ws.cell(1, len(hdr) + 1).value = "社内メモ"                  # 人が足した列
+        wb.save(p)
+        t = K.load(p)
+        self.assertEqual(K.find(t, "H-1", False, "セミ・モーター")["傾きH"], "4")
+        self.assertTrue(any("知らない列" in x and "社内メモ" in x for x in t["problems"]))
+
+    def test_formula_without_value_is_reported(self):
+        import openpyxl
+        p = make([{"型式": "F-1", "測定の種類": "セミ・モーター", "歯数": 60}])
+        wb = openpyxl.load_workbook(p)
+        ws = wb[K.SHEET_ROTARY]
+        hdr = [c.value for c in ws[1]]
+        ws.cell(2, hdr.index("ホイール刻み") + 1).value = "=360/60/10"     # 保存しただけで値が無い式
+        wb.save(p)
+        t = K.load(p)
+        self.assertTrue(any("数字として読めません" in x for x in t["problems"]))
+        self.assertFalse(K.params(K.find(t, "F-1", False, "セミ・モーター"), False)["_ok"])      # 10° などに黙って落とさない
+
+    def test_problems_for_model(self):
+        p = make([{"型式": "A-1", "測定の種類": "セミ・モーター", "歯数": "abc"},
+                  {"型式": "B-1", "測定の種類": "セミ・モーター", "歯数": 60}])
+        t = K.load(p)
+        self.assertTrue(K.problems_for(t, "A-1"))
+        self.assertFalse(K.problems_for(t, "B-1"))
+        self.assertTrue(K.problems_for(t))
+
+
 class TestTiltJudgement(unittest.TestCase):
     def test_tilt_has_own_judgement_columns_and_no_inheritance(self):
         p = make([{"型式": "TW-9", "測定の種類": "", "ホイール刻み": 10, "MINA": -0.6, "傾きH": 3}])
@@ -188,6 +263,51 @@ class TestTiltJudgement(unittest.TestCase):
         t = K.load(p)
         self.assertEqual(K.judgement(K.find(t, "TW-9", True, "セミ・モーター"))["slope_h"], 7.0)
         self.assertIsNone(K.judgement(K.find(t, "TW-9", True, "フル・スケール付き")))       # 空 → 規格なし（回転を引き継がない）
+
+
+class TestSaveInPlace(unittest.TestCase):
+    def test_update_in_place_keeps_order_unknown_columns_formulas_and_validation(self):
+        import openpyxl
+        p = make([{"型式": "A-1", "測定の種類": "セミ・モーター", "歯数": 60},
+                  {"型式": "Z-9", "測定の種類": "", "ホイール刻み": 1},
+                  {"型式": "A-1", "測定の種類": "セミ・駆動装置", "ホイール刻み": 2}])
+        wb = openpyxl.load_workbook(p)
+        ws = wb[K.SHEET_ROTARY]
+        hdr = [c.value for c in ws[1]]
+        ws.cell(1, len(hdr) + 1).value = "社内メモ"
+        ws.cell(2, len(hdr) + 1).value = "人が書いた"
+        ws.cell(2, hdr.index("ホイール刻み") + 1).value = "=360/60/10"
+        wb.save(p)
+        K.save_model(p, "a-1", {"セミ・モーター": {"歯数": "72", "ブロック数": "4"},
+                               "セミ・駆動装置": {"ホイール刻み": "2"}})
+        wb = openpyxl.load_workbook(p)
+        ws = wb[K.SHEET_ROTARY]
+        hdr = [c.value for c in ws[1]]
+        col = {h: i + 1 for i, h in enumerate(hdr)}
+        self.assertEqual([ws.cell(r, 1).value for r in (2, 3, 4)], ["A-1", "Z-9", "A-1"])          # 行の順番はそのまま
+        self.assertEqual(ws.cell(2, col["歯数"]).value, 72)
+        self.assertEqual(ws.cell(2, col["ブロック数"]).value, 4)
+        self.assertEqual(ws.cell(2, col["社内メモ"]).value, "人が書いた")                          # 人が足した列は残る
+        self.assertEqual(ws.cell(2, col["ホイール刻み"]).value, "=360/60/10")                      # 式は消さない
+        self.assertEqual(ws.max_row, 4)                                                            # 行は増えていない
+        self.assertTrue(len(wb[K.SHEET_ROTARY].data_validations.dataValidation) >= 1)             # 一覧から選ぶ
+
+    def test_delete_asks_and_can_stop(self):
+        p = make([{"型式": "D-1", "測定の種類": "セミ・モーター", "歯数": 60},
+                  {"型式": "D-1", "測定の種類": "セミ・駆動装置", "ホイール刻み": 2}])
+        asked = []
+        with self.assertRaises(RuntimeError):
+            K.save_model(p, "D-1", {"セミ・モーター": {"歯数": "60"}}, confirm_delete=lambda n: (asked.append(n), False)[1])
+        self.assertTrue(asked and "駆動装置" in asked[0][0])
+        self.assertEqual(len(K.load(p)["rotary"]), 2)               # 止めたので何も消えていない
+        K.save_model(p, "D-1", {"セミ・モーター": {"歯数": "60"}}, confirm_delete=lambda n: True)
+        self.assertEqual(len(K.load(p)["rotary"]), 1)
+
+    def test_backups_keep_ten(self):
+        p = make([])
+        for i in range(13):
+            K.save_model(p, "B-1", {"セミ・モーター": {"歯数": str(60 + i)}})
+        self.assertEqual(len(list((p.parent / K.BACKUP_DIR).glob("*.xlsx"))), K.BACKUP_KEEP)
 
 
 class TestDialog(unittest.TestCase):

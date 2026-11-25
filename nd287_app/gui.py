@@ -13319,6 +13319,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._kind_btns = {}
         info_grid.addWidget(self.kind_btn_box, 6, 0, 1, 2)
         self.kind_btn_box.setVisible(False)
+        self.lbl_kind_source = QtWidgets.QLabel("")
+        self.lbl_kind_source.setWordWrap(True)
+        self.lbl_kind_source.setStyleSheet("color:#555;")
+        info_grid.addWidget(self.lbl_kind_source, 7, 0, 1, 2)
+        self.lbl_kind_source.setVisible(False)
         self._kind_user_none = False      # 人が「今までの登録」を押した（自動で選び直さない）
         self.machine_closed_loop = None   # 機械から読めた "フル"/"セミ"（つながっていなければ None）
         self.suffix_sel = SS.Selection()          # 機番の末尾（社内の表）で選んだもの。画面の表（複数）で共有する
@@ -14287,6 +14292,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 測定の種類（モーター／駆動装置／フルクロ） -----
 
+    def _kind_source_text(self, kind, jr, tilt):
+        """使った値の出どころを1行で出す（例: 測り方: この種類の登録／バックラッシの規格: 前の表／傾きの規格: この種類の登録）。"""
+        lb = getattr(self, "lbl_kind_source", None)
+        if lb is None:
+            return
+        parts = [f"測り方: {KR.label(kind)}の登録"]
+        for g, name in (("backlash", "バックラッシの規格"), ("slope", "傾きの規格")):
+            if tilt and g == "backlash":
+                continue
+            parts.append(f"{name}: {jr['source'].get(g, '未登録')}")
+        lb.setText("／".join(parts))
+        lb.setVisible(True)
+
+    def _show_kind_problems(self):
+        """表の気になる所。型式が入っていれば、その型式に関係するものだけ（無ければ表全体）。"""
+        model = self.e_model.text().strip() if hasattr(self, "e_model") else ""
+        text = KR.problems_text(self.kind_table, model or None)
+        lb = getattr(self, "lbl_kind_problem", None)
+        if lb is not None:
+            lb.setText(text)
+            lb.setToolTip("\n".join(KR.K.problems_for(self.kind_table, model or None)))
+            lb.setVisible(bool(text))
+        return text
+
     def reload_kind_table(self):
         """種類別の表を読み直す。無ければ、今までの登録を写して1回だけ作る（ある表は上書きしない）。
         読めない行・重なりは、状態欄に赤字で出す（黙らない）。"""
@@ -14294,12 +14323,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.kind_table = KR.load_table(self.settings, getattr(self, "masters", None))
         except Exception as e:
             self.kind_table = {"rotary": [], "tilt": [], "plan": [], "problems": [f"種類別の表を読めません: {e}"]}
-        text = KR.problems_text(self.kind_table)
-        lb = getattr(self, "lbl_kind_problem", None)
-        if lb is not None:
-            lb.setText(text)
-            lb.setToolTip("\n".join(self.kind_table.get("problems") or []))
-            lb.setVisible(bool(text))
+        text = self._show_kind_problems()
         if text:
             self.statusBar().showMessage(text, 20000)
         self.refresh_kind_choices()
@@ -14393,6 +14417,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.suffix_panel.blockSignals(False)
         self.suffix_panel.picker.setVisible(False)
         dlg = SuffixDialog(self, self.e_machine.text().strip(), self.suffix_sel)
+        from .serial_suffix_ui import COLUMNS
+        tbl = dlg.picker.tbl                              # 別の窓の表は大きく見せる（見出しは2文字ずつ折り返す）
+        tbl.setHorizontalHeaderLabels([(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS])
+        tbl.horizontalHeader().setMinimumHeight(56)
+        tbl.setMinimumHeight(300)
+        scr = QtWidgets.QApplication.primaryScreen()
+        aw = scr.availableGeometry().width() if scr is not None else 1280
+        ah = scr.availableGeometry().height() if scr is not None else 700
+        dlg.resize(min(1100, aw - 40), min(460, ah - 60))
         dlg.picker.changed.connect(self._suffix_changed)
         dlg.exec()
         self._suffix_sync_panels()
@@ -14511,12 +14544,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.kind_btn_box.setVisible(bool(kinds))
         if not kinds:
             return
-        lay.addWidget(QtWidgets.QLabel("測定の種類"))
-        for key, text in [("", "今までの登録")] + [(k, KR.label(k)) for k in kinds]:
+        for key, text in [("", "今まで")] + [(k, KR.label(k)) for k in kinds]:
             b = QtWidgets.QPushButton(text)
             b.setCheckable(True)
+            b.setStyleSheet("padding:2px 4px;")
+            b.setMinimumWidth(0)
             b.setChecked(key == self.measure_kind)
-            b.setToolTip(KR.HINT.get(key, "種類を選ばず、今までの登録で測ります。"))
+            b.setToolTip("測定の種類: " + (KR.HINT.get(key) or "種類を選ばず、今までの登録で測ります。"))
             b.clicked.connect(lambda _c=False, k=key: self._on_kind_button(k))
             self._kind_btns[key] = b
             lay.addWidget(b)
@@ -14558,6 +14592,8 @@ class MainWindow(QtWidgets.QMainWindow):
         刻みが決まらないときは、何も入れず理由を出す（黙って 10° などにしない）。"""
         kind = self.active_kind()
         if not kind:
+            if getattr(self, "lbl_kind_source", None) is not None:
+                self.lbl_kind_source.setVisible(False)
             return False
         tilt = self.is_tilt()
         rec, p, err = KR.resolve(self.kind_table, text, tilt, kind, self.measure_scale)
@@ -14566,12 +14602,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self.master_cond = None
         base_j = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
-        # 精度の合否は、種類の行に値があればそれ、空欄は合否判定.csv の値（引き継ぎ）。傾斜は元どおり使わない
-        # 傾斜は回転と規格が全く違う: 回転の値・合否判定.csv は引き継がない。傾斜の欄が空なら合否を出さない
-        self.master_judge = (KR.K.judgement(rec, None) if tilt else KR.K.judgement(rec, base_j))
+        # 精度の合否は、まとまりごとに決める（種類の行 → 種類なしの行 → 回転だけ合否判定.csv）。傾斜は回転の値を引き継がない
+        jr = KR.K.resolve_judgement(self.kind_table, text, tilt, kind, self.measure_scale, base_j)
+        self.master_judge = jr["judge"]
+        self._kind_source_text(kind, jr, tilt)
         msgs = [f"{KR.label(kind)}の測り方を適用"]
+        if jr["via"]:
+            msgs.append(jr["via"])
+        msgs += jr["problems"]
         if tilt and not self.master_judge:
             msgs.append("傾斜の規格が未登録（傾斜の合否は出しません）")
+        elif not tilt and not self.master_judge:
+            msgs.append("規格が登録されていません（合否は出しません）")
         if not self.is_repeat():
             if tilt:
                 self.e_wstart.setValue(p["wheel_start"])
@@ -14833,6 +14875,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         text = self.e_model.text().strip()
         self.refresh_kind_choices()
+        self._show_kind_problems()
         self.apply_auto_suffix()                   # 型式・種類から、機番の末尾の自動の記号を選び直す
         if text and self._apply_kind_conditions(text):
             return

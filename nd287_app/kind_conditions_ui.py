@@ -146,7 +146,8 @@ class KindConditionDialog(QtWidgets.QDialog):
             if plan:
                 for key, cmb in self.plan[name].items():
                     cmb.setCurrentIndex(max(cmb.findText(plan.get(key, "")), 0))
-        msg = "".join(f"{x}\n" for x in t.get("problems", []))
+        probs = t.get("problems", [])
+        msg = (f"この表の気になる所 {len(probs)} 件:\n" + "".join(f"・{x}\n" for x in probs)) if probs else ""
         self.lbl_msg.setText(msg.strip())
 
     def _own_plan(self, table, model):
@@ -157,6 +158,12 @@ class KindConditionDialog(QtWidgets.QDialog):
                 return r
         return None
 
+    def _confirm_delete(self, names):
+        r = QtWidgets.QMessageBox.question(
+            self, "行を消します", "画面で空にした種類の行を消します。\n\n" + "\n".join(names) + "\n\n消してよいですか？（元の表は「控え」フォルダに残ります）",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        return r == QtWidgets.QMessageBox.Yes
+
     def save(self):
         model = self.e_model.text().strip()
         if not model:
@@ -164,7 +171,7 @@ class KindConditionDialog(QtWidgets.QDialog):
             return False
         plan = {name: {k: c.currentText() for k, c in cs.items()} for name, cs in self.plan.items()}
         try:
-            n = K.save_model(self.path(), model, self.g_rot.by_kind(), self.g_tilt.by_kind(), plan)
+            n = K.save_model(self.path(), model, self.g_rot.by_kind(), self.g_tilt.by_kind(), plan, confirm_delete=self._confirm_delete)
         except Exception as e:                       # 黙らない: 理由を画面に出す
             self.lbl_msg.setText(f"保存できませんでした: {e}")
             return False

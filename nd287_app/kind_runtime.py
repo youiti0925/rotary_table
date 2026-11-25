@@ -93,9 +93,9 @@ def pick_kind(kinds, machine_loop=None, last=""):
     return last if last in kinds else ""
 
 
-def problems_text(table):
-    """画面に出す、種類別の表の問題（無ければ ""）。"""
-    ps = [str(x).replace("rotary:", "回転:").replace("tilt:", "傾斜:") for x in ((table or {}).get("problems") or [])]
+def problems_text(table, model=None):
+    """画面に出す、種類別の表の問題（無ければ ""）。model を渡すと、その型式に関係するものだけ。"""
+    ps = [str(x).replace("rotary:", "回転:").replace("tilt:", "傾斜:") for x in K.problems_for(table, model)]
     if not ps:
         return ""
     head = "測定条件（種類別）の表に問題があります: "
@@ -114,6 +114,8 @@ def resolve(table, model, tilt, kind, scale=""):
     if rec is None:
         return None, None, f"{label(kind)}の測り方が登録されていません"
     p = K.params(rec, bool(tilt))
+    if p.get("_bad"):
+        return rec, p, f"{label(kind)}の「{'・'.join(p['_bad'])}」が数字として読めません。Excelを直してください"
     if not p.get("_ok"):
         need = "歯数か刻み" if kind == "セミ・モーター" else "刻み"
         return rec, p, f"{label(kind)}の{need}が、登録に入っていないので決められません"

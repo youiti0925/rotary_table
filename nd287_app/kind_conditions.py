@@ -20,9 +20,10 @@ PLAN_CHOICES = ("", "分割だけ", "再現性だけ", "両方")
 ROTARY_COLUMNS = ["型式", "測定の種類", "スケール名", "歯数", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
                   "ブロック数", "回数", "再現開始", "再現終了",
                   "MINA", "MINB", "MAXA", "MAXB", "傾きH", "傾きW", "メモ"]
+# 傾斜の規格で今アプリが使うのは傾きH・傾きW だけ。MINA〜MAXB は登録画面とひな形に出さない（書いてあっても読めるが、判定には使わない）
 TILT_COLUMNS = ["型式", "測定の種類", "スケール名", "開始角度", "終了角度", "刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
-                "ブロック数", "回数", "再現開始", "再現終了",
-                "MINA", "MINB", "MAXA", "MAXB", "傾きH", "傾きW", "メモ"]
+                "ブロック数", "回数", "再現開始", "再現終了", "傾きH", "傾きW", "メモ"]
+TILT_HIDDEN_COLUMNS = ["MINA", "MINB", "MAXA", "MAXB"]
 
 HELP_LINES = [
     "測定条件を、測定の種類ごとに登録する表です。アプリはこの表を読みます（書き換えません）。",
@@ -33,8 +34,8 @@ HELP_LINES = [
     "フル・スケール付き: 使っているスケールの名前をスケール名に書き、刻みの値を書きます。",
     "再現性（ブロック数・回数・再現開始・再現終了）も種類ごとの行に書けます。3種類それぞれ別の値にできます。空なら、その種類の再現性は作りません（ほかの種類の値は使いません）。",
     "精度の合否（回転のみ）: MINA・MINB・MAXA・MAXB（温度で変わる精度の上限下限の式）と傾きH・傾きW（傾きの規格）。合否判定.csv と同じ意味です。種類ごとに別の値にできます。空欄なら、今までの合否判定.csv の型式の値を使います。",
-    "傾斜シートにも同じ形の合否の欄があります。傾斜と回転の規格は全く違うので、回転の値・合否判定.csv は傾斜に引き継ぎません。空欄なら傾斜の合否は出さず「傾斜の規格が未登録」と出ます。",
-    "【要確認】傾斜の規格の形（上限下限の式の形など）が回転と同じでよいかは未確認です。いまアプリが傾斜で使うのは傾きH・傾きW（傾きの規格）だけです。MINA〜MAXB は欄を置いただけで、傾斜の判定にはまだ使いません。",
+    "傾斜シートの合否の欄は 傾きH・傾きW（傾きの規格）だけです。傾斜と回転の規格は全く違うので、回転の値・合否判定.csv は傾斜に引き継ぎません。空欄なら傾斜の傾きの合否は出さず「傾斜の規格が未登録」と出ます。傾斜のバックラッシ・割出精度・再現性の合否は出しません。",
+    "規格の引き継ぎは、欄ごとではなくまとまりごとです（バックラッシの4つ＝MINA・MINB・MAXA・MAXB、傾きの2つ＝傾きH・傾きW）。まとまりが全部空のときだけ、種類なしの行 → （回転だけ）合否判定.csv の順に使います。数字でない字が入っているまとまりは使いません。",
     "はじめてモードの初期の行は、今までの登録（ユーザー条件CSV・測定条件.csv）を、種類を空にして写したものです。",
 ]
 
@@ -43,8 +44,22 @@ def _s(v):
     return "" if v is None else str(v).strip()
 
 
+def _nfkc(t):
+    import unicodedata
+    return unicodedata.normalize("NFKC", _s(t))
+
+
+def norm_model(text):
+    """型式の比べ方を1つにそろえる: 全角→半角・小文字→大文字・空白を取る・長音やハイフンの種類を '-' にそろえる。"""
+    t = _nfkc(text).upper()
+    for ch in ("ー", "－", "‐", "―", "−", "–", "—", "ｰ"):
+        t = t.replace(ch, "-")
+    return "".join(t.split())
+
+
 def _num(v, default=None):
-    t = _s(v)
+    """数字として読む（全角・前後の空白は読む）。空・読めない字は default（読めない字は load が知らせ、行に _bad を付ける）。"""
+    t = _nfkc(v)
     if not t:
         return default
     try:
@@ -55,94 +70,170 @@ def _num(v, default=None):
 
 def normalize_kind(text):
     """表記ゆれ（中点・全角など）を吸収。合わなければ ''。"""
-    t = _s(text).replace("･", "・").replace("・", "").replace(" ", "").replace("　", "")
+    t = _nfkc(text).replace("･", "・").replace("・", "").replace(" ", "").replace("　", "")
     for k in KINDS:
         if k.replace("・", "") == t:
             return k
     return ""
 
 
-def _read_sheet(ws, columns):
+TEXT_COLS = ("型式", "測定の種類", "スケール名", "メモ")
+ROW_CELL = "同じ表の中で"
+KNOWN_COLS = {c: c for c in dict.fromkeys(ROTARY_COLUMNS + TILT_COLUMNS + TILT_HIDDEN_COLUMNS + PLAN_COLUMNS)}
+
+
+def _canon_header(h):
+    """見出しの打ち間違い（空白・全角半角の違い）を知っている名前にそろえる。無ければ元の字。"""
+    t = "".join(_nfkc(h).split())
+    for k in KNOWN_COLS:
+        if "".join(_nfkc(k).split()) == t:
+            return k
+    return _s(h)
+
+
+def _read_sheet(ws, columns, ws_f=None, label="", issues=None):
+    """シート → 行の辞書の並び。見出しは知っている名前にそろえる。数字の欄に数字でない字・式だけで値の無い欄は、
+    行の "_bad"（{欄: 元の字}）に入れて知らせる（黙って空欄にしない）。ws_f は式を見るための同じシート（data_only=False）。"""
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
-    header = [_s(h) for h in rows[0]]
+    frows = list(ws_f.iter_rows(values_only=True)) if ws_f is not None else []
+    header = [_canon_header(h) for h in rows[0]]
+    if issues is not None:
+        seen_h = set()
+        for h, raw in zip(header, rows[0]):
+            if h and h not in KNOWN_COLS and h not in seen_h:
+                seen_h.add(h)
+                issues.append(("", f"{label}: 知らない列「{h}」（使いません。保存しても残します）"))
     out = []
-    for r in rows[1:]:
-        rec = {h: _s(r[i]) if i < len(r) else "" for i, h in enumerate(header) if h}
-        if rec.get("型式"):
-            out.append(rec)
+    for i, r in enumerate(rows[1:], start=1):
+        rec = {h: _s(r[j]) if j < len(r) else "" for j, h in enumerate(header) if h}
+        if not rec.get("型式"):
+            continue
+        bad = {}
+        for j, h in enumerate(header):
+            if not h or h in TEXT_COLS or h not in KNOWN_COLS or j >= len(r):
+                continue
+            v = r[j]
+            fv = frows[i][j] if i < len(frows) and j < len(frows[i]) else None
+            if (v is None or _s(v) == "") and isinstance(fv, str) and fv.strip().startswith("="):
+                bad[h] = "式のみ（Excelで一度開いて保存してください）"
+            elif _s(v) and _num(v) is None and h not in ("回転/傾斜", "フルで測る", "セミで測る", "セミの種類"):
+                bad[h] = _s(v)
+        if bad:
+            rec["_bad"] = bad
+            for h, t in bad.items():
+                issues.append((norm_model(rec["型式"]), f"{label}: 型式 {rec['型式']}・{normalize_kind(rec.get('測定の種類', '')) or '種類なし'} の「{h}」が数字として読めません（{t}）。この欄を含むまとまりは使いません"))
+        out.append(rec)
     return out
 
 
 def load(path):
-    """表を読む。戻り値 {"rotary": [行…], "tilt": [行…], "problems": [文…]}。無い・読めないときは空（黙って直さない: problems に理由）。"""
-    res = {"rotary": [], "tilt": [], "plan": [], "problems": []}
+    """表を読む。戻り値 {"rotary","tilt","plan","problems":[文…],"issues":[(型式(そろえた形),文)…]}。
+    無い・読めないときは空（黙って直さない: problems に理由）。"""
+    res = {"rotary": [], "tilt": [], "plan": [], "problems": [], "issues": []}
     p = Path(path)
     if not p.exists():
         return res
+    issues = res["issues"]
     try:
         import openpyxl
         wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+        wbf = openpyxl.load_workbook(str(p), read_only=True, data_only=False)
     except Exception as e:                     # 開けない: 理由を返す（今までの登録で続けられるように）
         res["problems"].append(f"{p.name} を開けません: {e}")
         return res
     try:
         for key, sheet in (("rotary", SHEET_ROTARY), ("tilt", SHEET_TILT)):
             if sheet in wb.sheetnames:
-                res[key] = _read_sheet(wb[sheet], None)
+                res[key] = _read_sheet(wb[sheet], None, wbf[sheet], sheet, issues)
         if SHEET_PLAN in wb.sheetnames:
-            res["plan"] = _read_sheet(wb[SHEET_PLAN], None)
+            res["plan"] = _read_sheet(wb[SHEET_PLAN], None, wbf[SHEET_PLAN], SHEET_PLAN, issues)
     finally:
         wb.close()
+        wbf.close()
     seen = set()
     for key in ("rotary", "tilt"):
         for rec in res[key]:
             raw = rec.get("測定の種類", "")
             kind = normalize_kind(raw)
             if raw and not kind:
-                res["problems"].append(f"{key}: 型式 {rec['型式']} の測定の種類「{raw}」が分かりません（空として扱います）")
+                issues.append((norm_model(rec["型式"]), f"{key}: 型式 {rec['型式']} の測定の種類「{raw}」が分かりません（空として扱います）"))
             rec["測定の種類"] = kind
-            ident = (key, rec["型式"].upper(), kind, rec.get("スケール名", ""))
+            ident = (key, norm_model(rec["型式"]), kind, rec.get("スケール名", ""))
             if ident in seen:
-                res["problems"].append(f"{key}: 型式 {rec['型式']}・{kind or '種類なし'} が重なっています（上の行を使います）")
+                issues.append((norm_model(rec["型式"]), f"{key}: 型式 {rec['型式']}・{kind or '種類なし'} が重なっています（上の行を使います）"))
             seen.add(ident)
+    res["problems"] = res["problems"] + [t for _m, t in issues]
     return res
 
 
-def find(table, model, tilt, kind="", scale=""):
-    """型式＋種類で1行を引く。無ければ「種類が空」の行。どちらも無ければ None。
-    フル・スケール付きで複数あるときは scale（スケール名）で選ぶ。無ければ最初の行。"""
-    rows = table.get("tilt" if tilt else "rotary") or []
-    m = _s(model).upper()
-    cands = [m]
+def problems_for(table, model=None):
+    """表の気になる所の文。model を渡すと、その型式に関係するもの（と、型式に関係しない表全体のもの）だけ。"""
+    if model is None:
+        return list((table or {}).get("problems") or [])
+    m = norm_model(model)
+    iss = (table or {}).get("issues")
+    if iss is None:
+        return list((table or {}).get("problems") or [])
+    extra = [t for t in (table or {}).get("problems", []) if t not in {x[1] for x in iss}]
+    return extra + [t for mm, t in iss if mm in ("", m)]
+
+
+def _candidates(model):
+    """型式を引く形の順: ①そのまま ②カンマを詰めた形 ③カンマの前だけ ④末尾の英字（クローズ記号）を外した形。"""
+    import re
+    m = norm_model(model)
+    out = [(m, "")]
     if "," in m:
         base, rest = (x.strip() for x in m.split(",", 1))
-        cands += [base + rest, base]
-    for c in cands:
-        hit = [r for r in rows if r["型式"].upper() == c]
-        if not hit:
-            continue
-        want = [r for r in hit if r["測定の種類"] == normalize_kind(kind)] if kind else []
-        if want:
-            if scale:
-                s = [r for r in want if r.get("スケール名", "") == scale]
-                if s:
-                    return s[0]
-            return want[0]
-        blank = [r for r in hit if not r["測定の種類"]]
-        if blank:
-            return blank[0]
-    return None
+        out += [(base + rest, "カンマを詰めた形"), (base, "カンマの前")]
+    for c, _v in list(out):
+        t = re.sub(r"(\d)[A-Z]+$", r"\1", c)
+        if t != c and all(t != x for x, _ in out):
+            out.append((t, "末尾の英字（クローズ記号）を外した形"))
+    return out
+
+
+def hit_rows(table, model, tilt):
+    """その型式に当たる行の並びと、どの形で当たったか。(rows, via)。via は「そのまま」のとき ""。"""
+    rows = table.get("tilt" if tilt else "rotary") or []
+    for c, via in _candidates(model):
+        hit = [r for r in rows if norm_model(r["型式"]) == c]
+        if hit:
+            return hit, (f"{c} の登録を使っています（{via}）" if via else "")
+    return [], ""
+
+
+def find_via(table, model, tilt, kind="", scale=""):
+    """型式＋種類で1行を引く。(行, 種類の行か: bool, via)。無ければ「種類が空」の行（種類の行は False）。どちらも無ければ (None, False, "")。
+    フル・スケール付きで複数あるときは scale（スケール名）で選ぶ。無ければ最初の行。"""
+    hit, via = hit_rows(table, model, tilt)
+    if not hit:
+        return None, False, ""
+    want = [r for r in hit if r["測定の種類"] == normalize_kind(kind)] if kind else []
+    if want:
+        if scale:
+            sel = [r for r in want if r.get("スケール名", "") == scale]
+            if sel:
+                return sel[0], True, via
+        return want[0], True, via
+    blank = [r for r in hit if not r["測定の種類"]]
+    if blank:
+        return blank[0], False, via
+    return None, False, via
+
+
+def find(table, model, tilt, kind="", scale=""):
+    return find_via(table, model, tilt, kind, scale)[0]
 
 
 def kinds_of(table, model, tilt):
     """この型式で登録されている種類の一覧（画面で選ばせる用。種類が空の行は含めない）。"""
-    rows = table.get("tilt" if tilt else "rotary") or []
-    m = _s(model).upper()
+    hit, _via = hit_rows(table, model, tilt)
     out = []
-    for r in rows:
-        if r["型式"].upper() == m and r["測定の種類"] and r["測定の種類"] not in out:
+    for r in hit:
+        if r["測定の種類"] and r["測定の種類"] not in out:
             out.append(r["測定の種類"])
     return out
 
@@ -150,9 +241,11 @@ def kinds_of(table, model, tilt):
 def params(rec, tilt):
     """1行 → アプリの設定値（user_condition_params と同じ形）。セミ・モーターで刻みが空なら 360÷歯数÷10。"""
     pitch_key = "刻み" if tilt else "ホイール刻み"
-    pitch = _num(rec.get(pitch_key))
+    bad = {c: t for c, t in (rec.get("_bad") or {}).items()
+           if c in ("歯数", "刻み", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始", "開始角度", "終了角度")}
+    pitch = None if bad else _num(rec.get(pitch_key))
     note = ""
-    if pitch is None and rec.get("測定の種類") == "セミ・モーター":
+    if pitch is None and not bad and rec.get("測定の種類") == "セミ・モーター":
         teeth = _num(rec.get("歯数"))
         if teeth and teeth > 0:
             pitch = 360.0 / teeth / 10.0
@@ -165,28 +258,86 @@ def params(rec, tilt):
         out["wheel_start"] = _num(rec.get("開始角度"), -30.0)
         out["wheel_end"] = _num(rec.get("終了角度"), 110.0)
     out["_note"] = note
-    out["_ok"] = pitch is not None
+    out["_ok"] = pitch is not None and not bad
+    out["_bad"] = bad
     return out
 
 
 JUDGE_COLS = (("MINA", "min_a"), ("MINB", "min_b"), ("MAXA", "max_a"), ("MAXB", "max_b"), ("傾きH", "slope_h"), ("傾きW", "slope_w"))
+# 引き継ぎは欄ごとではなく、まとまりごと（1つの規格の中に2つの表の値を混ぜない）
+GROUPS = {"backlash": (("MINA", "min_a"), ("MINB", "min_b"), ("MAXA", "max_a"), ("MAXB", "max_b")),
+          "slope": (("傾きH", "slope_h"), ("傾きW", "slope_w"))}
+GROUP_LABEL = {"backlash": "バックラッシの規格", "slope": "傾きの規格"}
+
+
+def group_values(rec, group):
+    """1行の1つのまとまり → (状態, 値の辞書, 理由)。状態: empty（全部空）/ ok / bad（数字でない字）/ incomplete（書き足りない）。"""
+    cols = GROUPS[group]
+    bad = {c: t for c, t in ((rec or {}).get("_bad") or {}).items() if c in [c0 for c0, _k in cols]}
+    if bad:
+        return "bad", {}, "「" + "・".join(bad) + "」が数字として読めません"
+    vals = {k: _num((rec or {}).get(c)) for c, k in cols}
+    if all(v is None for v in vals.values()):
+        return "empty", {}, ""
+    if group == "backlash":
+        if vals["max_b"] is None:
+            return "incomplete", {}, "上限（MAXB）が書いてありません"
+        return "ok", {k: (0.0 if v is None else v) for k, v in vals.items()}, ""
+    return "ok", {k: v for k, v in vals.items() if v is not None}, ""
+
+
+def resolve_judgement(table, model, tilt, kind="", scale="", base=None):
+    """精度の合否の規格を、まとまりごとに決める。規格を取る順（回転・傾斜とも。傾斜はシートをまたがない）:
+    ①選んだ種類の行 ②同じシートの種類なしの行 ③回転だけ: base（合否判定.csv の型式の値）④無ければ判定しない。
+    数字として読めない字・書き足りないまとまりは使わず（前の表にも落とさない）、理由を返す。
+    傾斜で判定に使うのは傾き（傾きH・傾きW）だけ。傾斜のバックラッシは、書いてあっても使わず知らせる。
+    戻り値 {"judge": 規格の辞書か None, "source": {まとまり: 出どころ}, "problems": [文], "via": 型式の当たり方}"""
+    hit, via = hit_rows(table, model, tilt)
+    k = normalize_kind(kind) if kind else ""
+    kind_row = next((r for r in hit if k and r["測定の種類"] == k), None)
+    blank_row = next((r for r in hit if not r["測定の種類"]), None)
+    out, src, problems = {}, {}, []
+    for g in ("backlash", "slope"):
+        if tilt and g == "backlash":
+            if any(group_values(r, g)[0] != "empty" for r in (kind_row, blank_row) if r is not None):
+                problems.append("傾斜のバックラッシの規格は、まだ判定に使っていません")
+            continue
+        done = False
+        for row, name in ((kind_row, "この種類の登録"), (blank_row, "種類なしの登録")):
+            if row is None:
+                continue
+            st, vals, why = group_values(row, g)
+            if st in ("bad", "incomplete"):
+                problems.append(f"{GROUP_LABEL[g]}（{name}）: {why}。この規格は使いません")
+                src[g] = "使いません（" + why + "）"
+                done = True
+                break
+            if st == "ok":
+                out.update(vals)
+                src[g] = name
+                done = True
+                break
+        if not done and not tilt and base:
+            vals = {key: base[key] for _c, key in GROUPS[g] if base.get(key) is not None}
+            if vals:
+                out.update(vals)
+                src[g] = "前の表（合否判定.csv）"
+                done = True
+        if not done:
+            src[g] = "未登録"
+    return {"judge": out or None, "source": src, "problems": problems, "via": via}
 
 
 def judgement(rec, base=None):
-    """種類の行の精度の合否（規格）を、合否判定.csv と同じ形（min_a…slope_w）で返す。
-    行の欄が空のところは base（合否判定.csv の型式の値）を使う（引き継ぎ）。どちらも無ければ None。"""
-    out = dict(base or {})
-    got = False
-    for col, key in JUDGE_COLS:
-        v = _num((rec or {}).get(col))
-        if v is not None:
-            out[key] = v
-            got = True
-    if not out:
-        return None
-    if got:
-        out["_from_kind"] = True
-    return out
+    """1行の規格（まとまりごと。行のまとまりが全部空のときだけ base のまとまりを使う）。resolve_judgement の1行版。"""
+    out = {}
+    for g in GROUPS:
+        st, vals, _w = group_values(rec, g)
+        if st == "ok":
+            out.update(vals)
+        elif st == "empty" and base:
+            out.update({k: base[k] for _c, k in GROUPS[g] if base.get(k) is not None})
+    return out or None
 
 
 def repeat(rec):
@@ -196,6 +347,31 @@ def repeat(rec):
         return None
     return {"blocks_n": int(n), "repeats": int(reps),
             "start": _num(rec.get("再現開始"), 0.0), "end": _num(rec.get("再現終了"), 360.0)}
+
+
+def _add_validations(wb):
+    """選ぶ欄に、Excel の「一覧から選ぶ」（入力規則）を付ける（手で打つ表記ゆれを減らす。すでに付いている列には足さない）。"""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    spec = {SHEET_ROTARY: {"測定の種類": ",".join(KINDS)}, SHEET_TILT: {"測定の種類": ",".join(KINDS)},
+            SHEET_PLAN: {"回転/傾斜": "回転,傾斜", "フルで測る": ",".join(c for c in PLAN_CHOICES if c),
+                         "セミで測る": ",".join(c for c in PLAN_CHOICES if c),
+                         "セミの種類": "セミ・モーター,セミ・駆動装置"}}
+    from openpyxl.utils import get_column_letter
+    for sheet, cols in spec.items():
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        header = [_s(c.value) for c in ws[1]]
+        have = " ".join(str(r.sqref) for r in ws.data_validations.dataValidation)
+        for col, items in cols.items():
+            if col not in header:
+                continue
+            L = get_column_letter(header.index(col) + 1)
+            if f"{L}2" in have:
+                continue
+            dv = DataValidation(type="list", formula1=f'"{items}"', allow_blank=True, showErrorMessage=False)
+            dv.add(f"{L}2:{L}1000")
+            ws.add_data_validation(dv)
 
 
 def build_template(path, rotary_rows=(), tilt_rows=()):
@@ -218,6 +394,7 @@ def build_template(path, rotary_rows=(), tilt_rows=()):
     for line in HELP_LINES:
         hs.append([line])
     hs.column_dimensions["A"].width = 100
+    _add_validations(wb)
     wb.save(str(p))
 
 
@@ -271,8 +448,8 @@ def find_plan(table, model, tilt=None):
     予定は 型式×回転/傾斜 で1行ずつ（2軸製品は回転と傾斜で予定が違うことがある）。
     tilt=True（傾斜）で、傾斜の行が無い・空のときは、回転の行（無ければ「回転/傾斜」が空の行）と同じ。
     tilt=False（回転）は、回転の行 → 「回転/傾斜」が空の行（以前の形式の行）。tilt=None は、どの行でも最初の1つ。"""
-    m = _s(model).upper()
-    rows = [r for r in (table.get("plan") or []) if r["型式"].upper() == m]
+    m = norm_model(model)
+    rows = [r for r in (table.get("plan") or []) if norm_model(r["型式"]) == m]
     if not rows:
         return None
 
@@ -287,45 +464,105 @@ def find_plan(table, model, tilt=None):
     return first or (pick("回転") if tilt else None) or pick("")
 
 
-def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
+BACKUP_DIR = "控え"
+BACKUP_KEEP = 10
+
+
+def _backup(p):
+    """保存前の控えを「控え/測定条件_種類別_日付_時分.xlsx」に残す（10個まで。古いものから消す）。"""
+    import shutil
+    import time
+    d = p.parent / BACKUP_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dst = d / f"{p.stem}_{stamp}{p.suffix}"
+    n = 1
+    while dst.exists():                                       # 同じ秒に続けて保存しても、控えを上書きしない
+        n += 1
+        dst = d / f"{p.stem}_{stamp}_{n}{p.suffix}"
+    shutil.copy2(str(p), str(dst))
+    olds = sorted(d.glob(f"{p.stem}_*{p.suffix}"), key=lambda x: x.stat().st_mtime_ns)
+    for old in olds[:-BACKUP_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return dst
+
+
+def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None, confirm_delete=None):
     """1つの型式の、種類別の条件と測る予定を、まとめて1回で保存する（アプリの登録画面も、Excel に直接書くのも、同じファイル）。
 
-    rotary_by_kind / tilt_by_kind: {種類: {列名: 値}}（値が全部空の種類は書かない＝その型式のその種類の行を消す）。
+    rotary_by_kind / tilt_by_kind: {種類: {列名: 値}}。同じ 型式＋種類（＋スケール名）の行があれば、その行の画面にある欄だけをその場で書き換える
+    （人が並べた順・色・足した列・式は残す）。無ければ末尾に足す。値が全部空の種類は、その型式のその種類の行を消す
+    （消す前に confirm_delete(文の並び) を呼び、False が返れば何も書かずに止める）。
     plan: {"フルで測る","セミで測る","セミの種類","メモ"} か None（None なら予定は触らない）。
     その型式の「種類が空」の行（今までの登録の写し）と、ほかの型式の行・説明は、そのまま残す。
-    保存前に、元のファイルを「.bak」に1世代残す。戻り値: 書いた行数。
+    保存前に、元のファイルを「控え/」に日付つきで残す（10個まで）。Excel で開いたままなら、日本語で理由を言って止める。
+    戻り値: 書いた行数（足した行＋書き換えた行）。
     """
-    import shutil
     import openpyxl
     p = Path(path)
     if not p.exists():
         build_template(p)
-    shutil.copy2(str(p), str(p) + ".bak")
+    try:
+        _backup(p)
+    except PermissionError:
+        raise RuntimeError("Excel で開いています。閉じてからもう一度保存してください")
     wb = openpyxl.load_workbook(str(p))
-    m = _s(model).upper()
+    m = norm_model(model)
     written = 0
+    deletes = []
     for sheet, cols, by_kind in ((SHEET_ROTARY, ROTARY_COLUMNS, rotary_by_kind), (SHEET_TILT, TILT_COLUMNS, tilt_by_kind)):
         if by_kind is None:
             continue
         ws = wb[sheet] if sheet in wb.sheetnames else wb.create_sheet(sheet)
         if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
             ws.append(cols)
-        header = [_s(c.value) for c in ws[1]]
+        header = [_canon_header(c.value) for c in ws[1]]
+        for i, h in enumerate(header):                            # 見出しの打ち間違いは知っている名前に直す（人が足した列はそのまま）
+            if h and h != _s(ws.cell(1, i + 1).value):
+                ws.cell(1, i + 1).value = h
         for col in cols:                                          # 以前の形式の表: 足りない列（合否など）を右に足す
             if col not in header:
                 ws.cell(1, len(header) + 1).value = col
                 header.append(col)
-        for r in range(ws.max_row, 1, -1):                        # 下から消す（行番号がずれない）
-            vals = {header[i]: _s(c.value) for i, c in enumerate(ws[r]) if i < len(header)}
-            if vals.get("型式", "").upper() == m and normalize_kind(vals.get("測定の種類", "")):
-                ws.delete_rows(r)
+
+        def row_info(r):
+            vals = {header[i]: ws.cell(r, i + 1).value for i in range(len(header)) if header[i]}
+            return norm_model(vals.get("型式")), normalize_kind(vals.get("測定の種類")), _s(vals.get("スケール名"))
         for kind in KINDS:
             rec = dict(by_kind.get(kind) or {})
-            if not any(_s(v) for k, v in rec.items() if k not in ("型式", "測定の種類")):
+            empty = not any(_s(v) for k, v in rec.items() if k not in ("型式", "測定の種類"))
+            rows = [r for r in range(2, ws.max_row + 1) if row_info(r)[:2] == (m, kind)]
+            if empty:
+                if rows:
+                    deletes.append((sheet, kind, rows))
                 continue
-            rec["型式"], rec["測定の種類"] = _s(model), kind
-            ws.append([rec.get(h, "") for h in header])
+            want_scale = _s(rec.get("スケール名"))
+            hit = next((r for r in rows if row_info(r)[2] == want_scale), None) or (rows[0] if rows else None)
+            if hit is None:
+                rec["型式"], rec["測定の種類"] = _s(model), kind
+                ws.append([rec.get(h, "") for h in header])
+            else:
+                for i, h in enumerate(header):
+                    if not h or h in ("型式", "測定の種類") or h not in rec:
+                        continue
+                    cell = ws.cell(hit, i + 1)
+                    new = _s(rec.get(h))
+                    if new == "" and isinstance(cell.value, str) and cell.value.strip().startswith("="):
+                        continue                                  # 式は消さない（画面は式の値を持たないので空に見える）
+                    if _s(cell.value) != new and not (isinstance(cell.value, (int, float)) and _num(new) == float(cell.value)):
+                        cell.value = (_num(new) if _num(new) is not None and h not in TEXT_COLS else new)
             written += 1
+    if deletes:
+        names = [f"{sh}シートの {KR_LABEL.get(k, k)} の行 {len(rs)} 行を消します" for sh, k, rs in deletes]
+        if confirm_delete is not None and not confirm_delete(names):
+            raise RuntimeError("行を消さないため、保存を止めました")
+        for sh, k, rs in deletes:
+            ws = wb[sh]
+            for r in sorted(rs, reverse=True):                    # 下から消す（行番号がずれない）
+                ws.delete_rows(r)
     if plan is not None:
         ws = wb[SHEET_PLAN] if SHEET_PLAN in wb.sheetnames else wb.create_sheet(SHEET_PLAN)
         if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
@@ -336,7 +573,7 @@ def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
             ws.cell(1, 2).value = "回転/傾斜"
             header = [_s(c.value) for c in ws[1]]
         for r in range(ws.max_row, 1, -1):
-            if _s(ws.cell(r, 1).value).upper() == m:
+            if norm_model(ws.cell(r, 1).value) == m:
                 ws.delete_rows(r)
         # plan: {"回転": {...}, "傾斜": {...}}（軸ごと）か、{"フルで測る":…}（両方に同じ＝軸の列を空で1行）
         by_axis = plan if ("回転" in plan or "傾斜" in plan) else {"": plan}
@@ -346,5 +583,12 @@ def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
                 rec["型式"], rec["回転/傾斜"] = _s(model), axis
                 ws.append([rec.get(h, "") for h in header])
                 written += 1
-    wb.save(str(p))
+    _add_validations(wb)
+    try:
+        wb.save(str(p))
+    except PermissionError:
+        raise RuntimeError("Excel で開いています。閉じてからもう一度保存してください")
     return written
+
+
+KR_LABEL = {"セミ・モーター": "モーター", "セミ・駆動装置": "駆動装置", "フル・スケール付き": "フルクロ"}

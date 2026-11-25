@@ -233,6 +233,10 @@ class ElidedStatusBar(QtWidgets.QStatusBar):
         self.setToolTip(self._full if self._full else "")
         super().showMessage(self._elide(self._full), timeout)
 
+    def full_message(self):
+        """省く前の全文（今の知らせ）。試験・吹き出し用。"""
+        return self._full if self.currentMessage() else ""
+
     def clearMessage(self):
         self._full = ""
         self.setToolTip("")

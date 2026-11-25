@@ -260,3 +260,46 @@ class TestLowScreen(TestTopRows):
         w = self._window(1280)
         self.assertEqual(w.maximumHeight(), 16777215)
         self.assertEqual(w.maximumWidth(), 16777215)
+
+    def test_tilt_conditions_are_not_much_wider_than_rotary(self):
+        # 2026-11-25 会社PC 150%: 傾斜の測定条件の必要幅 865 が見える幅 825 を超え、右（コメント・測定順・範囲）が切れた。
+        # 開始角度・終了角度は縦に並べ、分割+再現の再現欄も縦に並べて、横幅を詰める。
+        w = self._window(1280)
+        w.mode_combo.setCurrentText("回転分割")
+        self.app.processEvents()
+        rot = w.cond_group.minimumSizeHint().width()
+        for mode in ("傾斜分割", "傾斜分割+再現", "回転分割+再現"):
+            w.mode_combo.setCurrentText(mode)
+            self.app.processEvents()
+            self.assertLessEqual(w.cond_group.minimumSizeHint().width(), rot + 60, mode)
+        w.mode_combo.setCurrentText("回転再現性")
+        self.app.processEvents()
+        self.assertFalse(w._rg_stacked)                       # 再現性だけのときは今までの横並び
+        w.mode_combo.setCurrentText("傾斜分割+再現")
+        self.app.processEvents()
+        self.assertTrue(w._rg_stacked)
+        for ed in (w.e_blocks, w.e_repeats, w.e_rstart, w.e_rend):
+            self.assertTrue(ed.isVisibleTo(w), ed)
+
+    def test_counts_and_live_labels_shrink_instead_of_widening_the_bar(self):
+        # 2026-11-25 会社PC 150%: 「データ数…」「受信…」の文字が長く、操作の帯が見える幅を 239 超えた
+        w = self._window(1280)
+        full = "データ数:  ホイール CW 37/37　ホイール CCW 37/37　ウォーム CW 11/11　ウォーム CCW 11/11"
+        w.counts.setText(full)
+        w.live.setText("受信: 123°45'67\"")
+        self.assertEqual(w.counts.text(), full)               # 全文はいつも読める（Web 表示・保存はこれを使う）
+        self.assertEqual(w.counts.minimumSizeHint().width(), 0)
+        w.counts.resize(150, w.counts.height())
+        w.counts._apply()
+        self.assertLessEqual(w.counts.fontMetrics().horizontalAdvance(QtCore_text(w.counts)), 150)
+        self.assertEqual(w.counts.toolTip(), full)
+        w.counts.resize(2000, w.counts.height())
+        w.counts._apply()
+        self.assertEqual(QtCore_text(w.counts), full)
+        bs = w.bar_scroll
+        self.assertLessEqual(bs.widget().minimumSizeHint().width(), bs.viewport().width())
+
+
+def QtCore_text(label):
+    from PySide6 import QtWidgets
+    return QtWidgets.QLabel.text(label)

@@ -13538,8 +13538,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.l_wend2 = QtWidgets.QLabel("終了角度")
         wg.addWidget(self.l_wstart2, 2, 0)
         wg.addWidget(self.e_wstart, 2, 1)
-        wg.addWidget(self.l_wend2, 2, 2)
-        wg.addWidget(self.e_wend, 2, 3)
+        # 終了角度は開始角度の真下（横に並べると、150% の画面で測定条件の枠が左の列より広くなり右が切れた）
+        wg.addWidget(self.l_wend2, 3, 0)
+        wg.addWidget(self.e_wend, 3, 1)
         wg.setColumnStretch(4, 1)
 
         # ウォーム群
@@ -13563,15 +13564,12 @@ class MainWindow(QtWidgets.QMainWindow):
         rg.setContentsMargins(0, 0, 0, 0)
         rg.setHorizontalSpacing(8)
         rg.setVerticalSpacing(3)
-        rg.addWidget(cond_header("再現"), 0, 0, 1, 4)
-        rg.addWidget(QtWidgets.QLabel("ブロック数"), 1, 0)
-        rg.addWidget(self.e_blocks, 1, 1)
-        rg.addWidget(QtWidgets.QLabel("回数"), 1, 2)
-        rg.addWidget(self.e_repeats, 1, 3)
-        rg.addWidget(QtWidgets.QLabel("再現開始"), 2, 0)
-        rg.addWidget(self.e_rstart, 2, 1)
-        rg.addWidget(QtWidgets.QLabel("再現終了"), 2, 2)
-        rg.addWidget(self.e_rend, 2, 3)
+        self._rg = rg
+        self._rg_head = cond_header("再現")
+        self._rg_fields = [(QtWidgets.QLabel("ブロック数"), self.e_blocks), (QtWidgets.QLabel("回数"), self.e_repeats),
+                           (QtWidgets.QLabel("再現開始"), self.e_rstart), (QtWidgets.QLabel("再現終了"), self.e_rend)]
+        self._rg_stacked = None
+        self._arrange_repeat(False)
         # ISO 230-2 モードのときだけ出す：目標位置に擬似ランダムオフセットを与える
         self.c_iso_offset = QtWidgets.QCheckBox("目標位置に擬似ランダムオフセット（JIS推奨）")
         self.c_iso_offset.setChecked(True)
@@ -13579,7 +13577,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "周期的な誤差成分と目標位置が一致するのを避けるため、内側の目標を少し"
             "ずらします（両端は範囲を保つため固定）。同じ設定なら常に同じ位置。")
         self.c_iso_offset.setVisible(False)
-        rg.addWidget(self.c_iso_offset, 3, 0, 1, 4)
+        self._rg_iso = self.c_iso_offset
+        self._arrange_repeat(False, force=True)
         rg.setColumnStretch(4, 1)
 
         # 測定順（分割系）: ホイール/ウォームのCW/CCWを画面で並べ替え・測る/測らないを選ぶ
@@ -13810,9 +13809,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_flow_bar(tools_menu)
 
         # ===== 受信値・データ数 =====
-        self.live = QtWidgets.QLabel("")
+        # 操作の帯の「受信」「データ数」は入る幅に合わせて省く（長くて帯が右で切れた。会社PC 150%）
+        self.live = main_top.ElidedLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
-        self.counts = QtWidgets.QLabel("")
+        self.counts = main_top.ElidedLabel(
+            "", short_of=lambda t: t.replace("データ数:  ", "").replace("ホイール", "ホ").replace("ウォーム", "ウ"))
         # 受信点数はグラフ拡大ボタンの右に小さめで出す（例 ホイール CW 3/36）。
         # 4系列で横に長くなるので、フォントは控えめ(9pt)にして場所を取らない。
         self.counts.setStyleSheet(
@@ -15054,6 +15055,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def is_combined(self):
         return "+再現" in self.current_mode()
 
+    def _arrange_repeat(self, stacked, force=False):
+        """再現の入力欄の並べ方。横2×縦2（ふつう）／縦4（分割+再現のとき。横が足りない画面で測定条件の枠が
+        左の列より広くなり、右が切れた。会社PC 150%）。"""
+        if stacked == self._rg_stacked and not force:
+            return
+        self._rg_stacked = stacked
+        rg = self._rg
+        for w in [self._rg_head] + [x for pair in self._rg_fields for x in pair] + [getattr(self, "_rg_iso", None)]:
+            if w is not None:
+                rg.removeWidget(w)
+        rg.addWidget(self._rg_head, 0, 0, 1, 4)
+        for i, (lab, ed) in enumerate(self._rg_fields):
+            r, c = (1 + i, 0) if stacked else (1 + i // 2, 2 * (i % 2))
+            rg.addWidget(lab, r, c)
+            rg.addWidget(ed, r, c + 1)
+        iso = getattr(self, "_rg_iso", None)
+        if iso is not None:
+            rg.addWidget(iso, 5 if stacked else 3, 0, 1, 4)
+
     def on_mode_changed(self, mode):
         if hasattr(self, "cmb_kind"):
             self.refresh_kind_choices()             # 回転と傾斜で選んだ種類が違うことがある: 軸が変わったら、その軸の種類を出す
@@ -15068,6 +15088,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.eval_group.setVisible(show_division)
         self.order_group.setVisible(show_division)   # 測定順（分割系のみ）
         self.repeat_group.setVisible(show_repeat)
+        self._arrange_repeat(show_division and show_repeat)     # 分割+再現は縦に並べて幅を詰める
         # ホイールの開始/終了角度は傾斜分割のときだけ（回転は0〜360固定）
         for w in (self.l_wstart2, self.e_wstart, self.l_wend2, self.e_wend):
             w.setVisible(is_tilt)

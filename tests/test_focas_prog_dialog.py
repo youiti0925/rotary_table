@@ -233,5 +233,24 @@ class TestProgramDialogEntry(Base):
                     pass
 
 
+class TestJobsDoNotCrossWires(Base):
+    def test_quiet_job_result_does_not_go_to_next_job(self):
+        """裏の読み取りの最中に「送る」等を始めても、前の仕事の結果が今の仕事の受け取り口に渡らない。"""
+        import threading
+        d = self.dialog(nc(1))
+        gate = threading.Event()
+        got = []
+        d._run(lambda *a: (gate.wait(5) and "quiet-result"), lambda r: got.append(("quiet", r)), quiet=True)
+        later = []
+        self.assertFalse(d._run(lambda *a: "real", lambda r: later.append(r)))   # 待ち直しになる（直接は始めない）
+        gate.set()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 10 and not later:
+            self.app.processEvents()
+            time.sleep(0.01)
+        self.assertEqual(got, [("quiet", "quiet-result")])
+        self.assertEqual(later, ["real"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4242,6 +4242,10 @@ class FocasWriteDialog(QtWidgets.QDialog):
 
     def start_write(self):
         """このボタンが確認（1回）。件数と機械の名前を出している。押した時点で書き始める。"""
+        if self._busy and self._busy_quiet and not self._closed:
+            # 裏の読み取りの最中に押された。捨てずに、終わってからもう一度（押したのに書かれない、が出た）
+            QtCore.QTimer.singleShot(150, self.start_write)
+            return
         ok, reasons = self._writable()
         if self._busy or not ok or self.client is None:
             return
@@ -4976,6 +4980,13 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
 
     def _run(self, fn, on_ok, on_err=None, quiet=False):
         if self._closed or self._busy:
+            return False
+        if self._job is not None:
+            # 裏の読み取りの最中。結果の受け取り口を上書きすると、前の仕事の結果が今の仕事に渡る
+            # （「送る」で TypeError・「書く」を押しても書かれない、が出た）。終わるのを待ってから始める。
+            if not quiet:
+                QtCore.QTimer.singleShot(
+                    150, lambda: None if self._closed else self._run(fn, on_ok, on_err, quiet))
             return False
         self._busy = not quiet
         self._on_ok, self._on_err = on_ok, on_err

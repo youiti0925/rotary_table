@@ -75,23 +75,23 @@ class SvgView(QtWidgets.QWidget):
 class TileButton(QtWidgets.QAbstractButton):
     """入り口の大きなタイル（絵と短い言葉。押すと、その流れが始まる）。"""
 
-    def __init__(self, title, sub, svg, parent=None):
+    def __init__(self, title, sub, svg, parent=None, badge=""):
         super().__init__(parent)
-        self._title, self._sub = title, sub
+        self._title, self._sub, self._badge = title, sub, badge
         self._r = QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8")), self)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setMinimumSize(220, 150)
-        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)           # 青い枠は「マウスが乗っている」だけ（選んだ印と見まちがえない）
         self.setAccessibleName(title)
 
     def paintEvent(self, _e):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         r = QtCore.QRectF(self.rect()).adjusted(2, 2, -2, -2)
-        hot = self.underMouse() or self.hasFocus()
+        hot = self.underMouse()
         p.setPen(QtGui.QPen(QtGui.QColor("#1560D4" if hot else "#D5DBE1"), 3 if hot else 2))
-        p.setBrush(QtGui.QColor("#FFFFFF"))
+        p.setBrush(QtGui.QColor("#EAF2FF" if hot else "#FFFFFF"))
         p.drawRoundedRect(r, 16, 16)
         pic_h = r.height() - 58
         size = self._r.defaultSize()
@@ -110,6 +110,17 @@ class TileButton(QtWidgets.QAbstractButton):
         p.setFont(f)
         p.setPen(QtGui.QColor("#5A6876"))
         p.drawText(QtCore.QRectF(r.left(), r.bottom() - 28, r.width(), 22), QtCore.Qt.AlignCenter, self._sub)
+        if self._badge:                                   # 「はじめてはこれ」の札
+            f.setPixelSize(14)
+            f.setBold(True)
+            p.setFont(f)
+            bw = p.fontMetrics().horizontalAdvance(self._badge) + 24
+            br = QtCore.QRectF(r.left() + 12, r.top() + 12, bw, 28)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor("#16864C"))
+            p.drawRoundedRect(br, 14, 14)
+            p.setPen(QtGui.QColor("#FFFFFF"))
+            p.drawText(br, QtCore.Qt.AlignCenter, self._badge)
 
 
 class ChapterBar(QtWidgets.QWidget):
@@ -270,7 +281,7 @@ class EasyModeDialog(QtWidgets.QDialog):
                 "results": easy_art.tile_results, "alarm": easy_art.tile_alarm}
         self.tiles = {}
         for n, (fid, fl) in enumerate(easy_flow.FLOWS.items()):
-            t = TileButton(fl["title"], fl["sub"], pics[fid]())
+            t = TileButton(fl["title"], fl["sub"], pics[fid](), badge=fl.get("badge", ""))
             t.clicked.connect(lambda _c=False, f=fid: self._start_flow(f))
             hg.addWidget(t, n // 2, n % 2)
             self.tiles[fid] = t

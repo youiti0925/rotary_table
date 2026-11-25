@@ -14463,7 +14463,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_flow_skip.setToolTip("パラメータと測定プログラムが、もう機械に入っているとき。測定の準備へ進みます")
         self.b_flow_skip.clicked.connect(self._flow_skip)
         row.addWidget(self.b_flow_skip)
-        self.b_easy = QtWidgets.QPushButton("はじめてモード")
+        self.b_easy = QtWidgets.QPushButton("はじめてモード（初心者用）")
+        self.b_easy.setStyleSheet("QPushButton{background:#1560D4; color:#fff; font-weight:bold; padding:6px 14px; border-radius:6px;}"
+                                  "QPushButton:hover{background:#0F4CB0;}")
         self.b_easy.setToolTip("絵で1つずつ案内する、初心者用の画面を開きます（今の画面はそのまま残ります）")
         self.b_easy.clicked.connect(self.show_easy_mode)
         row.addWidget(self.b_easy)

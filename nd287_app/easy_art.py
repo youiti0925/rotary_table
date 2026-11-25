@@ -322,9 +322,8 @@ def tile_measure():
             f'<ellipse cx="150" cy="64" rx="64" ry="18" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
             f'<path d="M96 36 A56 18 0 0 1 204 36" fill="none" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/>'
             f'<path d="M210 32 L198 48 L190 28 Z" fill="{HERE}"/>'
-            f'<rect x="224" y="76" width="46" height="36" rx="6" fill="{DARK}"/>' + _t(247, 100, 10, "表示器", fill="#7CF0A0")
-            + _t(150, 180, 14, "角度を測る", fill=FG))
-    return _tile(300, 200, body, "測る")
+            f'<rect x="224" y="76" width="46" height="36" rx="6" fill="{DARK}"/>' + _t(247, 100, 12, "90.00°", fill="#7CF0A0", weight=900))
+    return _tile(300, 165, body, "測る")
 
 
 def tile_program():
@@ -334,8 +333,8 @@ def tile_program():
             f'<rect x="196" y="30" width="84" height="90" rx="10" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
             f'<rect x="206" y="40" width="42" height="30" rx="3" fill="#0F2A3A"/>'
             f'<rect x="212" y="46" width="28" height="4" fill="#8FE0C0"/><rect x="212" y="56" width="20" height="4" fill="#8FE0C0"/>'
-            f'<circle cx="266" cy="100" r="8" fill="{RED}"/>' + _t(150, 180, 14, "測る動きを入れる", fill=FG))
-    return _tile(300, 200, body, "プログラムを機械に入れる")
+            f'<circle cx="266" cy="100" r="8" fill="{RED}"/>')
+    return _tile(300, 165, body, "プログラムを機械に入れる")
 
 
 def tile_results():
@@ -343,9 +342,8 @@ def tile_results():
             f'<polyline points="76,100 100,70 124,86 148,52 172,78" fill="none" stroke="#1560D4" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>'
             f'<line x1="76" y1="116" x2="174" y2="116" stroke="{PANEL_EDGE}"/>'
             f'<circle cx="214" cy="104" r="34" fill="{GREEN}"/><path d="M198 105 L210 118 L232 90" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>'
-            f'<rect x="224" y="24" width="56" height="40" rx="6" fill="{DARK}"/><rect x="232" y="14" width="40" height="14" rx="3" fill="#fff" stroke="{PANEL_EDGE}"/>'
-            + _t(150, 180, 14, "結果を見る・印刷", fill=FG))
-    return _tile(300, 200, body, "結果を見る・印刷")
+            f'<rect x="224" y="24" width="56" height="40" rx="6" fill="{DARK}"/><rect x="232" y="14" width="40" height="14" rx="3" fill="#fff" stroke="{PANEL_EDGE}"/>')
+    return _tile(300, 165, body, "結果を見る・印刷")
 
 
 def tile_alarm():
@@ -353,9 +351,8 @@ def tile_alarm():
             f'<rect x="72" y="32" width="106" height="64" rx="4" fill="#0F2A3A"/>'
             f'<rect x="80" y="74" width="60" height="6" fill="#FF8A80"/><rect x="80" y="84" width="40" height="6" fill="#FF8A80"/>'
             f'<path d="M222 28 L270 112 L174 112 Z" fill="{YELLOW}" stroke="{INK}" stroke-width="4" stroke-linejoin="round"/>'
-            f'<rect x="218" y="56" width="8" height="30" rx="3" fill="{INK}"/><circle cx="222" cy="98" r="5" fill="{INK}"/>'
-            + _t(150, 180, 14, "アラームを調べる", fill=FG))
-    return _tile(300, 200, body, "アラームを調べる")
+            f'<rect x="218" y="56" width="8" height="30" rx="3" fill="{INK}"/><circle cx="222" cy="98" r="5" fill="{INK}"/>')
+    return _tile(300, 165, body, "アラームを調べる")
 
 
 def folder():
@@ -364,7 +361,7 @@ def folder():
                           f'<rect x="{x + 10}" y="{y + 82}" width="60" height="6" fill="#DDE2E7"/>')
     body = (sheet(120, 40) + sheet(210, 52) + sheet(300, 40)
             + f'<path d="M60 130 L60 250 L460 250 L460 130 L260 130 L240 106 L80 106 Q60 106 60 130 Z" fill="{HERE}" stroke="#B57A00" stroke-width="3" stroke-linejoin="round"/>'
-            + _t(260, 292, 14, "保存した結果（.BS・.KS）", fill=FG))
+            + _t(260, 292, 14, "保存した結果", fill=FG))
     return _wide(body, "保存した結果")
 
 

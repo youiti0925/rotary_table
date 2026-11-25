@@ -51,6 +51,9 @@ def finish():
 
 
 snap("出す前")
+if hasattr(win, "fit_before_show"):
+    win.fit_before_show()          # アプリ本体（gui.run）と同じ順番
+    snap("出す前に詰めた後")
 win.showMaximized()
 snap("最大にした直後")
 for ms, tag in ((0, "0秒後"), (100, "0.1秒後"), (400, "0.4秒後"), (1000, "1秒後"), (2500, "2.5秒後")):

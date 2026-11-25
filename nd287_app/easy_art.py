@@ -476,3 +476,31 @@ def prog_manual():
             + "".join(f'<rect x="274" y="{100 + i * 28}" width="{140 - i * 22}" height="6" fill="#DDE2E7"/>' for i in range(4))
             + f'<path d="M244 140 L160 140" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/><path d="M164 131 L150 140 L164 149 Z" fill="{HERE}"/>')
     return _wide(body, "測定プログラムを機械に用意する")
+
+
+# ------------------------------------------------------------------ 一旦やめる
+
+def pause_stop(phase=0.0):
+    """測っている途中にやめるとき: まず機械の「送り停止」を押す（赤い非常停止はあぶないとき）。"""
+    body = (f'<rect x="20" y="30" width="480" height="150" rx="14" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+            f'<rect x="40" y="46" width="130" height="90" rx="6" fill="#0F2A3A"/>'
+            + _t(105, 98, 18, "測定中", fill="#7CF0A0")
+            + f'<rect x="210" y="60" width="110" height="64" rx="12" fill="{YELLOW}" stroke="{INK}" stroke-width="3"/>'
+            + _t(265, 100, 20, "送り停止", fill=INK)
+            + _ring(265, 92, 46, phase)
+            + f'<circle cx="430" cy="92" r="40" fill="{RED}" stroke="#8E1E17" stroke-width="4"/>'
+            + _t(430, 98, 15, "非常停止", fill="#fff")
+            + _t(265, 212, 16, "まず ここ", fill=FG) + _t(430, 212, 14, "あぶないとき", fill=FG))
+    return _svg(520, 230, body, "まず機械を止める")
+
+
+def unsaved():
+    """まだ保存していない: 結果の紙が、フォルダに入っていない。"""
+    body = (f'<rect x="60" y="30" width="150" height="130" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            f'<polyline points="76,124 102,86 128,106 156,62 190,92" fill="none" stroke="#1560D4" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>'
+            f'<path d="M222 96 L262 96" stroke="{HERE}" stroke-width="6" stroke-linecap="round" stroke-dasharray="3 10"/>'
+            f'<path d="M258 84 L278 96 L258 108 Z" fill="{HERE}"/>'
+            f'<path d="M290 70 L330 70 L342 84 L430 84 L430 160 L290 160 Z" fill="#E9C46A" stroke="#B88A1B" stroke-width="3" stroke-linejoin="round"/>'
+            f'<circle cx="400" cy="46" r="22" fill="{YELLOW}" stroke="{INK}" stroke-width="3"/>' + _t(400, 54, 24, "!", fill=INK, weight=900)
+            + _t(360, 194, 15, "まだ入っていません", fill=FG))
+    return _svg(480, 210, body, "まだ保存していません")

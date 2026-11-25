@@ -14670,6 +14670,22 @@ class MainWindow(QtWidgets.QMainWindow):
         """セーブ（測定の画面の「セーブ」と同じ。上書きの確認などは、今までどおり出る）。"""
         self.save()
 
+    def easy_undo(self):
+        """1か所もどす（通常の画面の「1点戻る」と同じ）。"""
+        self.undo()
+
+    def easy_cancel(self):
+        """取込を中止する（通常の画面の「中止」と同じ。測った値は消える。確かめるのは、はじめてモード側）。"""
+        self.cancel()
+
+    def easy_open_folder(self):
+        """保存した場所（フォルダ）を開く。"""
+        path = getattr(self, "_flow_saved_path", "") or ""
+        if not path:
+            raise RuntimeError("まだ保存していません")
+        from PySide6 import QtGui, QtCore
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(Path(path).parent)))
+
     def easy_next_mode(self, mode):
         self.mode_combo.setCurrentText(mode)
         self.on_model_entered()

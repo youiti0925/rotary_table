@@ -170,6 +170,50 @@ class ChoiceButton(QtWidgets.QAbstractButton):
                             QtCore.QPointF(c.right() - 5, c.top() + 6)])
 
 
+class PauseDialog(QtWidgets.QDialog):
+    """「一旦やめる」の画面。押しただけでは何も捨てず、機械にも何もしない。選んだものを self.chosen に入れる。"""
+
+    def __init__(self, parent, capturing, options):
+        super().__init__(parent)
+        self.setWindowTitle("一旦やめる")
+        self.chosen = "continue"
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(10)
+        pic = SvgView()
+        pic.setFixedHeight(150)
+        if capturing:
+            pic.set_svg(easy_art.pause_stop())
+            v.addWidget(pic)
+            t = QtWidgets.QLabel("① まず、機械を止めます\n操作盤の「送り停止」のボタンを押します。（PC からは止められません）")
+            t.setWordWrap(True)
+            t.setStyleSheet("background:#FFF3CF; color:#7A5200; padding:10px; font-size:15px; font-weight:700;")
+            v.addWidget(t)
+            n = QtWidgets.QLabel("② 下から選びます。アプリを閉じると、途中の値は消えます。")
+            n.setWordWrap(True)
+            v.addWidget(n)
+        elif any(k == "save" for k, _t in options):
+            pic.set_svg(easy_art.unsaved())
+            v.addWidget(pic)
+            t = QtWidgets.QLabel("まだ保存していません")
+            t.setStyleSheet("font-size:16px; font-weight:900; color:#7A5200;")
+            v.addWidget(t)
+        for key, text in options:
+            b = QtWidgets.QPushButton(text)
+            b.setMinimumHeight(40)
+            b.setStyleSheet("QPushButton{background:#F0A400;color:#2A1E00;font-size:17px;font-weight:900;border-radius:10px;}"
+                            if key == "continue" else
+                            "QPushButton{background:#FFFFFF;color:#17212B;font-size:15px;border:2px solid #C5CCD3;border-radius:10px;}"
+                            "QPushButton:hover{border-color:#1560D4;}")
+            b.clicked.connect(lambda _c=False, k=key: self._pick(k))
+            v.addWidget(b)
+        self.setMinimumWidth(420)
+
+    def _pick(self, key):
+        self.chosen = key
+        self.accept()
+
+
 class ChapterBar(QtWidgets.QWidget):
     """上の6つの章。済んだ章は緑、いまの章は青。"""
 
@@ -340,6 +384,12 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_back.setObjectName("back")
         self.b_back.clicked.connect(self._back)
         foot.addWidget(self.b_back)
+        self.b_pause = QtWidgets.QPushButton("■ 一旦やめる")
+        self.b_pause.setObjectName("sub")
+        self.b_pause.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_pause.clicked.connect(self._open_pause)
+        self.b_pause.setVisible(False)
+        foot.addWidget(self.b_pause)
         self.b_skip = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
         self.b_skip.setObjectName("sub")
         self.b_skip.setCursor(QtCore.Qt.PointingHandCursor)
@@ -415,7 +465,9 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.ctx.update(handoff=False, skip_machine=False, params=None, prog=None)
         self._enter(j)
 
-    def _go_home(self):
+    def _go_home(self, force=False):
+        if not force and not self._unsaved_ok():
+            return
         if self._wiz is not None and not self._close_wizard():
             return
         self.flow = "home"
@@ -440,6 +492,12 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._enter(j)
 
     def _back(self):
+        c = self._hctx()
+        if c.get("capturing") and not c.get("finished"):
+            self._open_pause()                          # 測っている途中: 黙って前へもどらない（取込が続いたままになるため）
+            return
+        if STEPS[self.i]["id"] in ("result", "finish") and not self._unsaved_ok():
+            return
         if self._wiz is not None and not self._close_wizard():
             return
         if self.history:
@@ -461,6 +519,93 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _remeasure(self):
         self.history.append(self.i)
         self._enter(INDEX["prog_select"])
+
+    # ------------------------------------------------------------ 一旦やめる・保存忘れ
+    def _yesno(self, text, yes="はい", no="いいえ"):
+        """確かめる（試験では、この関数を差しかえる）。"""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("はじめてモード")
+        box.setText(text)
+        by = box.addButton(yes, QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(no, QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        box.exec()
+        return box.clickedButton() is by
+
+    def _unsaved(self):
+        c = self._hctx()
+        return bool(c.get("finished") and not c.get("saved") and not c.get("capturing"))
+
+    def _unsaved_ok(self):
+        """測り終えて、まだ保存していないとき、先へ進んでよいか確かめる。進んでよい（または保存済み）なら True。"""
+        if not self._unsaved():
+            return True
+        if self._yesno("まだ保存していません。保存しないで進みますか？\n（保存しないと、アプリを閉じたときに測った値が消えます）",
+                       "保存しないで進む", "もどる"):
+            return True
+        return False
+
+    def _pause_options(self):
+        """いまの様子に合わせた、選べるもの [(キー, 文)]。先頭がおすすめ。"""
+        c = self._hctx()
+        sid = STEPS[self.i]["id"]
+        opts = [("continue", "つづける")]
+        if c.get("capturing") and not c.get("finished"):
+            opts += [("undo", "1か所もどす（測った値は残ります）"),
+                     ("remeasure", "この測定をやめて、最初から測り直す"),
+                     ("home", "やめてホームへ")]
+        elif self._unsaved():
+            opts += [("save", "保存する"), ("home", "保存しないでホームへ")]
+        else:
+            if self.history:
+                opts.append(("back", "前の手順にもどる"))
+            opts.append(("home", "この作業をやめてホームへ"))
+        if sid == "machine_in" and self._wiz is not None:
+            opts.insert(0, ("continue", "書き終わるまで待つ（おすすめ）"))
+            opts = opts[:1] + [o for o in opts[1:] if o[0] != "continue"]
+        return opts
+
+    def _ask_pause(self, capturing, options):
+        """「一旦やめる」の画面を出して、選んだキーを返す（試験では差しかえる）。"""
+        dlg = PauseDialog(self, capturing, options)
+        dlg.exec()
+        return dlg.chosen
+
+    def _open_pause(self):
+        c = self._hctx()
+        capturing = bool(c.get("capturing") and not c.get("finished"))
+        key = self._ask_pause(capturing, self._pause_options())
+        if key == "undo":
+            try:
+                self.host.easy_undo()
+            except Exception as e:
+                self._notice = f"もどせませんでした: {e}"
+            self._refresh()
+        elif key == "remeasure":
+            n = (c.get("count") or (0, 0))[0]
+            if self._yesno(f"測った {n} か所は消えます。最初から測り直しますか？", "消して測り直す", "やめる"):
+                self._cancel_capture()
+                self.history.append(self.i)
+                self._enter(INDEX["prog_select"])
+        elif key == "home":
+            if capturing:
+                n = (c.get("count") or (0, 0))[0]
+                if not self._yesno(f"測った {n} か所は消えます。やめてホームへ行きますか？", "消してホームへ", "やめる"):
+                    return
+                self._cancel_capture()
+                self._go_home(force=True)
+            else:
+                self._go_home()
+        elif key == "back":
+            self._back()
+        elif key == "save":
+            self._save()
+
+    def _cancel_capture(self):
+        try:
+            self.host.easy_cancel()
+        except Exception as e:
+            self._notice = f"中止できませんでした: {e}"
 
     def _manual_done(self):
         self.manual = True
@@ -531,6 +676,11 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._small_note("機械の操作は、まだ実機で確かめていません。")
         elif sid == "prog_manual":
             self._small_note("機械の操作は、まだ実機で確かめていません。")
+        elif sid == "finish":
+            self._act_button("印刷する", self._print)
+            self._act_button("PDFにする", self._pdf)
+            if c.get("saved_path"):
+                self._act_button("保存した場所を開く", self._open_folder)
         elif sid == "fields":
             self._build_fields()
         elif sid == "open_past":
@@ -632,6 +782,13 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._notice = f"開けませんでした: {e}"
         self._refresh()
 
+    def _open_folder(self):
+        try:
+            self.host.easy_open_folder()
+        except Exception as e:
+            self._notice = f"開けませんでした: {e}"
+        self._refresh()
+
     def _print(self):
         try:
             self.host.easy_print()
@@ -695,7 +852,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -703,6 +860,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.home.setVisible(False)
         self.bar.setVisible(True)
         self.b_back.setVisible(True)
+        self.b_pause.setVisible(True)
         inside = sid == "machine_in" and self._wiz is not None
         self.right_w.setVisible(not inside)
         self.art.setVisible(not inside)
@@ -1040,4 +1198,6 @@ class EasyModeDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
             if a != QtWidgets.QMessageBox.Yes:
                 return
+        elif not self._unsaved_ok():
+            return
         super().reject()

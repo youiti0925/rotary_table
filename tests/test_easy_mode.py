@@ -290,6 +290,16 @@ class FakeHost:
     def easy_next_mode(self, mode):
         self.calls.append(("mode", mode))
 
+    def easy_undo(self):
+        self.calls.append("undo")
+
+    def easy_cancel(self):
+        self.calls.append("cancel")
+        self.capturing = False
+
+    def easy_open_folder(self):
+        self.calls.append("folder")
+
     def easy_param_list(self):
         self.calls.append("param_list")
 
@@ -545,10 +555,10 @@ class TestDialog(unittest.TestCase):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
                              if not b.isHidden() and not dlg.embed.isAncestorOf(b))
-        self.assertEqual(len(vis()), 2)
+        self.assertEqual(len(vis()), 3)               # もどる・一旦やめる・次へ
         self.pass_choose(dlg)
         self.app.processEvents()
-        self.assertEqual(len(vis()), 2)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
+        self.assertEqual(len(vis()), 3)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
         self.assertTrue(dlg.b_next.isHidden())
         dlg.close()
 
@@ -599,6 +609,96 @@ class TestDialog(unittest.TestCase):
         self.app.processEvents()
         self.assertIsNone(dlg._wiz)
         self.assertNotEqual(self.sid(dlg), "machine_in")    # プログラムは送らず、先へ
+        dlg.close()
+
+    def _enter_measuring(self, dlg, host):
+        host.capturing = True
+        dlg._enter(F.INDEX["measuring"])
+        dlg.app_ = self.app
+
+    def test_back_while_measuring_opens_pause_not_previous_step(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        self._enter_measuring(dlg, host)
+        asked = []
+        dlg._ask_pause = lambda capturing, opts: (asked.append((capturing, [k for k, _ in opts])), "continue")[1]
+        before = dlg.i
+        dlg._back()
+        self.assertEqual(dlg.i, before)                      # 前の手順へは行かない
+        self.assertTrue(asked and asked[0][0])               # 測っている途中の画面（まず機械を止める）
+        self.assertEqual(asked[0][1][0], "continue")
+        self.assertIn("remeasure", asked[0][1])
+        self.assertNotIn("cancel", host.calls)               # 押しただけでは何も捨てない
+        host.capturing = False
+        dlg.close()
+
+    def test_pause_actions_undo_restart_home(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        self._enter_measuring(dlg, host)
+        dlg._ask_pause = lambda c, o: "undo"
+        dlg._open_pause()
+        self.assertIn("undo", host.calls)
+        dlg._yesno = lambda *a, **k: False                   # 「消してよいか」にいいえ
+        dlg._ask_pause = lambda c, o: "remeasure"
+        dlg._open_pause()
+        self.assertNotIn("cancel", host.calls)
+        dlg._yesno = lambda *a, **k: True
+        dlg._open_pause()
+        self.assertIn("cancel", host.calls)
+        self.assertEqual(self.sid(dlg), "prog_select")       # 最初から測り直す
+        host.capturing = True
+        dlg._ask_pause = lambda c, o: "home"
+        dlg._open_pause()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
+    def test_unsaved_result_is_asked_before_leaving(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.saved = False
+        dlg._enter(F.INDEX["result"])
+        asked = []
+        dlg._yesno = lambda text, *a, **k: (asked.append(text), False)[1]
+        dlg._go_home()
+        self.assertTrue(asked and "保存していません" in asked[0])
+        self.assertEqual(self.sid(dlg), "result")            # いいえ → 動かない
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "result")
+        dlg._yesno = lambda *a, **k: True
+        dlg._go_home()
+        self.assertEqual(self.sid(dlg), "home")
+        host.saved = True                                     # 保存済みなら聞かない
+        dlg._enter(F.INDEX["result"])
+        dlg._yesno = lambda *a, **k: self.fail("保存済みなのに聞いた")
+        dlg._go_home()
+        dlg.close()
+
+    def test_pause_options_when_unsaved_and_idle(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.saved = False
+        dlg._enter(F.INDEX["result"])
+        keys = [k for k, _ in dlg._pause_options()]
+        self.assertEqual(keys[0], "continue")
+        self.assertIn("save", keys)
+        host.saved = True
+        keys = [k for k, _ in dlg._pause_options()]
+        self.assertNotIn("save", keys)
+        self.assertIn("home", keys)
+        dlg.close()
+
+    def test_pause_button_hidden_on_home_and_pictures_render(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0), flow=None)
+        dlg._go_home()
+        self.assertTrue(dlg.b_pause.isHidden())
+        dlg._start_flow("measure")
+        self.assertFalse(dlg.b_pause.isHidden())
+        from nd287_app import easy_art
+        for svg in (easy_art.pause_stop(), easy_art.unsaved()):
+            from PySide6 import QtSvg, QtCore
+            self.assertTrue(QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8"))).isValid())
+        from nd287_app.easy_mode import PauseDialog
+        PauseDialog(dlg, True, [("continue", "つづける")]).close()
+        PauseDialog(dlg, False, [("continue", "つづける"), ("save", "保存する")]).close()
         dlg.close()
 
     def test_fits_small_screens(self):

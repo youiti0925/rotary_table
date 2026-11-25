@@ -12,7 +12,7 @@
 """
 from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
-from . import easy_art, easy_flow, easy_words, flow_guide
+from . import easy_art, easy_flow, easy_photo, easy_words, flow_guide
 from .easy_flow import STEPS, INDEX, CHAPTERS
 
 # 機械の「状態の数値」→ 絵のつまみの位置（easy_art.MODES の番号）
@@ -54,12 +54,36 @@ class SvgView(QtWidgets.QWidget):
         self._svg = ""
 
     def set_svg(self, svg):
+        self._pix = None
         if svg != self._svg:
             self._svg = svg
             self._r.load(QtCore.QByteArray(svg.encode("utf-8")))
-            self.update()
+        self.update()
+
+    def set_photo(self, path):
+        """写真を出す（向きは写真に入っている情報どおり）。読めなければ False（絵のまま）。"""
+        cache = self.__dict__.setdefault("_pix_cache", {})
+        key = str(path)
+        if key not in cache:                          # 0.5秒ごとの描き直しで、毎回読み直さない
+            rd = QtGui.QImageReader(key)
+            rd.setAutoTransform(True)
+            img = rd.read()
+            if img.isNull():
+                return False
+            cache[key] = QtGui.QPixmap.fromImage(img.scaled(1400, 1400, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        self._pix = cache[key]
+        self._svg = ""
+        self.update()
+        return True
 
     def paintEvent(self, _e):
+        pix = getattr(self, "_pix", None)
+        if pix is not None:
+            p = QtGui.QPainter(self)
+            p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+            sc = pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            p.drawPixmap((self.width() - sc.width()) // 2, (self.height() - sc.height()) // 2, sc)
+            return
         if not self._r.isValid():
             return
         p = QtGui.QPainter(self)
@@ -360,7 +384,19 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.v_main = SvgView()
         al.addWidget(self.v_map, 11)
         al.addWidget(self.v_main, 14)
-        mid.addWidget(self.art, 6)
+        self.b_photo = QtWidgets.QPushButton("絵 ／ 写真")
+        self.b_photo.setCheckable(True)
+        self.b_photo.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_photo.setStyleSheet("QPushButton{background:#FFFFFF;border:2px solid #C5CCD3;border-radius:10px;padding:6px 12px;font-weight:700;}"
+                                   "QPushButton:checked{background:#E3EEFF;border-color:#1560D4;}")
+        self.b_photo.clicked.connect(self._toggle_photo)
+        self.b_photo.setVisible(False)
+        self.show_photo = True                      # 写真があれば、初めは写真を出す（絵とは「絵 ／ 写真」で切り替え）
+        art_col = QtWidgets.QVBoxLayout()
+        art_col.setSpacing(6)
+        art_col.addWidget(self.art, 1)
+        art_col.addWidget(self.b_photo, 0, QtCore.Qt.AlignRight)
+        mid.addLayout(art_col, 6)
         self.right_w = QtWidgets.QWidget()
         right = QtWidgets.QVBoxLayout(self.right_w)
         right.setContentsMargins(0, 0, 0, 0)
@@ -1268,7 +1304,35 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_s_detail.setText(br["detail"])
         self.lbl_s_detail.setVisible(bool(br["detail"]))
 
+    def _photo_base(self):
+        try:
+            from .settings import app_dir
+            return getattr(self, "photo_base", None) or app_dir()
+        except Exception:
+            return "."
+
+    def _toggle_photo(self):
+        self.show_photo = self.b_photo.isChecked()
+        self._refresh()
+
     def _set_art(self, s, st, c, done, ph):
+        """絵を出し、同じ内容の写真が `写真` フォルダにあれば、写真に切り替えられるようにする（無ければ絵のまま）。"""
+        self._set_art_svg(s, st, c, done, ph)
+        path = None
+        try:
+            path = easy_photo.step_photo(s, self._photo_base())
+        except Exception:
+            path = None
+        self.b_photo.setVisible(path is not None)
+        if path is not None:
+            self.b_photo.setChecked(self.show_photo)
+            if self.show_photo:
+                if not self.v_main.set_photo(path):
+                    self.b_photo.setVisible(False)
+                if s.get("part"):
+                    self.v_map.setVisible(True)          # 操作盤の全体の絵（どこを触るか）は、写真のときも残す
+
+    def _set_art_svg(self, s, st, c, done, ph):
         sid = s["id"]
         A = easy_art
         aut = st["aut"]

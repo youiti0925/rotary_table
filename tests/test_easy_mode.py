@@ -846,6 +846,34 @@ class TestDialog(unittest.TestCase):
         host.saved = True
         dlg.close()
 
+    def test_photo_lookup_and_toggle(self):
+        import tempfile
+        from pathlib import Path
+        from nd287_app import easy_photo
+        from PySide6 import QtGui
+        base = Path(tempfile.mkdtemp())
+        self.assertEqual(sorted(easy_photo.missing(base)), sorted(easy_photo.NAMES))    # 何も置いていない
+        self.assertIsNone(easy_photo.step_photo(F.step("power"), base))
+        (base / "写真").mkdir()
+        img = QtGui.QImage(40, 30, QtGui.QImage.Format_RGB32)
+        img.fill(0x336699)
+        self.assertTrue(img.save(str(base / "写真" / "power.png")))
+        self.assertEqual(easy_photo.step_photo(F.step("power"), base).name, "power.png")
+        self.assertNotIn("power", easy_photo.missing(base))
+        self.assertIsNone(easy_photo.step_photo(F.step("estop"), base))                  # 置いていない所は絵のまま
+        dlg, host, poller = self.make(F.OFFLINE)
+        dlg.photo_base = base
+        dlg._enter(F.INDEX["power"])
+        self.assertFalse(dlg.b_photo.isHidden())              # 写真があれば、切り替えが出る
+        self.assertIsNotNone(getattr(dlg.v_main, "_pix", None))   # 初めは写真
+        dlg.b_photo.click()                                    # 絵にもどす
+        self.assertIsNone(getattr(dlg.v_main, "_pix", None))
+        dlg._enter(F.INDEX["estop"])
+        self.assertTrue(dlg.b_photo.isHidden())               # 写真が無い手順では出ない
+        dlg.close()
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
     def test_condition_needs_model(self):
         dlg, host, poller = self.make(S(), flow="cond")
         host.e_model.setText("")

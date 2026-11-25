@@ -142,8 +142,10 @@ def machine_state(status=None, alarms=None, *, online=False):
         "alarm": vals.get("alarm"),
         "pw": any(c.startswith("PW") for c in codes),   # PW0000（電源を入れ直してください）など
         "codes": codes,
-        "alarms": [{"code": str(a.get("code", "")), "text": str(a.get("text", "")),
-                    "type": a.get("type"), "no": a.get("no"), "axis": a.get("axis")} for a in (alarms or [])],
+        # None=読めていない（空の一覧=アラームなし とは別）
+        "alarms": None if alarms is None else
+        [{"code": str(a.get("code", "")), "text": str(a.get("text", "")),
+          "type": a.get("type"), "no": a.get("no"), "axis": a.get("axis")} for a in alarms],
     }
 
 

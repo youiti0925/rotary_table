@@ -195,6 +195,34 @@ def search_alarms(alarms, query: str):
     return out
 
 
+def _split_code(text: str):
+    """"PS0010"・"ps10"・"PS 0010" → ("PS", 10)。数字が無ければ数は None。"""
+    n = _norm(text)
+    letters = "".join(ch for ch in n if not ch.isdigit())
+    d = _digits(n)
+    return letters, (int(d) if d else None)
+
+
+def is_exact_code(alarm: dict, query: str) -> bool:
+    """アラームの番号が、入れた番号とぴったり同じか。
+    文字（PS・SW …）と数が同じ。前ゼロは無視（PS10 は PS0010 と同じ）。
+    文字が無い入力（"100"）は、数だけで見るので「ぴったり」とは言わない。"""
+    ql, qn = _split_code(query)
+    if not ql or qn is None:
+        return False
+    al, an = _split_code(alarm.get("code", ""))
+    return al == ql and an == qn
+
+
+def search_alarms_ranked(alarms, query: str):
+    """search_alarms の結果を、番号がぴったり同じものが先になるよう並べ替えたもの
+    （件数・中身は search_alarms と同じ。同順位は元の順を保つ）。
+    例: "PW0000" は PW0000 が先（元は PS0000 が先だった）。"""
+    found = search_alarms(alarms, query)
+    exact = [a for a in found if is_exact_code(a, query)]
+    return exact + [a for a in found if not is_exact_code(a, query)]
+
+
 _HEADER_MAP = {
     "code": "code", "コード": "code", "番号": "code", "アラーム": "code",
     "group": "group", "分類": "group", "種別": "group",

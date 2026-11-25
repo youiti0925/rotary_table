@@ -949,6 +949,266 @@ class TestPoller(unittest.TestCase):
         up[0] = True
         self.assertTrue(p.poll_once()["online"])
 
+    def test_alarm_read_failure_is_none_not_empty(self):
+        class C:
+            def __init__(self, fail):
+                self.fail = fail
+
+            def call(self, cmd, args=None, **k):
+                if cmd == "alarms":
+                    if self.fail:
+                        raise RuntimeError("x")
+                    return {"alarms": []}
+                if cmd == "status":
+                    return {"values": {"aut": 1, "run": 0, "emergency": 0, "alarm": 0}}
+                return {}
+
+            def close(self):
+                pass
+        for fail, want in ((True, None), (False, [])):
+            p = easy_machine.MachinePoller({"focas_host": "127.0.0.1"}, lambda st, f=fail: C(f),
+                                           port_open=lambda *a, **k: True)
+            st = p.poll_once()
+            self.assertTrue(st["online"])
+            self.assertEqual(st["alarms"], want)
+        self.assertIsNone(F.OFFLINE["alarms"])
+        self.assertEqual(F.machine_state({"values": {}}, [], online=True)["alarms"], [])
+
+
+from nd287_app import alarm_watch   # noqa: E402
+
+
+class TestAlarmStep(unittest.TestCase):
+    """アラームの手順（① 一覧 ② 意味 ③ 確かめる ④ 記録）。機械は偽物。実機の確認ではない。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtWidgets
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log = Path(self._tmp.name) / "アラーム記録.csv"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def st(self, alarms, online=True):
+        return F.machine_state({"values": {"aut": 1, "run": 0, "emergency": 0, "alarm": 1 if alarms else 0}},
+                               alarms, online=online)
+
+    def make(self, st, flow="alarm"):
+        from nd287_app import easy_mode
+        host, poller = FakeHost(), FakePoller(st)
+        dlg = easy_mode.EasyModeDialog(host, poller)
+        dlg._alarm_log_path = lambda: self.log            # 記録は一時の場所へ（本番の場所は触らない）
+        dlg.show()
+        self.app.processEvents()
+        if flow:
+            dlg._start_flow(flow)
+            self.app.processEvents()
+        return dlg, host, poller
+
+    def buttons(self, dlg):
+        return [dlg.alarm_list.itemAt(i).widget() for i in range(dlg.alarm_list.count())
+                if dlg.alarm_list.itemAt(i).widget() is not None
+                and dlg.alarm_list.itemAt(i).widget().__class__.__name__ == "QPushButton"]
+
+    PW = {"code": "PW0000", "text": "POWER MUST BE OFF"}
+    SW = {"code": "SW0100", "text": "PARAMETER WRITE ENABLE"}
+    SV = {"code": "SV0436", "text": "SERVO ALARM"}
+
+    def test_lists_all_machine_alarms_verbatim(self):
+        dlg, host, poller = self.make(self.st([self.PW, self.SV, self.SW]))
+        texts = [b.text() for b in self.buttons(dlg)]
+        self.assertEqual(len(texts), 3)
+        self.assertIn("POWER MUST BE OFF", texts[0])
+        self.assertIn("SV0436", texts[1])
+        self.assertTrue(texts[2].startswith("●"))                 # 異常ではないものは印が違う
+        self.assertIn("3 件", dlg.lbl_alarm_head.text())
+        dlg.close()
+
+    def test_offline_says_cable_and_keeps_typing(self):
+        dlg, host, poller = self.make(self.st([], online=False))
+        self.assertIn("機械につながっていません（電源と LAN ケーブル）", dlg.lbl_alarm_head.text())
+        self.assertEqual(self.buttons(dlg), [])
+        dlg.e_alarm.setText("PS0010")
+        self.assertIn("プログラムを直す", dlg.lbl_alarm.text())
+        dlg.close()
+
+    def test_known_alarm_shows_meaning_and_picture(self):
+        dlg, host, poller = self.make(self.st([self.PW]))
+        self.assertIn("PW0000", dlg.lbl_alarm.text())             # 最初の異常なものは、最初から意味を出す
+        self.assertIn("やること", dlg.lbl_alarm.text())
+        self.assertIn("POWER MUST BE OFF", dlg.lbl_al_big.text())
+        self.assertEqual(dlg._al["pic"], "power_cycle")
+        self.assertFalse(dlg.b_al_check.isHidden())
+        dlg.close()
+
+    def test_unknown_alarm_says_not_in_list_and_shows_machine_text_big(self):
+        dlg, host, poller = self.make(self.st([self.SV]))
+        self.assertIn("アプリの一覧にありません", dlg.lbl_alarm.text())
+        self.assertNotIn("原因:", dlg.lbl_alarm.text())            # 無いものを有るように見せない
+        self.assertIn("SERVO ALARM", dlg.lbl_al_big.text())
+        self.assertIsNone(dlg._al["pic"])
+        dlg.close()
+
+    def test_normal_alarm_is_not_abnormal(self):
+        dlg, host, poller = self.make(self.st([self.SW]))
+        self.assertIsNone(dlg._al["sel"])                          # 異常なものが無いので、自動では選ばない
+        self.buttons(dlg)[0].click()
+        self.assertIn("これは異常ではありません（設定を書けるようにしている印）", dlg.lbl_alarm.text())
+        self.assertTrue(dlg.b_al_check.isHidden())
+        dlg.close()
+
+    def test_typed_code_not_in_list_says_so(self):
+        dlg, host, poller = self.make(self.st([]))
+        dlg.e_alarm.setText("SV0436")
+        self.assertIn("アプリの一覧にありません", dlg.lbl_alarm.text())
+        dlg.close()
+
+    def test_check_gone_then_ask_once_and_record(self):
+        dlg, host, poller = self.make(self.st([self.PW, self.SW]))
+        poller.st = self.st([self.SW])                             # 電源を入れ直した → PW0000 が消えた
+        dlg._alarm_check()
+        t = dlg.lbl_al_result.text()
+        self.assertIn("消えました ✓  PW0000", t)
+        self.assertIn("直りました", t)
+        self.assertFalse(dlg.al_ask.isHidden())                    # 1回だけ聞く
+        dlg._alarm_fix_free()                                      # 何も書かないときは記録しない
+        self.assertFalse(self.log.exists())
+        dlg.e_al_fix.setText("電源を入れ直した")
+        dlg._alarm_fix_free()
+        self.assertTrue(dlg.al_ask.isHidden())
+        rows = alarm_watch.read_records(self.log)
+        self.assertEqual((rows[0]["番号"], rows[0]["機械の文字"], rows[0]["やったこと"], rows[0]["結果"]),
+                         ("PW0000", "POWER MUST BE OFF", "電源を入れ直した", "直った"))
+        dlg._alarm_check()                                         # もう一度確かめても、同じ番号は聞き直さない
+        self.assertTrue(dlg.al_ask.isHidden())
+        # 次に同じ番号が出たら、「前はこれで直りました」が一番上
+        poller.st = self.st([self.PW])
+        dlg._tick()
+        dlg._enter(F.INDEX["alarm_look"])
+        self.app.processEvents()
+        self.assertTrue(dlg.lbl_alarm.text().startswith("前はこれで直りました: 電源を入れ直した"))
+        dlg.close()
+
+    def test_check_with_standard_remedy_button(self):
+        dlg, host, poller = self.make(self.st([self.PW]))
+        poller.st = self.st([])
+        dlg._alarm_check()
+        dlg._alarm_fix_std()
+        rows = alarm_watch.read_records(self.log)
+        self.assertIn("電源を切って入れ直す", rows[0]["やったこと"])
+        dlg.close()
+
+    def test_check_still_and_new(self):
+        dlg, host, poller = self.make(self.st([self.PW, self.SV]))
+        poller.st = self.st([self.PW, {"code": "OT0510", "text": "OVER TRAVEL"}])
+        dlg._alarm_check()
+        t = dlg.lbl_al_result.text()
+        self.assertIn("消えました ✓  SV0436", t)
+        self.assertIn("まだ出ています  PW0000", t)
+        self.assertIn("新しく出ました  OT0510", t)
+        self.assertNotIn("直りました。", t)
+        self.assertTrue(dlg.al_ask.isHidden())
+        self.assertFalse(self.log.exists())
+        dlg.close()
+
+    def test_check_offline_does_not_say_fixed(self):
+        dlg, host, poller = self.make(self.st([self.PW]))
+        poller.st = self.st([], online=False)
+        dlg._alarm_check()
+        self.assertIn("機械につながっていません", dlg.lbl_al_result.text())
+        self.assertTrue(dlg.al_ask.isHidden())
+        dlg.close()
+
+    def test_list_follows_the_machine_each_tick(self):
+        dlg, host, poller = self.make(self.st([]))
+        self.assertEqual(self.buttons(dlg), [])
+        poller.st = self.st([self.SV])
+        dlg._tick()
+        self.assertEqual(len(self.buttons(dlg)), 1)
+        dlg.close()
+
+    def test_open_alarm_and_return_to_previous_step(self):
+        dlg, host, poller = self.make(self.st([self.PW]), flow="measure")
+        before = dlg.i
+        flow, hist = dlg.flow, list(dlg.history)
+        dlg.open_alarm()
+        self.assertEqual(self.sid(dlg), "alarm_look")
+        self.assertEqual(dlg.b_next.text(), "もとの手順にもどる")      # 「ホームへ」ではない
+        dlg._next()
+        self.assertEqual((dlg.i, dlg.flow, dlg.history), (before, flow, hist))
+        dlg.open_alarm()
+        dlg._alarm_back()
+        self.assertEqual((dlg.i, dlg.flow, dlg.history), (before, flow, hist))
+        dlg.open_alarm()                                           # 画面の「戻る」でも、飛ぶ前の手順にもどる
+        dlg._back()
+        self.assertEqual(dlg.i, before)
+        dlg.close()
+
+    def test_unread_alarms_are_not_called_fixed(self):
+        # つながっているのに読めなかった（None）: 「ありません」「直りました」と言わない。④ も聞かない
+        dlg, host, poller = self.make(self.st([self.PW]))
+        poller.st = self.st(None)
+        poller.st["alarms"] = None
+        dlg._alarm_check()
+        self.assertIn("読めませんでした", dlg.lbl_al_result.text())
+        self.assertNotIn("直りました", dlg.lbl_al_result.text())
+        self.assertTrue(dlg.al_ask.isHidden())
+        self.assertIn("読めませんでした", dlg.lbl_alarm_head.text())
+        self.assertNotIn("ありません", dlg.lbl_alarm_head.text())
+        # 読めた「なし」は、今までどおり直った
+        poller.st = self.st([])
+        dlg._alarm_check()
+        self.assertIn("直りました", dlg.lbl_al_result.text())
+        dlg.close()
+
+    def test_offline_head_is_not_unread(self):
+        dlg, host, poller = self.make(self.st(None, online=False))
+        self.assertIn("つながっていません", dlg.lbl_alarm_head.text())
+        dlg.close()
+
+    def test_typed_rs232_and_sw0100(self):
+        from nd287_app import fanuc_alarms as FA
+        dlg, host, poller = self.make(self.st([]))
+        db = FA.load_alarms()
+        host.easy_alarm_info = lambda q: [(a["code"], a["title"], a["cause"], a["remedy"])
+                                          for a in FA.search_alarms_ranked(db, q)[:5]]
+        rows = host.easy_alarm_info("RS232")
+        dlg.e_alarm.setText("RS232")
+        if rows:                                                   # 今までの検索の先頭をそのまま出す
+            self.assertIn(rows[0][0], dlg.lbl_alarm.text())
+        self.assertNotIn("一覧にありません", dlg.lbl_alarm.text())
+        dlg.e_alarm.setText("SW0100")
+        self.assertIn("これは異常ではありません（設定を書けるようにしている印）", dlg.lbl_alarm.text())
+        dlg.close()
+
+    def test_legend_line(self):
+        dlg, host, poller = self.make(self.st([self.PW]))
+        from PySide6 import QtWidgets
+        texts = [w.text() for w in dlg.alarm_box.findChildren(QtWidgets.QLabel)]
+        self.assertIn("▲ 異常　● 異常ではない", texts)
+        dlg.close()
+
+    def test_alarm_from_tile_has_no_return_button(self):
+        dlg, host, poller = self.make(self.st([]), flow="alarm")
+        self.assertIsNone(dlg._alarm_return)
+        dlg.close()
+
+    def sid(self, dlg):
+        return F.STEPS[dlg.i]["id"]
+
+    def test_never_resets_alarms(self):
+        # 読むだけ。アラームを消す・リセットする呼び出しは host にも poller にも無い
+        dlg, host, poller = self.make(self.st([self.PW]))
+        dlg._alarm_check()
+        self.assertEqual(poller.log, [])
+        self.assertTrue(all(c != "reset" for c in host.calls))
+        dlg.close()
+
 
 if __name__ == "__main__":
     unittest.main()

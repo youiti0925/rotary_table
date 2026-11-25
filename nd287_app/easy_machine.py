@@ -108,7 +108,7 @@ class MachinePoller:
         try:
             alarms = (self._client.call("alarms") or {}).get("alarms") or []
         except Exception:
-            alarms = []
+            alarms = None                 # 読めなかった（「アラームなし」とは別。推測で空にしない）
         self._set(easy_flow.machine_state(status, alarms, online=True))
         return self.state()
 

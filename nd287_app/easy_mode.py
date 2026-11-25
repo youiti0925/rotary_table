@@ -536,6 +536,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         import time
         self.i = i
         s = STEPS[i]
+        if s["id"] != "alarm_look":
+            self._alarm_return = None
         self.manual = False
         self._entered_at = time.time()
         self.track = {"offline": not self.st["online"]} if s["id"] == "cycle_power" else {"offline": False}
@@ -602,6 +604,9 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.flow = "measure"
             self.history.append(self.i)
             self._enter(back)
+            return
+        if s["id"] == "alarm_look" and self._alarm_return:     # 別の手順から飛んできた: もとへもどる
+            self._alarm_back()
             return
         j = easy_flow.next_index(self.i, self.st, c, self.flow)
         if j is None or s["id"] in ("output", "alarm_look", "prog_done", "cond_done"):
@@ -1111,43 +1116,357 @@ class EasyModeDialog(QtWidgets.QDialog):
         except Exception as e:
             self._notice = f"PDFにできませんでした: {e}"
 
+    # ------------------------------------------------------------ アラーム（① 一覧 → ② 意味とやること → ③ 確かめる → ④ 記録）
+    # 機械から読むだけ。PC からアラームを消す（リセットする）ことはしない。
+    _alarm_return = None             # open_alarm で飛んできたとき、もどる先 (手順の番号, 流れ, 履歴)
+
+    def _alarm_settings(self):
+        return getattr(self.host, "settings", None) or {}
+
+    def _alarm_db(self):
+        from . import fanuc_alarms
+        p = self._alarm_settings().get("fanuc_alarm_csv")
+        try:
+            if p:
+                from pathlib import Path
+                from .settings import app_dir
+                if not Path(p).is_absolute():
+                    p = str(app_dir() / p)
+            return fanuc_alarms.load_alarms(p or None)
+        except Exception:
+            return fanuc_alarms.load_alarms()
+
+    def _alarm_log_path(self):
+        """アラーム記録.csv の場所（PC 側。マスタの外）。試験では差しかえる。"""
+        from . import alarm_watch
+        from .settings import app_dir
+        return app_dir() / alarm_watch.RECORD_FILE
+
+    def _alarm_allowed(self):
+        from . import focas_ops
+        return focas_ops.allowed_codes(self._alarm_settings())
+
+    def _alarm_now(self):
+        from . import alarm_watch
+        return alarm_watch.normalize(self.st.get("alarms"))
+
+    def _alarm_unread(self):
+        """つながっているのに、アラームを読めなかった（None）。「アラームなし」とは別。"""
+        return bool(self.st.get("online")) and self.st.get("alarms") is None
+
+    def _al_label(self, style="", wrap=True):
+        lb = QtWidgets.QLabel("")
+        lb.setWordWrap(wrap)
+        if style:
+            lb.setStyleSheet(style)
+        return lb
+
     def _build_alarm(self):
-        """番号を入れると、意味とやることが出る（アラーム検索と同じ中身）。"""
-        lb = QtWidgets.QLabel("アラームの番号（例 PS0010。機械の画面に出ています）")
+        """① いま機械に出ているアラームの一覧 ② 意味とやること ③ やったあと確かめる ④ 直ったら記録。
+        番号を打って調べることも、今までどおりできる。"""
+        self._al = {"sel": None, "snap": [], "key": None, "pic": None, "asked": set(), "fixed": None, "remedy": ""}
+        self.lbl_alarm_head = self._al_label("font-size:16px; font-weight:bold; color:#17212B;")
+        self.extra.addWidget(self.lbl_alarm_head)
+        self.alarm_scroll = QtWidgets.QScrollArea()          # 最大 10 件。画面が伸びないように、高さを決める
+        self.alarm_scroll.setWidgetResizable(True)
+        self.alarm_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.alarm_scroll.setMaximumHeight(130)
+        self.alarm_box = QtWidgets.QWidget()
+        self.alarm_list = QtWidgets.QVBoxLayout(self.alarm_box)
+        self.alarm_list.setContentsMargins(0, 0, 0, 0)
+        self.alarm_list.setSpacing(4)
+        self.alarm_scroll.setWidget(self.alarm_box)
+        self.extra.addWidget(self.alarm_scroll)
+        self.b_al_read = QtWidgets.QPushButton("もう一度読む")
+        self.b_al_read.setObjectName("sub")
+        self.b_al_read.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_al_read.clicked.connect(self._alarm_reread)
+        self.extra.addWidget(self.b_al_read)
+        self.lbl_al_big = self._al_label("font-size:20px; font-weight:900; color:#17212B; background:#FFF3CF; "
+                                         "border-radius:8px; padding:8px 12px;")
+        self.lbl_al_big.setVisible(False)
+        self.extra.addWidget(self.lbl_al_big)
+        self.lbl_alarm = self._al_label()
+        self.lbl_alarm.setObjectName("line")
+        self.extra.addWidget(self.lbl_alarm)
+        self.b_al_check = self._act_button("やりました。確かめる ▶", self._alarm_check)
+        self.b_al_check.setVisible(False)
+        self.lbl_al_result = self._al_label("font-size:15px; font-weight:bold; color:#17212B;")
+        self.lbl_al_result.setVisible(False)
+        self.extra.addWidget(self.lbl_al_result)
+        self.al_ask = QtWidgets.QWidget()                      # ④ 直ったら1回だけ聞く
+        ak = QtWidgets.QVBoxLayout(self.al_ask)
+        ak.setContentsMargins(0, 0, 0, 0)
+        ak.setSpacing(6)
+        self.al_ask_title = self._al_label("font-size:15px; font-weight:bold; color:#16864C;")
+        ak.addWidget(self.al_ask_title)
+        self.b_al_fix_std = QtWidgets.QPushButton("")
+        self.b_al_fix_std.setObjectName("act")
+        self.b_al_fix_std.clicked.connect(self._alarm_fix_std)
+        ak.addWidget(self.b_al_fix_std)
+        self.e_al_fix = QtWidgets.QLineEdit()
+        self.e_al_fix.setObjectName("fld")
+        self.e_al_fix.setPlaceholderText("ほかのやり方なら、ここに一言（例: 非常停止を押して、もどした）")
+        ak.addWidget(self.e_al_fix)
+        row = QtWidgets.QHBoxLayout()
+        b_free = QtWidgets.QPushButton("この一言で記録する")
+        b_free.setObjectName("back")
+        b_free.clicked.connect(self._alarm_fix_free)
+        b_skip = QtWidgets.QPushButton("記録しない")
+        b_skip.setObjectName("sub")
+        b_skip.clicked.connect(self._alarm_fix_skip)
+        row.addWidget(b_free)
+        row.addWidget(b_skip)
+        row.addStretch(1)
+        ak.addLayout(row)
+        self.al_ask.setVisible(False)
+        self.extra.addWidget(self.al_ask)
+        lb = QtWidgets.QLabel("番号を打って調べる（例 PS0010。機械の画面に出ています）")
         lb.setStyleSheet("color:#5A6876; font-size:13px;")
         self.extra.addWidget(lb)
         e = QtWidgets.QLineEdit()
         e.setObjectName("fld")
         e.setMaximumWidth(340)
         self.extra.addWidget(e)
-        self.lbl_alarm = QtWidgets.QLabel("")
-        self.lbl_alarm.setWordWrap(True)
-        self.lbl_alarm.setObjectName("line")
-        self.extra.addWidget(self.lbl_alarm)
         self.e_alarm = e
         e.textChanged.connect(self._alarm_search)
-        codes = [a["code"] for a in (self.st.get("alarms") or []) if a.get("code")]
-        if codes:                                    # 機械に出ているアラームがあれば、最初から調べる
-            e.setText(codes[0])
+        self._alarm_sync()
+        first = next((a for a in self._alarm_now() if not self._alarm_is_normal(a)), None)
+        if first is not None:                         # 機械に出ているものがあれば、最初から意味を出す
+            self._alarm_pick(first)
         else:
             self._alarm_search("")
 
+    def _alarm_is_normal(self, a):
+        from . import alarm_watch
+        return alarm_watch.is_normal(a, self._alarm_allowed())
+
+    def _alarm_sync(self):
+        """① 一覧を、いまの機械の様子に合わせる（変わったときだけ作り直す。打っている字は消さない）。"""
+        if not hasattr(self, "_al") or not hasattr(self, "alarm_list"):
+            return
+        now = self._alarm_now()
+        online = bool(self.st.get("online"))
+        unread = self._alarm_unread()
+        key = (online, unread) + tuple((a["code"], a["text"], a["axis"]) for a in now)
+        if key == self._al["key"]:
+            return
+        self._al["key"] = key
+        while self.alarm_list.count():
+            w = self.alarm_list.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        if not online:
+            self.lbl_alarm_head.setText("機械につながっていません（電源と LAN ケーブル）")
+        elif unread:
+            self.lbl_alarm_head.setText("アラームを読めませんでした（もう一度読むを押してください）")
+        elif not now:
+            self.lbl_alarm_head.setText("いま機械に出ているアラームは、ありません")
+        else:
+            self.lbl_alarm_head.setText(f"いま機械に出ているアラーム {len(now)} 件（押すと、意味とやることが出ます）")
+        for a in (now if online else []):
+            normal = self._alarm_is_normal(a)
+            axis = f"（軸 {a['axis']}）" if a.get("axis") else ""
+            b = QtWidgets.QPushButton(f"{'●' if normal else '▲'} {a['code']}{axis}　{a['text']}")
+            b.setObjectName("back")
+            b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.setStyleSheet("text-align:left; font-size:14px; padding:6px 12px;")
+            b.clicked.connect(lambda _=False, a=a: self._alarm_pick(a))
+            self.alarm_list.addWidget(b)
+        if online and now:
+            leg = self._al_label("color:#5A6876; font-size:12px;")
+            leg.setText("▲ 異常　● 異常ではない")
+            self.alarm_list.addWidget(leg)
+        self.alarm_list.addStretch(1)
+
+    def _alarm_reread(self):
+        """もう一度読む（読む係が持っている、いちばん新しい値に合わせる）。"""
+        if self.poller is not None:
+            try:
+                self.st = self.poller.state()
+            except Exception:
+                pass
+        self._al["key"] = None
+        self._alarm_sync()
+        self._refresh()
+
+    def _alarm_pick(self, a):
+        """② 1件を選んだ: 意味・原因・やること。ここで「いまの一覧」を覚えておく（③ で比べる）。"""
+        from . import alarm_watch as AW
+        self._al.update(sel=a, snap=self._alarm_now(), pic=None, remedy="")
+        self.lbl_al_result.setVisible(False)
+        self.al_ask.setVisible(False)
+        code, text = a["code"], a["text"]
+        lines = []
+        normal = self._alarm_is_normal(a)
+        if normal:
+            lines.append(AW.NORMAL_NOTE + "。")
+        else:
+            fix = AW.last_fix(self._alarm_log_path(), code)
+            if fix:
+                lines.append(f"前はこれで直りました: {fix}")
+            res = AW.lookup(self._alarm_db(), code, text)
+            if res["known"]:
+                x = res["exact"][0]
+                lines.append(f"{x.get('code', '')}  {x.get('title', '')}")
+                lines.append(f"原因: {x.get('cause', '')}")
+                lines.append(f"やること: {x.get('remedy', '')}")
+                self._al["remedy"] = x.get("remedy", "")
+            else:
+                lines.append(f"{AW.UNKNOWN_NOTE}。上の機械の文字を見て、機械メーカーの資料で確かめてください。")
+                for x in res["near"][:2]:
+                    lines.append(f"{AW.NEAR_LABEL}: {x.get('code', '')}  {x.get('title', '')}（{x.get('remedy', '')}）")
+            self._al["pic"] = AW.remedy_art(code, text)
+        self.lbl_al_big.setText(f"機械の画面の文字（{code}）\n{text}" if text else f"{code}")
+        self.lbl_al_big.setVisible(True)
+        self.lbl_alarm.setText("\n".join(lines))
+        self.b_al_check.setVisible(not normal)
+        self.e_alarm.blockSignals(True)
+        self.e_alarm.setText("")
+        self.e_alarm.blockSignals(False)
+        self._refresh()
+
+    def _alarm_check(self):
+        """③ やったあと、読み直して比べる。消えた ✓／まだ出ている／新しく出た。"""
+        from . import alarm_watch as AW
+        sel = self._al.get("sel")
+        if sel is None:
+            return
+        self._alarm_reread()
+        if not self.st.get("online"):
+            self.lbl_al_result.setText("機械につながっていません（電源と LAN ケーブル）。つながってから、もう一度押してください。")
+            self.lbl_al_result.setVisible(True)
+            return
+        if self._alarm_unread():                          # 読めていない: 直ったとも、まだとも言わない
+            self.lbl_al_result.setText("アラームを読めませんでした（もう一度読むを押してください）。")
+            self.lbl_al_result.setVisible(True)
+            self.al_ask.setVisible(False)
+            return
+        d = AW.alarm_diff(self._al["snap"], self._alarm_now())
+
+        def bad(lst):
+            return [a for a in lst if not self._alarm_is_normal(a)]
+        gone, still, new = bad(d["gone"]), bad(d["still"]), bad(d["new"])
+        lines = [f"消えました ✓  {a['code']}" for a in gone]
+        lines += [f"まだ出ています  {a['code']}  {a['text']}" for a in still]
+        lines += [f"新しく出ました  {a['code']}  {a['text']}" for a in new]
+        if not still and not new:
+            lines.append("直りました。")
+        else:
+            lines.append("まだ残っています。「やること」をもう一度見て、機械で試してください（アプリからは消せません）。")
+        self.lbl_al_result.setText("\n".join(lines))
+        self.lbl_al_result.setVisible(True)
+        fixed = next((a for a in gone if a["code"] == sel["code"]), None) or (gone[0] if gone else None)
+        if not still and not new and fixed is not None and fixed["code"] not in self._al["asked"]:
+            self._alarm_ask(fixed)
+
+    def _alarm_ask(self, a):
+        """④ 全部消えたら1回だけ聞く: どれで直りましたか。"""
+        self._al["fixed"] = a
+        self._al["asked"].add(a["code"])
+        self.al_ask_title.setText(f"どれで直りましたか（{a['code']}）。次に同じアラームが出たとき、最初に出します。")
+        rem = self._al.get("remedy") or ""
+        self.b_al_fix_std.setText(f"「やること」のとおりにしたら直りました\n{rem}" if rem else "")
+        self.b_al_fix_std.setVisible(bool(rem))
+        self.e_al_fix.setText("")
+        self.al_ask.setVisible(True)
+
+    def _alarm_fix_std(self):
+        self._alarm_record(self._al.get("remedy") or "")
+
+    def _alarm_fix_free(self):
+        t = self.e_al_fix.text().strip()
+        if not t:
+            self.e_al_fix.setFocus()
+            return
+        self._alarm_record(t)
+
+    def _alarm_fix_skip(self):
+        self.al_ask.setVisible(False)
+
+    def _alarm_record(self, did):
+        from . import alarm_watch as AW
+        a = self._al.get("fixed")
+        if a is None:
+            return
+        em = getattr(self.host, "e_machine", None)
+        try:
+            AW.append_record(self._alarm_log_path(), {
+                "機番": em.text() if em is not None else "", "CNC ID": self.st.get("cnc_id") or "",   # CNC ID は読む係がまだ出さない（空）
+                "番号": a["code"], "機械の文字": a["text"], "やったこと": did, "結果": AW.RESULT_FIXED})
+            msg = "記録しました。次に同じ番号が出たら、この直し方を最初に出します。"
+        except Exception as e:
+            msg = f"記録できませんでした: {e}"
+        self.al_ask.setVisible(False)
+        self.lbl_al_result.setText(self.lbl_al_result.text() + "\n" + msg)
+
     def _alarm_search(self, q):
+        """番号を打って調べる（機械につながっていなくても使える）。ぴったり同じ番号を先に出す。"""
+        from . import fanuc_alarms, alarm_watch as AW
         q = q.strip()
+        self.b_al_check.setVisible(False)
+        self.lbl_al_result.setVisible(False)
+        self.al_ask.setVisible(False)
+        self.lbl_al_big.setVisible(False)
+        self._al["sel"], self._al["pic"] = None, None
         if not q:
             self.lbl_alarm.setText("番号を入れてください。")
-            self.v_main.set_svg(easy_art.alarm_screen(bool(self.st.get("alarms"))))
+            return
+        if self._alarm_typed_normal(q):
+            self.lbl_alarm.setText(AW.NORMAL_NOTE + "。")
             return
         try:
             rows = self.host.easy_alarm_info(q)
         except Exception as e:
             self.lbl_alarm.setText(f"調べられませんでした: {e}")
             return
+        exact = [r for r in rows if fanuc_alarms.is_exact_code({"code": r[0]}, q)]
+        if exact:
+            code, title, cause, remedy = exact[0]
+            self.lbl_alarm.setText(f"{code}  {title}\n原因: {cause}\nやること: {remedy}")
+            return
+        letters, num = fanuc_alarms._split_code(q)
+        prefixes = {fanuc_alarms._split_code(a.get("code", ""))[0] for a in self._alarm_db()}
+        looks_code = (letters in prefixes and num is not None) or q.isdigit()
+        if looks_code:                                     # 「PS0010」のような番号: ぴったりは無い
+            near = "".join(f"\n{AW.NEAR_LABEL}: {r[0]}  {r[1]}" for r in rows[:2])
+            self.lbl_alarm.setText(f"{AW.UNKNOWN_NOTE}。機械の画面の文字を見て、機械メーカーの資料で確かめてください。{near}")
+            return
         if not rows:
             self.lbl_alarm.setText("見つかりませんでした。通常の画面の「アラーム検索」で、ことばでも探せます。")
             return
         code, title, cause, remedy = rows[0]
         self.lbl_alarm.setText(f"{code}  {title}\n原因: {cause}\nやること: {remedy}")
+
+    def _alarm_typed_normal(self, q):
+        """打った番号が、異常ではないアラーム（SW0100 など）か。"""
+        from . import fanuc_alarms
+        want = fanuc_alarms._split_code(q)
+        if not want[0] or want[1] is None:
+            return False
+        return any(fanuc_alarms._split_code(c) == want for c in self._alarm_allowed())
+
+    def open_alarm(self):
+        """どの手順からでも、アラームの手順へ飛ぶ。「もとの手順にもどる」で、飛ぶ前の手順へもどる。"""
+        if STEPS[self.i]["id"] == "alarm_look":
+            return
+        prev = (self.i, self.flow, list(self.history))
+        self.flow = "alarm"
+        self.history = prev[2] + [self.i]
+        self._alarm_return = prev
+        self._enter(INDEX["alarm_look"])
+        if STEPS[self.i]["id"] != "alarm_look":            # 書き込み中などで移れなかった: 元のまま
+            self.flow, self.history, self._alarm_return = prev[1], prev[2], None
+
+    def _alarm_back(self):
+        r, self._alarm_return = self._alarm_return, None
+        if not r:
+            self._back()
+            return
+        i, flow, hist = r
+        self.flow, self.history = flow, hist
+        self._enter(i)
 
     def _model_entered(self):
         try:
@@ -1167,6 +1486,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
             return
+        if sid == "alarm_look":
+            self._alarm_sync()
         self.home.setVisible(False)
         self.bar.setVisible(True)
         self.b_back.setVisible(True)
@@ -1231,6 +1552,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             label, go, enabled = ("次の測定へ ▶" if c.get("next_mode") else "ホームへ"), True, True
         elif sid == "cond_done" and self.ctx.get("cond_return") is not None:
             label, go, enabled = "もどる ▶", True, True
+        elif sid == "alarm_look" and getattr(self, "_alarm_return", None):
+            label, go, enabled = "もとの手順にもどる", True, True
         elif sid in ("output", "alarm_look", "prog_done", "cond_done"):
             label, go, enabled = "ホームへ", True, True
         elif sid == "open_past":
@@ -1409,7 +1732,13 @@ class EasyModeDialog(QtWidgets.QDialog):
         elif art == "printer":
             svg = A.printer()
         elif art == "alarm":
-            svg = A.alarm_screen(bool(st.get("alarms")))
+            pic = (getattr(self, "_al", None) or {}).get("pic")
+            if pic == "power_cycle":
+                svg = A.power(False, True, ph)
+            elif pic == "estop":
+                svg = A.estop(False, ph)
+            else:
+                svg = A.alarm_screen(bool(st.get("alarms")))
         elif art == "auto_done":
             svg = A.auto(True, "入りました")
 

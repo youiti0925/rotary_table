@@ -2910,7 +2910,9 @@ class FocasDialog(QtWidgets.QDialog):
         ParamViewerDialog(self, self.settings, file_a=str(p)).exec()
 
     def show_alarm_help(self):
-        dlg = AlarmHelpDialog(self, self.settings)
+        # いま機械につないでいる: 読み済みのアラームを渡す（ここで2本目の接続を作らない）
+        dlg = AlarmHelpDialog(self, self.settings,
+                              machine_alarms=list(self._alarms) if self._connected else None)
         row = self.tbl_alarm.currentRow()
         if 0 <= row < len(self._alarms):
             dlg.e_query.setText(self._alarms[row]["code"])
@@ -12536,7 +12538,9 @@ class HelpDialog(QtWidgets.QDialog):
 class AlarmHelpDialog(QtWidgets.QDialog):
     """FANUCアラームを番号/キーワードで検索し、意味と対処の目安を表示する。"""
 
-    def __init__(self, parent, settings):
+    def __init__(self, parent, settings, machine_alarms=None):
+        """machine_alarms: 呼んだ側がもう機械から読んでいるアラーム（あれば、それを出す。
+        「機械から読む」は使わない＝同じ機械に2本つながない）。"""
         super().__init__(parent)
         self.setWindowTitle("FANUCアラーム検索")
         fit_to_screen(self, 820, 600)
@@ -12544,6 +12548,8 @@ class AlarmHelpDialog(QtWidgets.QDialog):
         if csv_path and not Path(csv_path).is_absolute():
             csv_path = str(app_dir() / csv_path)
         self.alarms = fanuc_alarms.load_alarms(csv_path)
+
+        self._settings = settings or {}
 
         layout = QtWidgets.QVBoxLayout(self)
         note = QtWidgets.QLabel(fanuc_alarms.DISCLAIMER)
@@ -12560,6 +12566,19 @@ class AlarmHelpDialog(QtWidgets.QDialog):
         self.lbl_count = QtWidgets.QLabel("")
         search_row.addWidget(self.lbl_count)
         layout.addLayout(search_row)
+
+        machine_row = QtWidgets.QHBoxLayout()        # 機械から読む（読むだけ。つないで読んで、すぐ切る）
+        self.b_machine = QtWidgets.QPushButton("機械から読む")
+        self.b_machine.clicked.connect(self._read_from_machine)
+        machine_row.addWidget(self.b_machine)
+        self.lbl_machine = QtWidgets.QLabel("")
+        self.lbl_machine.setWordWrap(True)
+        machine_row.addWidget(self.lbl_machine, 1)
+        layout.addLayout(machine_row)
+        self._read_res = None
+        self._read_timer = QtCore.QTimer(self)
+        self._read_timer.setInterval(100)
+        self._read_timer.timeout.connect(self._read_poll)
 
         split = QtWidgets.QHBoxLayout()
         self.list = QtWidgets.QListWidget()
@@ -12579,9 +12598,121 @@ class AlarmHelpDialog(QtWidgets.QDialog):
 
         self._results = []
         self._refilter()
+        if machine_alarms is not None:
+            self._alarms_given = True
+            self.b_machine.setVisible(False)
+            self.b_machine.setEnabled(False)
+            self._show_machine_alarms(machine_alarms)
+
+    # --- 機械から読む（読むだけ。アラームは消さない） -----------------------------
+
+    _alarms_given = False
+    _client_factory = None          # 試験用。None のとき focas_client.make_client を使う
+
+    def _read_from_machine(self):
+        if self._alarms_given:                        # 呼んだ側が読み済み: 2本目の接続は作らない
+            return
+        host = str(self._settings.get("focas_host") or "").strip()
+        if not host:
+            self.lbl_machine.setText("機械の IP アドレスが設定にありません（ツール →「機械と直接つなぐ（FOCAS）」で入れてください）")
+            return
+        if self._read_timer.isActive():
+            return
+        settings = dict(self._settings)
+        try:
+            port = int(settings.get("focas_port") or 8193)
+        except (TypeError, ValueError):
+            port = 8193
+        self.b_machine.setEnabled(False)
+        self.lbl_machine.setText("機械から読んでいます…")
+        self._read_res = None
+
+        def work():
+            client = None
+            try:
+                if self._client_factory is not None:
+                    client = self._client_factory(settings)
+                else:
+                    client = focas_client.make_client(settings, log_path=str(app_dir() / "focas_helper.log"))
+                client.call("connect", {"host": host, "port": port,
+                                        "timeout": focas_client.connect_timeout(settings),
+                                        "families": dict(settings.get("focas_families") or {})})
+                res = client.call("alarms")
+                self._read_res = ("ok", list((res or {}).get("alarms") or []))
+            except Exception as e:
+                if isinstance(e, focas_client.FocasError) and str(e):
+                    msg = str(e)
+                else:                                    # 英語の文だけを出さない
+                    msg = f"機械と話せませんでした（{e.__class__.__name__}）"
+                self._read_res = ("err", msg)
+            finally:
+                if client is not None:                    # 読んだら必ず切る（つないだままにしない）
+                    if getattr(client, "alive", True):    # 時間切れで止めたあとは、呼ばない（helper を起こし直さない）
+                        try:
+                            client.call("disconnect")
+                        except Exception:
+                            pass
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=work, daemon=True).start()
+        self._read_timer.start()
+
+    def _read_poll(self):
+        if self._read_res is None:
+            return
+        self._read_timer.stop()
+        kind, val = self._read_res
+        self.b_machine.setEnabled(True)
+        if kind == "err":
+            self.lbl_machine.setText(f"読めませんでした: {val}")
+            return
+        self._show_machine_alarms(val)
+
+    def _show_machine_alarms(self, items):
+        """読んだアラームを、一覧の先頭に出す（番号がぴったり同じものを先。一覧に無いものは機械の文字を出す）。"""
+        import html
+        from . import alarm_watch
+        allowed = focas_ops.allowed_codes(self._settings)
+        rows = []
+        for a in alarm_watch.normalize(items):
+            axis = f"（軸 {html.escape(str(a['axis']))}）" if a.get("axis") else ""
+            if alarm_watch.is_normal(a, allowed):
+                rows.append(dict(code=a["code"], group="機械から読んだ", title=alarm_watch.NORMAL_NOTE,
+                                 cause=f"機械の文字: {html.escape(a['text'])}{axis}", remedy="何もしなくてかまいません。"))
+                continue
+            res = alarm_watch.lookup(self.alarms, a["code"], a["text"])
+            mt = f"機械の文字: {html.escape(a['text'])}{axis}"
+            if res["known"]:
+                x = dict(res["exact"][0])
+                x["group"] = "機械から読んだ／" + str(x.get("group", ""))
+                x["cause"] = mt + "<br>" + str(x.get("cause", ""))
+                rows.append(x)
+            else:
+                rows.append(dict(code=a["code"], group="機械から読んだ", title=html.escape(a["text"]) or a["code"],
+                                 cause=f"{alarm_watch.UNKNOWN_NOTE}。{mt}",
+                                 remedy="機械の画面の文字を見て、機械メーカーの資料で確かめてください。"))
+        self.e_query.blockSignals(True)
+        self.e_query.setText("")
+        self.e_query.blockSignals(False)
+        rest = [a for a in self.alarms if a.get("code") not in {r["code"] for r in rows}]
+        self._results = rows + rest
+        self.list.blockSignals(True)
+        self.list.clear()
+        for a in self._results:
+            self.list.addItem(f'{a.get("code", "")}　{a.get("title", "")}')
+        self.list.blockSignals(False)
+        self.lbl_count.setText(f"{len(self._results)}件")
+        n_bad = sum(1 for a in alarm_watch.normalize(items) if not alarm_watch.is_normal(a, allowed))
+        self.lbl_machine.setText(f"機械から読みました: {len(rows)} 件（異常なもの {n_bad} 件）。一覧の先頭に出しています"
+                                 if rows else "機械から読みました: いま出ているアラームはありません")
+        if rows:
+            self.list.setCurrentRow(0)
 
     def _refilter(self):
-        self._results = fanuc_alarms.search_alarms(self.alarms, self.e_query.text())
+        self._results = fanuc_alarms.search_alarms_ranked(self.alarms, self.e_query.text())
         self.list.blockSignals(True)
         self.list.clear()
         for a in self._results:
@@ -14689,7 +14820,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def easy_alarm_info(self, query):
         """番号やことばでアラームを探す。[(番号, 題名, 原因, やること)] を返す（アラーム検索と同じ中身）。"""
         from . import fanuc_alarms
-        rows = fanuc_alarms.search_alarms(fanuc_alarms.load_alarms(self.settings.get("fanuc_alarm_csv")), query)
+        rows = fanuc_alarms.search_alarms_ranked(fanuc_alarms.load_alarms(self.settings.get("fanuc_alarm_csv")), query)
         return [(a.get("code", ""), a.get("title", ""), a.get("cause", ""), a.get("remedy", "")) for a in rows[:5]]
 
     def easy_start_capture(self):

@@ -874,6 +874,25 @@ class TestDialog(unittest.TestCase):
         import shutil
         shutil.rmtree(base, ignore_errors=True)
 
+    def test_new_dialogs_fit_small_screens(self):
+        from nd287_app import easy_words
+        from nd287_app.easy_mode import WordsDialog, PauseDialog
+        from PySide6 import QtWidgets
+        f = QtWidgets.QApplication.instance().font()
+        for pt in (7, 12, 22):
+            f.setPointSize(pt)
+            QtWidgets.QApplication.instance().setFont(f)
+            for d in (WordsDialog(None, easy_words.ALL), WordsDialog(None, ("graph",)),
+                      PauseDialog(None, True, [("continue", "つづける"), ("undo", "1か所もどす（測った値は残ります）"),
+                                               ("remeasure", "この測定をやめて、最初から測り直す"), ("home", "やめてホームへ")]),
+                      PauseDialog(None, False, [("continue", "つづける"), ("save", "保存する"), ("home", "保存しないでホームへ")])):
+                m = d.minimumSizeHint()
+                self.assertLessEqual(m.width(), 1024, (pt, type(d).__name__))
+                self.assertLessEqual(m.height(), 730, (pt, type(d).__name__))
+                d.close()
+        f.setPointSize(9)
+        QtWidgets.QApplication.instance().setFont(f)
+
     def test_condition_needs_model(self):
         dlg, host, poller = self.make(S(), flow="cond")
         host.e_model.setText("")

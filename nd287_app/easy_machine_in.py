@@ -409,14 +409,37 @@ def backup_step(client, settings, *, unit, host, port, controllers_list=None, pr
     return {"ident": ident, "res": res, "raw": raw, "types": types, "folder": folder}
 
 
-def plan_step(bk, plan_fn, settings, *, seiban, unit, axes, keep_motor, host, port):
-    """控えと plan_fn（かんたん作成と同じ中身）から、書く一覧を作る。機械には触らない。戻り値は job（cli_write と同じ形）。"""
+def semi_basis(r):
+    """変換の根拠を短く（semi_convert.convert の結果から）。「同じ型式の組 3組」「計算式」。"""
+    if r and r.get("source") == "組":
+        m = re.search(r"同じ型式の組\s*(\d+)\s*組", str(r.get("basis") or ""))
+        return f"同じ型式の組 {m.group(1)}組" if m else "同じ型式の組"
+    return "計算式"
+
+
+def semi_lines(report):
+    """決まったこと・書く画面に出す文（製品ごと）。report は [{"kind","applied","stop","basis"}]（選ばなかった製品は入れない）。"""
+    out = []
+    for e in report or []:
+        if e.get("applied"):
+            out.append(f"{e['kind']}：セミクロに変換して書きます（根拠: {e['basis']}）")
+        else:
+            out.append(f"{e['kind']}：セミクロにはできません（{e['stop']}）。製品の値のまま書きます")
+    return out
+
+
+def plan_step(bk, plan_fn, settings, *, seiban, unit, axes, keep_motor, host, port, semi_name=""):
+    """控えと plan_fn（かんたん作成と同じ中身）から、書く一覧を作る。機械には触らない。戻り値は job（cli_write と同じ形）。
+    semi_name を渡すと（セミクロに変換したとき）、書いたあとの機械の姿を、その名前（SEMI 入り）で控えのフォルダに残す。"""
     ident, res, raw, types, folder = bk["ident"], bk["res"], bk["raw"], bk["types"], bk["folder"]
     kw = {"keep_motor": True} if keep_motor else {}
     plan = plan_fn(raw, zero_scope="product", axis=None, **kw)
     family = ident.get("family") or ""
     wplan = focas_ops.plan_writes(raw, plan, types, verified=focas_ops.verified_list(settings, family))
-    focas_ops.save_plan_file(folder, plan["newtext"])
+    if semi_name:                                   # 変換した値の予定は、客先へ出すものと取り違えない名前で残す
+        (folder / semi_name).write_bytes(plan["newtext"].encode("cp932", errors="replace"))
+    else:
+        focas_ops.save_plan_file(folder, plan["newtext"])
     items = wplan["items"]
     if not items:
         raise EasyError("書くものがありません（機械はすでに同じ値です）")
@@ -429,7 +452,8 @@ def plan_step(bk, plan_fn, settings, *, seiban, unit, axes, keep_motor, host, po
     return {"seiban": seiban, "unit": unit, "axes": list(axes), "keep_motor": bool(keep_motor), "host": host, "port": port,
             "family": family, "cnc_id": ident["cnc_id"], "backup_folder": str(folder), "backup_info": res.info,
             "items": items, "expected": wplan["expected"], "unwritable": wplan["unwritable"],
-            "verify_keys": verify_keys, "newtext": plan["newtext"], "made_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            "verify_keys": verify_keys, "newtext": plan["newtext"], "semi": bool(semi_name), "plan_file": semi_name,
+            "made_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 # ------------------------------------------------------------------ 書く

@@ -8,6 +8,7 @@
 かんたん作成の窓は、書く中身を作るためだけに、見えない形で使う（Planner）。
 """
 import threading
+from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
@@ -36,6 +37,9 @@ class Planner:
         from . import gui
         self.settings = settings
         self.w = gui.ParamWizardDialog(None, settings)
+        self._pairs = {}                 # {(製品の場所か名前, 種別): 同じ型式のフル/セミの組（find_pair_rules の結果）}
+        self.last_semi = []              # 直近の build で、セミクロを選んだ製品ごとの結果 [{"kind","applied","stop","basis"}]
+        self.last_semi_note = ""
 
     def controllers(self):
         return self.w._controllers
@@ -57,6 +61,7 @@ class Planner:
         w = self.w
         w.e_seiban.setText(str(seiban))
         w.search()
+        self._pairs = {}
         out = []
         for f in w._files:
             if not (f.get("chk") and f["chk"].isChecked()):
@@ -66,6 +71,134 @@ class Planner:
                         "motor_id": wizard_probe.file_motor_id(f), "model": m.get("model") or "",
                         "motor": m.get("motor") or "", "name": f.get("name") or "", "values": f.get("values") or {}})
         return out
+
+    # ----- フルクロ → セミクロ（semi_convert。かんたん作成と同じ関数を呼ぶ。計算式も規則も、ここでは作り直さない）-----
+    def _sel(self):
+        return [f for f in self.w._files if f.get("chk") and f["chk"].isChecked()]
+
+    @staticmethod
+    def _pkey(f):
+        return (f.get("path") or f.get("name") or "", f.get("kind") or "")
+
+    def _apply_pairs(self, sel):
+        for f in sel:
+            hit = self._pairs.get(self._pkey(f))
+            if hit:
+                f["_semi_rules"] = hit           # かんたん作成の _on_semi_ref_done と同じ（見つかった組を第一の根拠にする）
+            else:
+                f.pop("_semi_rules", None)
+
+    def _basic_raw(self, unit):
+        from . import param_build
+        bp = self.basic_path(unit) if unit else None
+        if not bp:
+            return ""
+        try:
+            return param_build.read_master(bp)
+        except Exception:
+            return ""
+
+    def semi_options(self, unit="", axes=None):
+        """選んだ製品ごと（products と同じ順）の、フルクロかどうかと変換の見込み。[{"kind","full","stop","basis"}]。
+        unit と axes（軸の文字）が分かれば、その号機の BASIC と軸で判定する（分からなければ製品だけで見る）。
+        1815 の見方・変換は、かんたん作成の _semi_convert_file そのまま。"""
+        from . import gui
+        w = self.w
+        sel = self._sel()
+        self._apply_pairs(sel)
+        raw = self._basic_raw(unit)
+        axes = list(axes or [])
+        out = []
+        for i, f in enumerate(sel):
+            letter = axes[i] if i < len(axes) else None
+            ax = gui.seiban_flow_axis(letter) if letter else (1 if raw else None)
+            e = {"kind": f["kind"], "full": False, "stop": "", "basis": ""}
+            try:
+                r = w._semi_convert_file(f, raw, ax)
+            except Exception as ex:
+                r = None
+                e["stop"] = str(ex)
+            if r is not None and r["mode"] == "フル":
+                e.update(full=True, stop=(r["stop"][0] if r["stop"] else ""), basis="" if r["stop"] else M.semi_basis(r))
+            out.append(e)
+        return out
+
+    def find_pairs(self, idx):
+        """製品 idx（products の順）と同じ型式のフル/セミの組を、製品の場所から探す（読むだけ。時間がかかるので別スレッドで）。
+        かんたん作成の _start_semi_ref と同じ呼び方。戻り値は find_pair_rules の結果（無ければ None）。"""
+        from . import semi_convert
+        from .settings import app_dir
+        w = self.w
+        f = self._sel()[idx]
+        pd = w._abs_dir("param_product_dir")
+        if not pd or not Path(pd).is_dir():
+            return None
+        meta = dict(f.get("meta") or {})
+        return semi_convert.find_pair_rules(
+            pd, model=meta.get("model", ""), gear=meta.get("gear") or meta.get("gear_db", ""),
+            motor_no=meta.get("motor_no", ""), kind=f["kind"], exclude_path=f.get("path", ""),
+            loop_number=self.settings.get("closed_loop_number", "1815"),
+            loop_bit=int(self.settings.get("closed_loop_bit", 1)),
+            full_when=int(self.settings.get("closed_loop_full", 1)),
+            index_path=str(app_dir() / "製品の型式索引.json"))
+
+    def set_pairs(self, idx, hit):
+        f = self._sel()[idx]
+        if hit:
+            self._pairs[self._pkey(f)] = hit
+        else:
+            self._pairs.pop(self._pkey(f), None)
+
+    def plan_file_name(self, seiban, rows):
+        """セミクロに変換した予定の名前（かんたん作成の「作成」と同じ付け方。SEMI が入る）。"""
+        from . import gui, nc_param, seiban_flow
+        sel = self._sel()
+        if len(sel) >= 2:
+            kinds = {"傾斜": "T", "回転": "R"}
+            parts = [kinds.get(f["kind"], "") for f in sel]
+            prefix = "".join(parts) if all(parts) and len(set(parts)) == len(parts) else "TR"
+        else:
+            prefix = seiban_flow.KIND_PREFIX.get(sel[0]["kind"], "T")
+        axes = [(nc_param.axis_name(gui.seiban_flow_axis(r["axis"])), f["kind"]) for f, r in zip(sel, rows)]
+        return gui.out_param_name(self.settings, prefix, seiban, model=self.w.e_model.text().strip(), axes=axes, semi=True)
+
+    def _machine_job_with_semi(self, sel, semi):
+        """かんたん作成の _machine_job（→ _gather）を、製品ごとのセミクロ選択つきで呼ぶ。
+        _gather は「セミクロにするか」を1つしか持たないので、製品ごとの選択は _semi_convert_file の入口で振り分ける
+        （選んでいない製品・変換できない製品は None を返す＝値を変えない。変換そのものは元の関数）。"""
+        w = self.w
+        self.last_semi = []
+        chosen = [bool(semi[i]) if i < len(semi) else False for i in range(len(sel))]
+        self._apply_pairs(sel)
+        if not any(chosen):
+            return w._machine_job()
+        orig = w._semi_convert_file
+        report = {}
+
+        def conv(f, raw, axnum, vals=None):
+            i = next((k for k, x in enumerate(sel) if x is f), -1)
+            if i < 0 or not chosen[i]:
+                return None
+            r = orig(f, raw, axnum, vals)
+            e = {"kind": f["kind"], "applied": False, "stop": "", "basis": ""}
+            report[i] = e
+            if r is None or r["mode"] != "フル":
+                e["stop"] = "製品がフルクロと読めません（1815 が読めません）"
+                return None
+            if r["stop"]:
+                e["stop"] = r["stop"][0]                   # 変換できない: 値は変えない
+                return None
+            e.update(applied=True, basis=M.semi_basis(r))
+            return r
+        w._semi_convert_file = conv
+        w._semi_choice = lambda: True
+        w._semi_pending = False
+        try:
+            return w._machine_job()
+        finally:
+            w.__dict__.pop("_semi_convert_file", None)
+            w.__dict__.pop("_semi_choice", None)
+            self.last_semi = [report[i] for i in sorted(report)]
 
     def candidates(self):
         """見つけた製品を載せられる号機（かんたん作成の候補と同じ計算: 容量・電圧（400V 品は 200V 機なら×2）・
@@ -94,8 +227,10 @@ class Planner:
             return re.sub(r"\^\\s\*\(([\d|]+)\)i", lambda m: "・".join(x + "i" for x in m.group(1).split("|")) + " のみ", n)
         return {"units": units, "assign": assign, "notes": [plain(n) for n in getattr(w, "_used_rule_notes", []) or []]}
 
-    def build(self, seiban, unit, rows):
-        """決めた軸・モーターで、書く中身 plan_fn を作る。作れなければ PlanError（やさしい一文）。"""
+    def build(self, seiban, unit, rows, semi=()):
+        """決めた軸・モーターで、書く中身 plan_fn を作る。作れなければ PlanError（やさしい一文）。
+        semi は製品ごと（products と同じ順）の「セミクロにする」。変換の順番は、かんたん作成の _gather のまま
+        （セミクロ変換 → 作成時オプション → 仮モーターなら 2020 を外す → DGPR → prepare）。変換できない製品は、製品の値のまま。"""
         from PySide6 import QtWidgets as W
         w = self.w
         sel = [f for f in w._files if f.get("chk") and f["chk"].isChecked()]
@@ -135,10 +270,11 @@ class Planner:
             w.cmb_ctrl.setCurrentIndex(0)
             w.cmb_ctrl.blockSignals(False)
             w._on_ctrl_changed()
-            job = w._machine_job()
+            job = self._machine_job_with_semi(sel, list(semi))
             if job is None:
                 raise PlanError("書く中身を作れませんでした: " + "／".join(x for x in said if x)[:200])
             (_s, plan_fn), kw = job
+            self.last_semi_note = kw.get("semi_note", "")
             return plan_fn
         finally:
             for n, f in saved.items():
@@ -184,6 +320,11 @@ class MachineInPanel(QtWidgets.QWidget):
         self.idn = {"units": [], "unit": "", "how": "無し", "unknown": True}
         self.unit = ""
         self.products, self.rows, self.job, self.seiban = [], [], None, ""
+        self.semi = []               # 製品ごと（products と同じ順）の「セミクロにする」。毎回「製品どおり」から（伝票番号を探すたびに戻す）
+        self.semi_opts = []          # 製品ごとの {"kind","full","stop","basis"}（フルクロの製品だけ選べる）
+        self.semi_report = []        # 書く中身を作ったときの、セミクロを選んだ製品ごとの結果
+        self._semi_busy = False      # 同じ型式のフル/セミの組を探している最中
+        self._semi_searched = set()
         self.trial_ok = False
         self._job_error = ""
         self._writing = False
@@ -386,6 +527,8 @@ class MachineInPanel(QtWidgets.QWidget):
         if self._busy or self._writing:
             return
         if self.page == "order":
+            if self._semi_busy:
+                return
             self._after_order()
         elif self.page == "unit":
             self._go("connect")
@@ -685,7 +828,7 @@ class MachineInPanel(QtWidgets.QWidget):
         else:
             self.art.set_svg(easy_art.product(False))
         self.b_main.setText("次へ ▶")
-        self.b_main.setEnabled(bool(self.products))
+        self.b_main.setEnabled(bool(self.products) and not self._semi_busy)
 
     def _keep_bands(self):
         return []
@@ -696,6 +839,91 @@ class MachineInPanel(QtWidgets.QWidget):
         models = sorted({p["model"] for p in self.products if p["model"]})
         if models:
             self._lab("型式: " + "・".join(models) + "（製品のデータから入れました）", GREY)
+        self._semi_choices()
+
+    # ---------------------------------------------------------------- 位置を読む検出器（フルクロの製品だけ）
+    def _axes_hint(self):
+        """いま分かっている軸の文字（決めた軸 → 号機の割り当て → 無ければ空）。"""
+        if self.rows and all(r["axis"] for r in self.rows):
+            return [r["axis"] for r in self.rows]
+        return list(self.cand["assign"].get(self.unit) or []) if self.unit else []
+
+    def _refresh_semi(self):
+        """製品ごとのフルクロ判定と変換の見込みを取り直す（号機・軸が分かっていれば、その BASIC と軸で）。"""
+        try:
+            self.semi_opts = self.planner.semi_options(self.unit, self._axes_hint()) if self.products else []
+        except Exception:
+            self.semi_opts = []
+        if len(self.semi) != len(self.products):
+            self.semi = [False] * len(self.products)
+
+    def semi_on(self, i):
+        """製品 i を、実際にセミクロにするか（選んでいて、変換できるとき）。"""
+        return bool(i < len(self.semi) and self.semi[i] and i < len(self.semi_opts)
+                    and self.semi_opts[i]["full"] and not self.semi_opts[i]["stop"])
+
+    def _semi_choices(self):
+        """フルクロの製品ごとに「位置を読む検出器」の選び。既定は製品どおり。フルクロでない製品には出さない。"""
+        if not any(o["full"] for o in self.semi_opts):
+            return
+        for i, o in enumerate(self.semi_opts):
+            if not o["full"]:
+                continue
+            row = QtWidgets.QHBoxLayout()
+            lb = QtWidgets.QLabel(f"{o['kind']}　位置を読む検出器")
+            lb.setStyleSheet(f"font-size:{self._fs(15)}px; font-weight:bold;")
+            cmb = QtWidgets.QComboBox()
+            cmb.setObjectName(f"semi{i}")
+            cmb.addItem("製品どおり", False)
+            cmb.addItem("セミクロにする（社内用）", True)
+            cmb.setCurrentIndex(1 if self.semi[i] else 0)
+            if o["stop"]:
+                cmb.model().item(1).setEnabled(False)            # 変換できない製品は、セミクロを選べない
+            cmb.currentIndexChanged.connect(lambda _i, k=i, c=cmb: self._set_semi(k, bool(c.currentData())))
+            row.addWidget(lb)
+            row.addWidget(cmb)
+            row.addStretch(1)
+            self.extra.addLayout(row)
+            if o["stop"]:
+                self._lab(f"セミクロにはできません: {o['stop']}。製品どおりで書きます", AMBER)
+            elif self.semi[i] and self._semi_busy:
+                self._lab("同じ型式のフルクロ・セミクロの実物を探しています…（読むだけです）", GREY)
+            elif self.semi[i]:
+                self._lab(f"セミクロに変換して書きます（根拠: {o['basis']}）。客先へ出すものではありません", GREY)
+
+    def _set_semi(self, i, on):
+        if i >= len(self.semi) or self.semi[i] == on:
+            return
+        if on and i < len(self.semi_opts) and self.semi_opts[i]["stop"]:     # 変換できない製品は、選びを受けない
+            self._render()
+            return
+        self.semi[i] = on
+        self.job, self._job_error, self.semi_report = None, "", []                    # 選びを替えたら、書く中身は作り直し
+        if on and i not in self._semi_searched:
+            self._semi_searched.add(i)
+            self._semi_busy = True
+            self._render()
+
+            def work():
+                return self.planner.find_pairs(i)
+
+            def done(hit):
+                self._semi_busy = False
+                if isinstance(hit, dict) and "__error__" not in hit:
+                    self.planner.set_pairs(i, hit)
+                self._refresh_semi()
+                self._render()
+            self._spawn(work, done)
+            return
+        self._refresh_semi()
+        self._render()
+
+    def _semi_notes(self, lay=None):
+        """決まったこと・書く画面に出す、セミクロの文。選んだ製品ごと。"""
+        lines = M.semi_lines(self.semi_report)
+        for ln in lines:
+            self._lab(ln, GREENB if "変換して書きます" in ln else AMBER, lay)
+        return lines
 
     def _search(self):
         sb = self.e_seiban.text().strip()
@@ -705,10 +933,12 @@ class MachineInPanel(QtWidgets.QWidget):
         self.seiban = sb
         self.products = self.planner.search(sb)
         self.job, self.rows, self._job_error = None, [], ""
+        self.semi, self.semi_report, self._semi_searched, self._semi_busy = [False] * len(self.products), [], set(), False
         self.cand = self.planner.candidates() if self.products else {"units": [], "assign": {}, "notes": []}
         if self.unit not in self.cand["units"]:             # 製品を替えて、選んでいた号機が合わなくなった
             self.unit = ""
             self.rd, self._rd_unit = None, ""
+        self._refresh_semi()
         if not self.products:
             self._render()
             self._msg("この番号の製品データが見つかりません（FANUC の製品だけ、ここでは使えます）", RED)
@@ -769,6 +999,7 @@ class MachineInPanel(QtWidgets.QWidget):
         if not self.rows:
             ctl = M.controller_of(self.planner.controllers(), self.unit)
             self.rows = M.decide_rows(self.products, self.rd["probe"], ctl)
+            self._refresh_semi()
         self._set_bands([])
         self.lbl_title.setText("決まったこと")
         self.lbl_text.setText(M.card_text({"units": [self.unit]}, self.rows))
@@ -776,6 +1007,7 @@ class MachineInPanel(QtWidgets.QWidget):
         bad = [r for r in self.rows if not r["axis"]]
         self.art.set_svg(easy_art.kinds([(r["kind"], f"{r['axis']}軸" if r["axis"] else "未定") for r in self.rows], ok=not bad))
         self._lab(M.reason_line(self.rows), f"color:#5A6876; font-size:{self._fs(13)}px;")
+        self._semi_notes()
         if bad:
             self._lab("使う軸を選んでください（容量が合う軸が、機械にありません）", AMBER)
             self._change(render=False)
@@ -846,6 +1078,7 @@ class MachineInPanel(QtWidgets.QWidget):
         self.unit = unit
         self.job, self._job_error = None, ""
         self.rows = []
+        self._refresh_semi()
         if not keep_rd and self._rd_unit != unit:
             self.rd, self._rd_unit = None, ""
         if render:
@@ -854,11 +1087,18 @@ class MachineInPanel(QtWidgets.QWidget):
     def _make_job(self):
         """書く内容を作る（かんたん作成と同じ中身）。控えを取る所は裏で、一覧は表で作る。"""
         try:
-            plan_fn = self.planner.build(self.seiban, self.unit, self.rows)
+            plan_fn = self.planner.build(self.seiban, self.unit, self.rows, semi=list(self.semi))
         except PlanError as e:
             self._job_error = str(e)
             self._render()
             return
+        self.semi_report = list(self.planner.last_semi)
+        semi_name = ""
+        if any(e["applied"] for e in self.semi_report):
+            try:
+                semi_name = self.planner.plan_file_name(self.seiban, self.rows)
+            except Exception:
+                semi_name = "SEMI.DAT"
         probe = self.rd["probe"]
         keep = any(r["motor"] == "temp" for r in self.rows)
         self._busy = True
@@ -890,7 +1130,7 @@ class MachineInPanel(QtWidgets.QWidget):
             try:
                 self.job = M.plan_step(bk, plan_fn, self.settings, seiban=self.seiban, unit=self.unit,
                                        axes=[r["axis"] for r in self.rows], keep_motor=keep, host=probe["host"],
-                                       port=probe["port"])
+                                       port=probe["port"], semi_name=semi_name)
             except Exception as e:
                 self._job_error = str(e)
             self._render()
@@ -917,6 +1157,7 @@ class MachineInPanel(QtWidgets.QWidget):
         self.lbl_title.setText("機械に書きます")
         self.lbl_text.setText(f"{len(job['items'])} 件を書きます。書く前に、機械の今の中身は控えてあります。")
         self.art.set_svg(easy_art.auto(False, "機械に書きます"))
+        self._semi_notes()
         for line in needs["lines"]:
             self._lab(line, AMBER)
         self._lab("機械は、非常停止を押したままにしてください。", GREY)

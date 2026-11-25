@@ -5101,8 +5101,12 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
             self.lbl_status.setText(
                 f"モード {t.get('aut')}／運転 {t.get('run')}／動作 {t.get('motion')}／非常停止 {t.get('emergency')}"
                 "／アラーム " + ("なし" if not self._alarms else "・".join(a["code"] for a in self._alarms)))
+        was_estop = self.lbl_estop.isVisible()
         self._show_estop(v)
         self._refresh_enabled()
+        if was_estop and not self.lbl_estop.isVisible() and self._connected and self._backup is None \
+                and not self._busy and (self._ident or {}).get("cnc_id"):
+            QtCore.QTimer.singleShot(0, self.take_backup)       # 非常停止を解除したら、控えを始める（つなぎ直さなくても進む。読むだけ）
 
     def _show_estop(self, v):
         """つないだ直後に、機械の状態で書けない理由（非常停止・運転中・許していないアラーム）を赤で最初に出す。"""
@@ -13453,9 +13457,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_r2s.setValue(-90.0)
         self.e_r2e.setValue(0.0)
         for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
-            wdt = spin.fontMetrics().horizontalAdvance("-360.00 °") + 34      # 文字＋上下ボタン。固定の 74 では -90.00 ° が切れた（150% の画面）
+            wdt = max(spin.fontMetrics().horizontalAdvance("-360.00 °") + 34, spin.minimumSizeHint().width() + 6)   # 文字＋上下ボタン。固定の幅では -90.00 ° が切れた（150% の画面）
             spin.setMinimumWidth(wdt)
-            spin.setMaximumWidth(max(74, wdt))
+            spin.setMaximumWidth(wdt + 24)
         # 狭いサイドに収まるよう、チェック行→開始/終了行 で2段に折り返す
         self.box_ranges = QtWidgets.QWidget()
         ranges_h = QtWidgets.QHBoxLayout(self.box_ranges)
@@ -14044,6 +14048,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ph.addWidget(left_col, 1)           # グラフ側が残り幅をすべて使う
         ph.addWidget(self.right_scroll, 0)  # 右は精度結果（スクロール付き縦長列）
         self.setCentralWidget(page)
+        self._fit_spin_widths(page)
         self.apply_ui_fonts()
         # 表示後に各表の高さを中身（行数）に合わせる
         QtCore.QTimer.singleShot(0, self._shrink_result_tables)
@@ -14417,6 +14422,16 @@ class MainWindow(QtWidgets.QMainWindow):
         p.picker.changed.connect(self._suffix_changed)
         self._suffix_panels.append(p)
         return p
+
+    def _fit_spin_widths(self, root):
+        """数字の入力欄（開始・終了角度・範囲・刻み）の幅を、値と単位と上下ボタンが切れない広さにする。
+        固定の上限（74 など）があると、150% の画面で -90.00 ° や /pt が切れた（会社PC 2026-11-25）。"""
+        for sp in root.findChildren(QtWidgets.QAbstractSpinBox):
+            need = sp.minimumSizeHint().width() + 6
+            if sp.minimumWidth() < need:
+                sp.setMinimumWidth(need)
+            if 0 < sp.maximumWidth() < 16777215 and sp.maximumWidth() < need:
+                sp.setMaximumWidth(need + 8)
 
     def _fit_suffix_panel(self):
         """表を開いたままで窓の最小の高さが画面に収まらない画面だけ、表を畳む（見出しを押すと開く）。"""

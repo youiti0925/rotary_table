@@ -398,7 +398,14 @@ class MachineInPanel(QtWidgets.QWidget):
         self.lbl_msg.setWordWrap(True)
         self.lbl_msg.setVisible(False)
         right.addWidget(self.lbl_msg)
-        body.addWidget(right_w, 6)
+        right_sc = QtWidgets.QScrollArea()           # 右の札が窓より高くても、中の文を潰さない（足りない分は縦に動かす）
+        right_sc.setWidgetResizable(True)
+        right_sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        right_sc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        right_sc.setStyleSheet("QScrollArea{background:transparent;} QScrollArea > QWidget > QWidget{background:transparent;}")
+        right_sc.setWidget(right_w)
+        self.right_scroll = right_sc
+        body.addWidget(right_sc, 6)
         root.addLayout(body, 1)
         foot = QtWidgets.QHBoxLayout()
         self.b_prev = QtWidgets.QPushButton("◀ ひとつ前")

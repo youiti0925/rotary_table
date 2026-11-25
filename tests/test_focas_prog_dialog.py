@@ -172,6 +172,25 @@ class TestDialog(Base):
         self.assertIn("非常停止がかかっています", d.lbl_estop.text())
         self.assertFalse(d.b_write.isEnabled())
 
+    def test_backup_starts_by_itself_after_the_emergency_stop_is_released(self):
+        """非常停止のままつないだあと、解除したら、つなぎ直さなくても控えが始まる（会社PC 2026-11-25）。"""
+        d = self.dialog(nc(555), scenario={"status": {"emergency": 1}})
+        d.b_connect.click()
+        self.wait(d)
+        self.assertTrue(d.lbl_estop.isVisible())
+        self.assertIsNone(d._backup)
+        self.client.machine.status["emergency"] = 0
+        d._poll()
+        self.wait(d)
+        for _ in range(100):
+            self.app.processEvents()
+            self.wait(d)
+            if d._backup is not None:
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(d._backup)
+        self.assertFalse(d.lbl_estop.isVisible())
+
     def test_bad_program_text_disables_writing(self):
         d = self.dialog(b"G00 X0.\r\r")
         self.go(d)

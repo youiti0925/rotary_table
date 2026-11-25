@@ -288,8 +288,8 @@ class RenzokuMixin:
         if rz is None or not rz.advance():
             return
         c = self.ctx
-        c.update(handoff=False, skip_machine=False, cycled=False, cycled_in_wizard=False, powered_on=False, prog="auto",
-                 params="auto", rz_pos=rz.pos, rz_skip_write=False, finish_seen=False)
+        c.update(handoff=False, skip_machine=False, cycled=False, cycled_in_wizard=False, powered_on=False, prog=c.get("prog") or "auto",
+                 params=c.get("params") or "auto", rz_pos=rz.pos, rz_skip_write=False, finish_seen=False)
         try:
             self.host.easy_rz_discard()
         except Exception:
@@ -310,9 +310,10 @@ class RenzokuMixin:
             self.host.easy_new_unit()
         except Exception as e:
             self._notice = f"次の1台を始められませんでした: {e}"
+        prev_choice = dict(prog=self.ctx.get("prog") or "auto", params=self.ctx.get("params") or "auto")      # 人が選んだ「手で」を引き継ぐ
         self.ctx.update(RZ_CTX_RESET)
         self.ctx.update(rz_unit=unit, rz_prev_model=model, handoff=False, skip_machine=False, cycled=False,
-                        cycled_in_wizard=False, powered_on=False, prog="auto", params="auto", finish_seen=False)
+                        cycled_in_wizard=False, powered_on=False, prog=prev_choice["prog"], params=prev_choice["params"], finish_seen=False)
         self.history.append(self.i)
         self._enter(INDEX["rz_plan"])
 
@@ -338,8 +339,8 @@ class RenzokuMixin:
         full = next((s for s in rz.stages if s["stage"] == RZ.STAGE_FULL), None)
         c = self.ctx
         c.update(rz_return_answered=True, rz_return_mode=True, rz_semi=False, rz_choice=full["ck"] if full else None,
-                 handoff=False, skip_machine=False, cycled=False, cycled_in_wizard=False, powered_on=False, prog="auto",
-                 params="auto", rz_skip_write=False)
+                 handoff=False, skip_machine=False, cycled=False, cycled_in_wizard=False, powered_on=False, prog=c.get("prog") or "auto",
+                 params=c.get("params") or "auto", rz_skip_write=False)
         self.history.append(self.i)
         self._enter(self._rz_first_needed())
 

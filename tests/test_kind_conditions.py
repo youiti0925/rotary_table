@@ -95,6 +95,27 @@ class TestSave(unittest.TestCase):
         self.assertIsNone(K.find_plan(t, "RTV-231"))                                       # 予定を空で保存 → 消える
 
 
+class TestTwoAxis(unittest.TestCase):
+    def test_rotary_and_tilt_times_three_kinds_in_one_save(self):
+        """2軸テーブル: 1つの型式に、回転・傾斜それぞれ3種類を、一度に保存して読める。"""
+        p = make([])
+        rot = {"セミ・モーター": {"歯数": 72}, "セミ・駆動装置": {"ホイール刻み": 1}, "フル・スケール付き": {"スケール名": "A", "ホイール刻み": 5}}
+        tilt = {"セミ・モーター": {"刻み": 2.5}, "セミ・駆動装置": {"刻み": 5}, "フル・スケール付き": {"スケール名": "A", "刻み": 1}}
+        n = K.save_model(p, "TW-1", rot, tilt, {"フルで測る": "両方", "セミで測る": "分割だけ", "セミの種類": "セミ・モーター"})
+        self.assertEqual(n, 7)                                              # 回転3＋傾斜3＋予定1
+        t = K.load(p)
+        self.assertEqual(t["problems"], [])
+        for kind, want in (("セミ・モーター", "2.5"), ("セミ・駆動装置", "5"), ("フル・スケール付き", "1")):
+            self.assertEqual(K.find(t, "TW-1", True, kind, "A")["刻み"], want)       # 傾斜
+        self.assertEqual(K.find(t, "TW-1", False, "セミ・モーター")["歯数"], "72")      # 回転
+        self.assertEqual(K.find(t, "TW-1", False, "フル・スケール付き", "A")["ホイール刻み"], "5")
+        # 傾斜だけ書き直しても、回転は消えない（by_kind=None は触らない）
+        K.save_model(p, "TW-1", None, {"セミ・モーター": {"刻み": 3}})
+        t = K.load(p)
+        self.assertEqual(K.find(t, "TW-1", True, "セミ・モーター")["刻み"], "3")
+        self.assertEqual(K.find(t, "TW-1", False, "セミ・モーター")["歯数"], "72")
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

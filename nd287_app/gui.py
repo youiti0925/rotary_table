@@ -11131,7 +11131,7 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         return self.spec["fields"]
 
     def on_target_changed(self, *args):
-        self.note.setText(self.spec["note"])
+        self.note.setText(self.spec["note"] + "\n分割と再現性は別々に登録します（上の「対象」を切り替えて、それぞれ押します）。")
         self.table.setColumnCount(len(self.fields))
         self.table.setHorizontalHeaderLabels(self.fields)
         self.reload()
@@ -13057,7 +13057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_raw.clicked.connect(self.show_raw_data)
         self.b_past = QtWidgets.QPushButton("過去データ")
         self.b_past.clicked.connect(self.show_past_data)
-        self.b_cond = QtWidgets.QPushButton("条件編集")
+        self.b_cond = QtWidgets.QPushButton("測定条件の登録")
         self.b_cond.clicked.connect(self.show_condition_editor)
         self.b_pcorr = QtWidgets.QPushButton("ピッチエラー補正")
         self.b_pcorr.setToolTip("提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷")
@@ -13103,9 +13103,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for text, slot, tip in (
             ("分析…", self.show_analysis,
              "過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷"),
-            ("プログラム作成…", self.show_program_dialog,
+            ("測定プログラムを作る（ファイル・細かい設定）…", self.show_program_dialog,
              "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
-            ("パラメータ…", self.show_param_dialog,
+            ("機械に入れる（設定と測定プログラム）…", self.show_param_dialog,
              "受注番号から かんたん作成（詳細設定・パラメータDBも中から）"),
             ("型式ごとに一括作成…", self.show_batch_dialog,
              "測定条件マスタの型式ぶんの測定プログラムをまとめて作る"
@@ -13744,7 +13744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rec = master.get(key)
         if not rec:
             self.statusBar().showMessage(
-                f"型式 {key} の再現条件は未登録（「条件編集」で登録できます）")
+                f"型式 {key} の再現条件は未登録（「測定条件の登録」で登録できます）")
             return
 
         def num(field, default):
@@ -13782,7 +13782,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"・刻み{p['wheel_pitch']:g}°")
             else:
                 self.statusBar().showMessage(
-                    f"型式 {text} は傾斜条件マスタに未登録（手入力。「条件編集」で登録できます）")
+                    f"型式 {text} は傾斜条件マスタに未登録（手入力。「測定条件の登録」で登録できます）")
             return
 
         # 回転系・合体：ユーザー回転条件を優先、無ければ提供の測定条件CSV

@@ -14554,7 +14554,21 @@ class MainWindow(QtWidgets.QMainWindow):
             b.clicked.connect(lambda _c=False, k=key: self._on_kind_button(k))
             self._kind_btns[key] = b
             lay.addWidget(b)
+        self.b_kind_register = QtWidgets.QPushButton("登録する")
+        self.b_kind_register.setStyleSheet("padding:2px 4px;")
+        self.b_kind_register.setToolTip("この型式の測定条件を、種類別に登録する画面を開きます")
+        self.b_kind_register.clicked.connect(lambda _c=False: self.show_kind_conditions())
+        self.b_kind_register.setVisible(False)
+        lay.addWidget(self.b_kind_register)
         lay.addStretch(1)
+
+    def _show_register_button(self, on):
+        b = getattr(self, "b_kind_register", None)
+        if b is not None:
+            try:
+                b.setVisible(bool(on))
+            except RuntimeError:
+                pass
 
     def _on_kind_button(self, kind):
         self._kind_user_none = not kind
@@ -14599,7 +14613,9 @@ class MainWindow(QtWidgets.QMainWindow):
         rec, p, err = KR.resolve(self.kind_table, text, tilt, kind, self.measure_scale)
         if rec is None or err:
             self.statusBar().showMessage(f"{text} {KR.label(kind)}: {err or '測り方が登録されていません'}", 20000)
+            self._show_register_button(True)               # 止めた: 登録（または Excel の直し）へ進めるように
             return True
+        self._show_register_button(False)
         self.master_cond = None
         base_j = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
         # 精度の合否は、まとまりごとに決める（種類の行 → 種類なしの行 → 回転だけ合否判定.csv）。傾斜は回転の値を引き継がない

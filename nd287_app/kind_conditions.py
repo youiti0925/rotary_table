@@ -555,34 +555,44 @@ def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None, c
                     if _s(cell.value) != new and not (isinstance(cell.value, (int, float)) and _num(new) == float(cell.value)):
                         cell.value = (_num(new) if _num(new) is not None and h not in TEXT_COLS else new)
             written += 1
-    if deletes:
-        names = [f"{sh}シートの {KR_LABEL.get(k, k)} の行 {len(rs)} 行を消します" for sh, k, rs in deletes]
-        if confirm_delete is not None and not confirm_delete(names):
-            raise RuntimeError("行を消さないため、保存を止めました")
-        for sh, k, rs in deletes:
-            ws = wb[sh]
-            for r in sorted(rs, reverse=True):                    # 下から消す（行番号がずれない）
-                ws.delete_rows(r)
     if plan is not None:
         ws = wb[SHEET_PLAN] if SHEET_PLAN in wb.sheetnames else wb.create_sheet(SHEET_PLAN)
         if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
             ws.append(PLAN_COLUMNS)
-        header = [_s(c.value) for c in ws[1]]
+        header = [_canon_header(c.value) for c in ws[1]]
         if "回転/傾斜" not in header:                              # 以前の形式（軸の列なし）: 列を足す。既存の行は「空＝両方」のまま
             ws.insert_cols(2)
             ws.cell(1, 2).value = "回転/傾斜"
-            header = [_s(c.value) for c in ws[1]]
-        for r in range(ws.max_row, 1, -1):
-            if norm_model(ws.cell(r, 1).value) == m:
-                ws.delete_rows(r)
-        # plan: {"回転": {...}, "傾斜": {...}}（軸ごと）か、{"フルで測る":…}（両方に同じ＝軸の列を空で1行）
+            header = [_canon_header(c.value) for c in ws[1]]
+        col = {h: i + 1 for i, h in enumerate(header) if h}
+        # plan: {"回転": {...}, "傾斜": {...}}（軸ごと）か、{"フルで測る":…}（両方に同じ＝軸の列を空で1行。回転・傾斜の行は無くす）
         by_axis = plan if ("回転" in plan or "傾斜" in plan) else {"": plan}
         for axis in ("", "回転", "傾斜"):
             rec = dict(by_axis.get(axis) or {})
+            rows = [r for r in range(2, ws.max_row + 1)
+                    if norm_model(ws.cell(r, col["型式"]).value) == m and _s(ws.cell(r, col["回転/傾斜"]).value) == axis]
             if any(_s(rec.get(k)) for k in ("フルで測る", "セミで測る")):
-                rec["型式"], rec["回転/傾斜"] = _s(model), axis
-                ws.append([rec.get(h, "") for h in header])
+                if rows:
+                    for h, v in rec.items():                      # 同じ型式×軸の行は、その場で書き換える
+                        if h in col and h not in ("型式", "回転/傾斜"):
+                            ws.cell(rows[0], col[h]).value = _s(v)
+                else:
+                    rec["型式"], rec["回転/傾斜"] = _s(model), axis
+                    ws.append([rec.get(h, "") for h in header])
                 written += 1
+            elif rows:
+                deletes.append((SHEET_PLAN, axis, rows))
+    if deletes:
+        names = [(f"測る予定シートの {'回転' if k == '回転' else '傾斜' if k == '傾斜' else '（回転・傾斜とも）'} の行 {len(rs)} 行を消します"
+                  if sh == SHEET_PLAN else f"{sh}シートの {KR_LABEL.get(k, k)} の行 {len(rs)} 行を消します") for sh, k, rs in deletes]
+        if confirm_delete is not None and not confirm_delete(names):
+            raise RuntimeError("行を消さないため、保存を止めました")
+        per_sheet = {}
+        for sh, _k, rs in deletes:
+            per_sheet.setdefault(sh, []).extend(rs)
+        for sh, rs in per_sheet.items():
+            for r in sorted(set(rs), reverse=True):               # 下から消す（行番号がずれない）
+                wb[sh].delete_rows(r)
     _add_validations(wb)
     try:
         wb.save(str(p))

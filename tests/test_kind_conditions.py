@@ -310,6 +310,24 @@ class TestSaveInPlace(unittest.TestCase):
         self.assertEqual(len(list((p.parent / K.BACKUP_DIR).glob("*.xlsx"))), K.BACKUP_KEEP)
 
 
+class TestPlanInPlace(unittest.TestCase):
+    def test_plan_rows_updated_in_place_and_cleared_with_confirm(self):
+        import openpyxl
+        p = make([])
+        K.save_model(p, "P-1", None, None, {"回転": {"フルで測る": "両方"}, "傾斜": {"セミで測る": "分割だけ", "セミの種類": "モーター"}})
+        K.save_model(p, "P-2", None, None, {"回転": {"フルで測る": "分割だけ"}})
+        K.save_model(p, "P-1", None, None, {"回転": {"フルで測る": "分割だけ"}, "傾斜": {"セミで測る": "分割だけ", "セミの種類": "モーター"}})
+        ws = openpyxl.load_workbook(p)[K.SHEET_PLAN]
+        self.assertEqual([ws.cell(r, 1).value for r in (2, 3, 4)], ["P-1", "P-1", "P-2"])          # 並びはそのまま（P-2 は後ろに戻らない）
+        asked = []
+        K.save_model(p, "P-1", None, None, {"回転": {"フルで測る": "分割だけ"}}, confirm_delete=lambda n: (asked.append(n), True)[1])
+        self.assertTrue(asked and "傾斜" in asked[0][0])
+        t = K.load(p)
+        self.assertEqual(K.find_plan(t, "P-1", False)["フルで測る"], "分割だけ")
+        self.assertEqual(K.find_plan(t, "P-1", True)["フルで測る"], "分割だけ")               # 傾斜の行が無い → 回転と同じ
+        self.assertEqual(K.find_plan(t, "P-2", False)["フルで測る"], "分割だけ")
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

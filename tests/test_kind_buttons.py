@@ -68,6 +68,12 @@ class TestKindButtons(unittest.TestCase):
             w.measure_kind = ""; w._kind_user_none = False
             w.on_model_entered()
             self.assertEqual(w.measure_kind, "フル・スケール付き")
+            w.measure_kind = "セミ・モーター"                          # 行を壊して「決められない」状態にする → 止めて登録ボタンが出る
+            row = [r for r in w.kind_table["rotary"] if r["型式"] == "RTV-231" and r["測定の種類"] == "セミ・モーター"][0]
+            row["歯数"] = ""; row["_bad"] = {"歯数": "abc"}
+            w.on_model_entered()
+            self.assertFalse(w.b_kind_register.isHidden())
+            self.assertIn("数字として読めません", w.statusBar().currentMessage())
             w._kind_btns[""].click()                                  # 「今までの登録」を押し直す → 勝手に戻さない
             self.assertEqual(w.measure_kind, "")
             w.on_model_entered()

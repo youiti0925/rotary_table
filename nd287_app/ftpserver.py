@@ -230,7 +230,7 @@ class _Session(threading.Thread):
                 buf += data
                 while b"\n" in buf:
                     line, _n, buf = buf.partition(b"\n")
-                    if not self._handle(_decode(line).strip()):
+                    if not self._handle_line(_decode(line).strip()):
                         return
         except (OSError, ValueError):
             pass
@@ -243,7 +243,9 @@ class _Session(threading.Thread):
             self.server.forget(self)
             self.server.log(f"切断 {self.addr[0]}")
 
-    def _handle(self, line: str) -> bool:
+    def _handle_line(self, line: str) -> bool:
+        # 名前は _handle にしない: Python 3.13 から threading.Thread が _handle という中身を持つので、
+        # 同じ名前だと上書きされて「呼べない」になり、つないだ直後に切れる（試験32件が落ちていた）。
         if not line:
             return True
         cmd, _s, arg = line.partition(" ")

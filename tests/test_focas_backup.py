@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """focas_backup（控え）。偽物の機械へ直接つなぐ。実機にはつながない。設計書 §11.2 の 71〜78。"""
 
+import os
 import copy
 import hashlib
 import json
@@ -97,9 +98,11 @@ class TestDestinationGuard(Base):
         basic = self.tmp / "BASIC"
         basic.mkdir()
         s = {"param_basic_dir": str(basic)}
-        for bad in (basic, basic / "控え", basic / "a" / "b",
-                    str(basic).upper(), str(basic) + "\\", str(basic).replace("\\", "/"),
-                    str(basic) + "\\..\\BASIC\\x"):
+        bads = [basic, basic / "控え", basic / "a" / "b", str(basic) + os.sep,
+                str(basic) + os.sep + ".." + os.sep + "BASIC" + os.sep + "x"]
+        if os.name == "nt":                # 大文字小文字を区別しない・\\ と / が同じ、は Windows の決まり
+            bads += [str(basic).upper(), str(basic).replace("\\", "/")]
+        for bad in bads:
             with self.assertRaises(B.BackupError, msg=str(bad)):
                 B.check_destination(bad, s)
         # 別の場所・親の場所は許す
@@ -422,7 +425,9 @@ class TestDestinationAliases(Base):
         B.check_destination(link / "控え", {"param_basic_dir": str(self.basic)})
 
     def test_variants_normalise_slashes_and_case(self):
-        v = B._variants(str(self.basic).upper() + "/")
+        # 大文字小文字を区別しないのは Windows の決まり（Linux では別のフォルダ）
+        text = str(self.basic).upper() if os.name == "nt" else str(self.basic)
+        v = B._variants(text + "/")
         self.assertIn(B._norm(self.basic), v)
 
 

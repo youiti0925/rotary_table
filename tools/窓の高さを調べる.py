@@ -38,7 +38,58 @@ def snap(tag):
         f"最低(設定)={win.minimumSize().width()}x{win.minimumSize().height()} "
         f"下の帯の下端={sb_bottom} グラフ={win.plots_widget.height()} "
         f"グラフ最低={win.plots_widget.minimumHeight()} 測定条件={win.cond_scroll.height()}"
-        f"/{win.cond_group.sizeHint().height()} 末尾の表={'開' if win.suffix_panel.isChecked() else '畳'}")
+        f"/{win.cond_group.sizeHint().height()} 末尾の表={'開' if win.suffix_panel.isChecked() else '畳'} "
+        f"上限(設定)={win.maximumWidth()}x{win.maximumHeight()} {win32(win) if win.isVisible() else ''}")
+
+
+def win32(w):
+    """Windows 自身が言う窓の大きさ（画面の点の数。Qt の数字と別に、本当の大きさを見る）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        hwnd = int(w.winId())
+        r, c, wa, pt = wintypes.RECT(), wintypes.RECT(), wintypes.RECT(), wintypes.POINT(0, 0)
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        u.GetClientRect(hwnd, ctypes.byref(c))
+        u.ClientToScreen(hwnd, ctypes.byref(pt))
+        u.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)       # SPI_GETWORKAREA
+        return (f"Win窓=({r.left},{r.top})-({r.right},{r.bottom}) Win中身の左上=({pt.x},{pt.y}) "
+                f"Win中身={c.right}x{c.bottom} Win中身の下端={pt.y + c.bottom} "
+                f"Win使える所=({wa.left},{wa.top})-({wa.right},{wa.bottom}) Win最大={bool(u.IsZoomed(hwnd))}")
+    except Exception as e:
+        return f"Win=読めない({e})"
+
+
+class Watch(QtCore.QObject):
+    """窓の大きさ・状態が変わるたびに1行残す（いつ・何が窓を大きくしたかを見る）。"""
+
+    def eventFilter(self, obj, ev):
+        if obj is win and ev.type() in (QtCore.QEvent.Resize, QtCore.QEvent.WindowStateChange, QtCore.QEvent.Move):
+            g = win.geometry()
+            lines.append(f"  [{ev.type().name}] 中身=({g.x()},{g.y()},{g.width()}x{g.height()}) 最大={win.isMaximized()} "
+                         f"最低(hint)={win.minimumSizeHint().height()} 最低(設定)={win.minimumHeight()} "
+                         f"上限(設定)={win.maximumWidth()}x{win.maximumHeight()}")
+        return False
+
+
+def plain():
+    """比べる用: 何も入っていない窓を最大にしたときの大きさ（アプリのせいか、PC・Qt のせいかを分ける）。"""
+    p = QtWidgets.QMainWindow()
+    p.setWindowTitle("比べる用の空の窓")
+    p.statusBar().showMessage("下の帯")
+    p.showMaximized()
+    for _ in range(40):
+        app.processEvents()
+        QtCore.QThread.msleep(20)
+    g, f = p.geometry(), p.frameGeometry()
+    sb = p.statusBar()
+    lines.append(f"空の窓: 最大={p.isMaximized()} 中身=({g.x()},{g.y()},{g.width()}x{g.height()}) "
+                 f"枠込み=({f.x()},{f.y()},{f.width()}x{f.height()}) "
+                 f"下の帯の下端={sb.mapToGlobal(QtCore.QPoint(0, sb.height())).y()} {win32(p)}")
+    p.close()
+    p.deleteLater()
+    app.processEvents()
 
 
 def finish():
@@ -50,6 +101,9 @@ def finish():
     app.quit()
 
 
+plain()
+watch = Watch()
+win.installEventFilter(watch)
 snap("出す前")
 if hasattr(win, "fit_before_show"):
     win.fit_before_show()          # アプリ本体（gui.run）と同じ順番

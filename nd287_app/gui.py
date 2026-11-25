@@ -13234,6 +13234,11 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
         fit_to_screen(self, 1200, 800)
+        # この窓には大きさの上限を付けない（fit_to_screen は上限を「画面の使える所」にする。ダイアログ用）。
+        # 上限があると Windows は「最大」の窓の中身をその大きさ（画面の使える所と同じ高さ）にするので、題名の帯の
+        # ぶん（会社PCの 150% 表示で 23）下へはみ出し、一番下の帯が画面の外へ出た（2026-11-25 会社PCで測った:
+        # 中身 (0,23,1280x672)・枠込み (0,-7,1280x702)・画面の使える所 1280x672）。
+        self.setMaximumSize(16777215, 16777215)
         self.dev = device
         self.settings = settings
         self._connecting = False  # 接続スレッド実行中はシリアルに触らない

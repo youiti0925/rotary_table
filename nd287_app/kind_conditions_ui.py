@@ -126,6 +126,10 @@ class KindConditionDialog(QtWidgets.QDialog):
         if model:
             self.load_model()
 
+        scr = QtWidgets.QApplication.primaryScreen()               # 開いたときの大きさ（3つの種類の列が全部見える広さ）
+        g = scr.availableGeometry() if scr is not None else QtCore.QRect(0, 0, 1024, 768)
+        self.resize(max(self.sizeHint().width(), min(900, g.width() - 60)), max(self.sizeHint().height(), min(640, g.height() - 80)))
+
     def path(self):
         return resolve_path(self.settings)
 

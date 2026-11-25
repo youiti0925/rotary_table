@@ -196,7 +196,7 @@ class ChoiceButton(QtWidgets.QAbstractButton):
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setMinimumSize(150, 66 if compact else 96)
+        self.setMinimumSize(110 if compact else 150, 66 if compact else 96)       # 3つ並べても狭い窓の右に切れない
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setAccessibleName(title)
 
@@ -1159,6 +1159,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         two = len(axes) > 1
         for ax in axes:
             self._fill_kind_axis(lay, ax["state"], ax["label"] if two else "", ax["axis"], first=(ax is axes[0]))
+        lay.invalidate()                                    # 中身を作り直したあと、入れ物の高さを取り直す（文が選びの絵に重ならないように）
+        self._kind_box.updateGeometry()
+        lay.activate()
 
     def _kind_axes(self):
         """種類の登録がある軸ごとの状態。ホストが軸ごとに答えられないとき（古い形）は、今の軸だけ。"""
@@ -1172,8 +1175,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
 
     def _fill_kind_axis(self, lay, st, axis_label, axis, first=True):
         kinds = st.get("kinds") or []
-        head = QtWidgets.QLabel((f"【{axis_label}】" if axis_label else "") + "何を測りますか？"
-                                + ("" if axis_label else "（この型式は、測り方が3通りまで登録されています）"))
+        head = QtWidgets.QLabel((f"【{axis_label}】" if axis_label else "") + "何を測りますか？")
         head.setObjectName("kind_head_" + axis)
         head.setWordWrap(True)
         head.setStyleSheet("color:#17212B; font-size:15px; font-weight:700;")
@@ -1182,7 +1184,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         row.setSpacing(10)
         btns = {}
         for k in kinds:
-            b = ChoiceButton(k["label"], easy_art.choice_measure_kind(k["kind"]), compact=bool(axis_label))
+            b = ChoiceButton(k["label"], easy_art.choice_measure_kind(k["kind"]), compact=True)               # 低い窓でも、下の説明が絵に重ならない高さ
             b.setChecked(st.get("kind") == k["kind"])
             b.setToolTip(k.get("hint", ""))
             b.clicked.connect(lambda _c=False, kk=k["kind"], tt=bool(st.get("tilt")): self._choose_kind(kk, tt))
@@ -1200,10 +1202,11 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         else:
             msg, col = cur.get("hint", ""), "#16864C"
             if cur.get("semi") and not axis_label:
-                msg += "\nセミクロの結果も、フルクロと同じく検査表とWebに出します。保存のとき、機番の末尾（社内の表）でフルと名前を分けます。"
+                msg += "\nセミクロの結果も検査表・Webに出します。保存の機番の末尾でフルと名前を分けます。"
         lb = QtWidgets.QLabel(msg)
         lb.setWordWrap(True)
         lb.setStyleSheet(f"font-size:14px; font-weight:700; color:{col};")
+        lb.setMinimumHeight(lb.fontMetrics().lineSpacing() * (msg.count("\n") + 2))      # 折り返しでも、前の絵に重ならない高さ
         lay.addWidget(lb)
 
     def _choose_kind(self, kind, tilt=None):

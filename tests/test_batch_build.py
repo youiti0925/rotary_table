@@ -273,6 +273,21 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
             return d
         self.assertEqual(self._check(make), [])
 
+    def test_growth_dialog(self):
+        """登録の育ち具合（その他 ▾ → 登録の育ち具合…）。"""
+        from PySide6 import QtWidgets
+        from nd287_app import growth_ui as U
+        hosts = []
+
+        def make(s):
+            h = QtWidgets.QWidget()
+            h.settings = dict(s)
+            h.e_model = QtWidgets.QLineEdit("RTV-231")
+            h.masters = {}
+            hosts.append(h)
+            return U.GrowthDialog(h, search=lambda *a, **k: [], threaded=False)
+        self.assertEqual(self._check(make), [])
+
     def test_serial_suffix_panel(self):
         """保存画面に常に置く表（折りたためる）。"""
         from nd287_app import serial_suffix_ui as U

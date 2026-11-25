@@ -7,6 +7,8 @@ gui.py には「ボタン1つ」と attach() の1行だけを足し、中身は�
   測り終わって規格から外れた所があれば、そのボタンに「今やる所」の色を付ける（窓は勝手に開かない。
   自動で続けて測る流れを止めないため）。前に外れていた項目が今回入っていたら、開いたときに1回だけ
   「何をしましたか？」と聞いて記録帳に残す。
+- 測っているあいだの実況と見張り（live_guide.py / live_guide_ui.py）: 右の列（精度の表が出る所）の上に、
+  測っている間だけ札を出す。向き・何点目・あと何分・見張り（大きく動いた所／値が来ない）。
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ class Better(QtCore.QObject):
         self.fixed = []          # 前に外れていて、今回入った項目（開いたとき1回だけ聞く）
         self.kinds = []          # 今回 外れた項目
         self._was = False
+        from . import live_guide_ui
+        self.live = live_guide_ui.LiveWatch(win)       # 測っているあいだの実況と見張り（右の列の上。読むだけ）
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.tick)
@@ -32,6 +36,10 @@ class Better(QtCore.QObject):
     # 1秒ごと。状態を読むだけ
     def tick(self):
         w = self.win
+        try:
+            self.live.tick()
+        except Exception:
+            self.live.panel.hide()
         b = getattr(w, "b_read", None)
         try:
             can = bool(w.has_view_data()) and getattr(w, "view_kind", "") != "repeat"

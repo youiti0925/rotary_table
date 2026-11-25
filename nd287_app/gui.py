@@ -14561,8 +14561,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.master_cond = None
         base_j = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
         # 精度の合否は、種類の行に値があればそれ、空欄は合否判定.csv の値（引き継ぎ）。傾斜は元どおり使わない
-        self.master_judge = (KR.K.judgement(rec, base_j) if not tilt else None)
+        # 傾斜は回転と規格が全く違う: 回転の値・合否判定.csv は引き継がない。傾斜の欄が空なら合否を出さない
+        self.master_judge = (KR.K.judgement(rec, None) if tilt else KR.K.judgement(rec, base_j))
         msgs = [f"{KR.label(kind)}の測り方を適用"]
+        if tilt and not self.master_judge:
+            msgs.append("傾斜の規格が未登録（傾斜の合否は出しません）")
         if not self.is_repeat():
             if tilt:
                 self.e_wstart.setValue(p["wheel_start"])

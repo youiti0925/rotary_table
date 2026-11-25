@@ -181,6 +181,15 @@ class TestJudgement(unittest.TestCase):
         self.assertEqual(rot[0]["傾きW"], 5.0)
 
 
+class TestTiltJudgement(unittest.TestCase):
+    def test_tilt_has_own_judgement_columns_and_no_inheritance(self):
+        p = make([{"型式": "TW-9", "測定の種類": "", "ホイール刻み": 10, "MINA": -0.6, "傾きH": 3}])
+        K.save_model(p, "TW-9", None, {"セミ・モーター": {"刻み": 2.5, "傾きH": 7}, "フル・スケール付き": {"刻み": 1}})
+        t = K.load(p)
+        self.assertEqual(K.judgement(K.find(t, "TW-9", True, "セミ・モーター"))["slope_h"], 7.0)
+        self.assertIsNone(K.judgement(K.find(t, "TW-9", True, "フル・スケール付き")))       # 空 → 規格なし（回転を引き継がない）
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

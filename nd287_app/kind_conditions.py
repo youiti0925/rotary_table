@@ -18,7 +18,8 @@ PLAN_COLUMNS = ["型式", "回転/傾斜", "フルで測る", "セミで測る",
 PLAN_CHOICES = ("", "分割だけ", "再現性だけ", "両方")
 
 ROTARY_COLUMNS = ["型式", "測定の種類", "スケール名", "歯数", "ホイール刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
-                  "ブロック数", "回数", "再現開始", "再現終了", "メモ"]
+                  "ブロック数", "回数", "再現開始", "再現終了",
+                  "MINA", "MINB", "MAXA", "MAXB", "傾きH", "傾きW", "メモ"]
 TILT_COLUMNS = ["型式", "測定の種類", "スケール名", "開始角度", "終了角度", "刻み", "ウォーム刻み", "ウォーム範囲", "ウォーム開始",
                 "ブロック数", "回数", "再現開始", "再現終了", "メモ"]
 
@@ -30,6 +31,7 @@ HELP_LINES = [
     "セミ・駆動装置: 歯1枚飛ばしでよいので、測る刻みの値を自分で書きます。",
     "フル・スケール付き: 使っているスケールの名前をスケール名に書き、刻みの値を書きます。",
     "再現性（ブロック数・回数・再現開始・再現終了）も種類ごとの行に書けます。3種類それぞれ別の値にできます。空なら、その種類の再現性は作りません（ほかの種類の値は使いません）。",
+    "精度の合否（回転のみ）: MINA・MINB・MAXA・MAXB（温度で変わる精度の上限下限の式）と傾きH・傾きW（傾きの規格）。合否判定.csv と同じ意味です。種類ごとに別の値にできます。空欄なら、今までの合否判定.csv の型式の値を使います。",
     "はじめてモードの初期の行は、今までの登録（ユーザー条件CSV・測定条件.csv）を、種類を空にして写したものです。",
 ]
 
@@ -164,6 +166,26 @@ def params(rec, tilt):
     return out
 
 
+JUDGE_COLS = (("MINA", "min_a"), ("MINB", "min_b"), ("MAXA", "max_a"), ("MAXB", "max_b"), ("傾きH", "slope_h"), ("傾きW", "slope_w"))
+
+
+def judgement(rec, base=None):
+    """種類の行の精度の合否（規格）を、合否判定.csv と同じ形（min_a…slope_w）で返す。
+    行の欄が空のところは base（合否判定.csv の型式の値）を使う（引き継ぎ）。どちらも無ければ None。"""
+    out = dict(base or {})
+    got = False
+    for col, key in JUDGE_COLS:
+        v = _num((rec or {}).get(col))
+        if v is not None:
+            out[key] = v
+            got = True
+    if not out:
+        return None
+    if got:
+        out["_from_kind"] = True
+    return out
+
+
 def repeat(rec):
     """1行の再現性。{"blocks_n","repeats","start","end"} か None（ブロック数・回数が空なら作らない）。"""
     n, reps = _num(rec.get("ブロック数")), _num(rec.get("回数"))
@@ -230,6 +252,13 @@ def rows_from_existing(masters):
                      "終了角度": rec.get("終了角度", ""), "刻み": rec.get("刻み", ""), "ウォーム刻み": rec.get("ウォーム刻み", ""),
                      "ウォーム範囲": rec.get("ウォーム範囲", ""), "ウォーム開始": rec.get("ウォーム開始", ""),
                      "メモ": "今までの登録（ユーザー傾斜条件）"})
+    from .masters import find_entry
+    for r in rot:                                          # 今までの合否判定.csv の規格を、種類なしの行へ写す（種類の行は空なら引き継ぐ）
+        j = find_entry(masters.get("judgement") or {}, str(r.get("型式", "")))
+        if j:
+            for col, key in JUDGE_COLS:
+                if j.get(key) is not None and not r.get(col):
+                    r[col] = j[key]
     return rot, tilt
 
 
@@ -279,6 +308,10 @@ def save_model(path, model, rotary_by_kind=None, tilt_by_kind=None, plan=None):
         if ws.max_row < 1 or not [c.value for c in ws[1] if c.value]:
             ws.append(cols)
         header = [_s(c.value) for c in ws[1]]
+        for col in cols:                                          # 以前の形式の表: 足りない列（合否など）を右に足す
+            if col not in header:
+                ws.cell(1, len(header) + 1).value = col
+                header.append(col)
         for r in range(ws.max_row, 1, -1):                        # 下から消す（行番号がずれない）
             vals = {header[i]: _s(c.value) for i, c in enumerate(ws[r]) if i < len(header)}
             if vals.get("型式", "").upper() == m and normalize_kind(vals.get("測定の種類", "")):

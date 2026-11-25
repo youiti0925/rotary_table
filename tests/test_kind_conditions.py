@@ -153,6 +153,34 @@ class TestRowsFromExisting(unittest.TestCase):
         self.assertEqual(len(rot), 1)
 
 
+class TestJudgement(unittest.TestCase):
+    def test_kind_values_and_fallback_to_csv(self):
+        base = {"min_a": -0.6, "min_b": 24.0, "max_a": -1.5, "max_b": 75.0, "slope_h": 3.0, "slope_w": 5.0}
+        j = K.judgement({"MINA": "-0.8", "傾きH": "4"}, base)
+        self.assertEqual(j["min_a"], -0.8)            # 種類の行の値
+        self.assertEqual(j["slope_h"], 4.0)
+        self.assertEqual(j["max_b"], 75.0)            # 空欄は合否判定.csv の値
+        self.assertEqual(K.judgement({}, base)["min_a"], -0.6)
+        self.assertIsNone(K.judgement({}, None))
+
+    def test_save_adds_missing_columns_and_roundtrip_and_copy_from_csv(self):
+        import openpyxl
+        p = make([])
+        wb = openpyxl.load_workbook(p)                  # 以前の形式（合否の列なし）に戻す
+        ws = wb[K.SHEET_ROTARY]
+        ws.delete_cols(ws.max_column - 6, 7); ws.append([]); wb.save(p)
+        K.save_model(p, "J-1", {"セミ・モーター": {"歯数": 60, "MINA": -0.7, "MAXB": 80}})
+        t = K.load(p)
+        r = K.find(t, "J-1", False, "セミ・モーター")
+        self.assertEqual(K.judgement(r)["min_a"], -0.7)
+        self.assertEqual(K.judgement(r)["max_b"], 80.0)
+        m = {"user_rotary": {"x": {"型式": "RB-250", "ホイール刻み": 10}},
+             "judgement": {"RB-250": {"min_a": -0.6, "min_b": 24.0, "max_a": -1.5, "max_b": 75.0, "slope_h": 3.0, "slope_w": 5.0}}}
+        rot, _ = K.rows_from_existing(m)
+        self.assertEqual(rot[0]["MINA"], -0.6)
+        self.assertEqual(rot[0]["傾きW"], 5.0)
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

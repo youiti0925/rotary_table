@@ -14559,7 +14559,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"{text} {KR.label(kind)}: {err or '測り方が登録されていません'}", 20000)
             return True
         self.master_cond = None
-        self.master_judge = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
+        base_j = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
+        # 精度の合否は、種類の行に値があればそれ、空欄は合否判定.csv の値（引き継ぎ）。傾斜は元どおり使わない
+        self.master_judge = (KR.K.judgement(rec, base_j) if not tilt else None)
         msgs = [f"{KR.label(kind)}の測り方を適用"]
         if not self.is_repeat():
             if tilt:

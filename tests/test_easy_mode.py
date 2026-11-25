@@ -50,6 +50,28 @@ class TestFlow(unittest.TestCase):
         self.assertNotIn("estop_press", ids)
         self.assertNotIn("estop", ids)
 
+    def test_branches_decide_which_steps_appear(self):
+        """はじめに選ぶ分かれ道（パラメータ・プログラムそれぞれ 自動／手）で、出る手順が変わる。"""
+        base = {"param_estop": "estop_only"}
+        both_auto = self.ids(S(emergency=1), dict(base, params="auto", prog="auto"))
+        self.assertIn("machine_in", both_auto)
+        self.assertNotIn("params_manual", both_auto)
+        self.assertNotIn("prog_manual", both_auto)
+        p_hand = self.ids(S(emergency=1), dict(base, params="manual", prog="auto"))
+        self.assertIn("params_manual", p_hand)
+        self.assertIn("machine_in", p_hand)               # プログラムは自動で入れる
+        g_hand = self.ids(S(emergency=1), dict(base, params="auto", prog="manual"))
+        self.assertIn("prog_manual", g_hand)
+        self.assertIn("machine_in", g_hand)               # パラメータは自動で入れる
+        both_hand = self.ids(S(emergency=1), dict(base, params="manual", prog="manual"))
+        self.assertNotIn("machine_in", both_hand)         # アプリが機械に入れるものが無い
+        self.assertLess(both_hand.index("params_manual"), both_hand.index("prog_manual"))
+        self.assertLess(both_hand.index("choose"), both_hand.index("params_manual"))
+        # 2つ選ぶまで「次へ」は押せない
+        self.assertFalse(F.done_now("choose", S(), {}))
+        self.assertFalse(F.done_now("choose", S(), {"params": "auto"}))
+        self.assertTrue(F.done_now("choose", S(), {"params": "auto", "prog": "manual"}))
+
     def test_estop_detect(self):
         self.assertTrue(F.is_done("estop_on", S(emergency=1)))
         self.assertFalse(F.is_done("estop_on", S(emergency=0)))
@@ -58,9 +80,9 @@ class TestFlow(unittest.TestCase):
 
     def test_offline_machine_starts_with_power_then_origin_return(self):
         ids = self.ids(F.OFFLINE, {"powered_on": True, "param_estop": "released_only"})
-        self.assertEqual(ids[:3], ["intro", "power", "estop"])
+        self.assertEqual(ids[:4], ["intro", "choose", "power", "estop"])
         ids = self.ids(F.OFFLINE, {"powered_on": True})
-        self.assertEqual(ids[:3], ["intro", "power", "dial_mdi"])
+        self.assertEqual(ids[:4], ["intro", "choose", "power", "dial_mdi"])
         self.assertIn("jog_origin", ids)
 
     def test_origin_return_only_after_power(self):
@@ -268,6 +290,9 @@ class FakeHost:
     def easy_next_mode(self, mode):
         self.calls.append(("mode", mode))
 
+    def easy_param_list(self):
+        self.calls.append("param_list")
+
     def easy_make_wizard(self, parent):
         self.calls.append("wizard")
         self.wiz = FakeWizard(parent)
@@ -336,10 +361,18 @@ class TestDialog(unittest.TestCase):
     def sid(self, dlg):
         return F.STEPS[dlg.i]["id"]
 
+    def pass_choose(self, dlg, params="auto", prog="auto"):
+        """用意するもの → 分かれ道（選ぶ）→ 次の手順。"""
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "choose")
+        dlg.ctx["params"], dlg.ctx["prog"] = params, prog
+        dlg._refresh()
+        dlg._next()
+
     def test_walk_through_to_the_end(self):
         dlg, host, poller = self.make(S(aut=0))
         self.assertEqual(self.sid(dlg), "intro")
-        dlg._next()                                   # 用意するもの → （電源・MDI は済んでいる）→ 非常停止を押す
+        self.pass_choose(dlg)                          # 用意するもの → 分かれ道 → （電源・MDI は済んでいる）→ 非常停止を押す
         self.assertEqual(self.sid(dlg), "estop_press")
         self.assertFalse(dlg.b_next.isEnabled())
         poller.st = S(aut=0, emergency=1)              # 押した（パラメータは非常停止中に書く）
@@ -467,8 +500,10 @@ class TestDialog(unittest.TestCase):
 
     def test_back_goes_to_the_step_before(self):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
-        dlg._next()
+        self.pass_choose(dlg)
         self.assertEqual(self.sid(dlg), "machine_in")
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "choose")
         dlg._back()
         self.assertEqual(self.sid(dlg), "intro")
         dlg._back()
@@ -478,7 +513,7 @@ class TestDialog(unittest.TestCase):
 
     def test_offline_machine_shows_power_first(self):
         dlg, host, poller = self.make(F.OFFLINE)
-        dlg._next()
+        self.pass_choose(dlg)
         self.assertEqual(self.sid(dlg), "power")
         self.assertFalse(dlg.b_next.isEnabled())
         self.assertIn("さがして", dlg.lbl_watch.text())
@@ -511,10 +546,59 @@ class TestDialog(unittest.TestCase):
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
                              if not b.isHidden() and not dlg.embed.isAncestorOf(b))
         self.assertEqual(len(vis()), 2)
-        dlg._next()
+        self.pass_choose(dlg)
         self.app.processEvents()
         self.assertEqual(len(vis()), 2)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
         self.assertTrue(dlg.b_next.isHidden())
+        dlg.close()
+
+    def test_choose_buttons_set_the_branch(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "choose")
+        self.assertFalse(dlg.b_next.isEnabled())            # 2つ選ぶまで進めない
+        dlg._choice_btns[("params", "manual")].click()
+        self.assertFalse(dlg.b_next.isEnabled())
+        dlg._choice_btns[("prog", "auto")].click()
+        self.assertTrue(dlg.b_next.isEnabled())
+        self.assertTrue(dlg._choice_btns[("params", "manual")].isChecked())
+        self.assertFalse(dlg._choice_btns[("params", "auto")].isChecked())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "machine_in")       # プログラムは自動で入れる（パラメータは手の分を、このあと打つ）
+        dlg.close()
+
+    def test_both_manual_flow_has_no_machine_in(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
+        self.pass_choose(dlg, "manual", "manual")
+        self.assertEqual(self.sid(dlg), "params_manual")
+        self.assertIsNone(dlg._wiz)
+        self.assertEqual(dlg.b_next.text(), "やりました ▶")
+        dlg._param_list_calls = []
+        host.easy_param_list = lambda: dlg._param_list_calls.append(1)
+        dlg._param_list()
+        self.assertEqual(dlg._param_list_calls, [1])
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "estop_release")     # 打ち終えたら、非常停止をもどしてから、プログラム
+        poller.st = S(aut=0, emergency=0)
+        dlg._tick()
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "prog_manual")
+        dlg.close()
+
+    def test_manual_program_ends_the_wizard_when_params_are_in(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
+        self.pass_choose(dlg, "auto", "manual")
+        self.assertEqual(self.sid(dlg), "machine_in")
+        self.assertIsNotNone(dlg._wiz)
+        dlg._wiz._params_ok = False
+        dlg._wiz._params_same = False
+        dlg._tick()
+        self.assertEqual(self.sid(dlg), "machine_in")       # まだ入っていない
+        dlg._wiz._params_ok = True
+        dlg._tick()
+        self.app.processEvents()
+        self.assertIsNone(dlg._wiz)
+        self.assertNotEqual(self.sid(dlg), "machine_in")    # プログラムは送らず、先へ
         dlg.close()
 
     def test_fits_small_screens(self):

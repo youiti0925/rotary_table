@@ -123,6 +123,53 @@ class TileButton(QtWidgets.QAbstractButton):
             p.drawText(br, QtCore.Qt.AlignCenter, self._badge)
 
 
+class ChoiceButton(QtWidgets.QAbstractButton):
+    """分かれ道の小さなボタン（絵と短い言葉。選ぶと緑の枠とチェックが付く）。"""
+
+    def __init__(self, title, svg, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._r = QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8")), self)
+        self.setCheckable(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setMinimumSize(150, 96)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setAccessibleName(title)
+
+    def sizeHint(self):
+        return QtCore.QSize(190, 100)
+
+    def paintEvent(self, _e):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        r = QtCore.QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        on, hot = self.isChecked(), self.underMouse()
+        p.setPen(QtGui.QPen(QtGui.QColor("#16864C" if on else "#1560D4" if hot else "#D5DBE1"), 4 if on else 2))
+        p.setBrush(QtGui.QColor("#E3F5EA" if on else "#EAF2FF" if hot else "#FFFFFF"))
+        p.drawRoundedRect(r, 12, 12)
+        size = self._r.defaultSize()
+        pic_h = r.height() - 30
+        if pic_h > 10 and not size.isEmpty():
+            k = min((r.width() - 12) / size.width(), pic_h / size.height())
+            w, h = size.width() * k, size.height() * k
+            self._r.render(p, QtCore.QRectF(r.center().x() - w / 2, r.top() + 4, w, h))
+        f = p.font()
+        f.setPixelSize(16)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QtGui.QColor("#17212B"))
+        p.drawText(QtCore.QRectF(r.left(), r.bottom() - 26, r.width(), 24), QtCore.Qt.AlignCenter, self._title)
+        if on:
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor("#16864C"))
+            c = QtCore.QRectF(r.right() - 26, r.top() + 4, 22, 22)
+            p.drawEllipse(c)
+            p.setPen(QtGui.QPen(QtGui.QColor("#FFFFFF"), 3, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+            p.drawPolyline([QtCore.QPointF(c.left() + 5, c.center().y()), QtCore.QPointF(c.center().x() - 1, c.bottom() - 6),
+                            QtCore.QPointF(c.right() - 5, c.top() + 6)])
+
+
 class ChapterBar(QtWidgets.QWidget):
     """上の6つの章。済んだ章は緑、いまの章は青。"""
 
@@ -365,7 +412,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.flow = flow
         self.history = [INDEX["home"]]
         if flow == "measure":
-            self.ctx.update(handoff=False, skip_machine=False)
+            self.ctx.update(handoff=False, skip_machine=False, params=None, prog=None)
         self._enter(j)
 
     def _go_home(self):
@@ -444,7 +491,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         self.lbl_who.setText(easy_flow.WHO.get("auto" if s["kind"] == "run" else s["kind"], "PC で")
                              if s["kind"] != "info" else "")
-        self.lbl_who.setVisible(s["kind"] != "info")
+        self.lbl_who.setVisible(s["kind"] not in ("info", "choose"))
         if s["kind"] == "machine":
             self.lbl_who.setStyleSheet("background:#F0A400; color:#2A1E00;")
         else:
@@ -477,6 +524,13 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_lines.setVisible(bool(lines))
         if sid == "machine_in":
             self._open_wizard_inside()
+        elif sid == "choose":
+            self._build_choose()
+        elif sid == "params_manual":
+            self._extra_widgets["act"] = self._act_button("打つ一覧を見る…", self._param_list)
+            self._small_note("機械の操作は、まだ実機で確かめていません。")
+        elif sid == "prog_manual":
+            self._small_note("機械の操作は、まだ実機で確かめていません。")
         elif sid == "fields":
             self._build_fields()
         elif sid == "open_past":
@@ -501,6 +555,46 @@ class EasyModeDialog(QtWidgets.QDialog):
             pg.setTextVisible(False)
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
+        self._refresh()
+
+    def _small_note(self, text):
+        lb = QtWidgets.QLabel(text)
+        lb.setWordWrap(True)
+        lb.setStyleSheet("color:#8A6A00; font-size:12px;")
+        self.extra.addWidget(lb)
+
+    def _build_choose(self):
+        """分かれ道: パラメータと、プログラム。それぞれ「自動」か「手」。最初の1回で決める。"""
+        A = easy_art
+        self._choice_btns = {}
+        rows = (("params", "パラメータ", (("auto", "自動で入れる", A.choice_params(True)), ("manual", "手で打つ", A.choice_params(False)))),
+                ("prog", "測定プログラム", (("auto", "自動で作って入れる", A.choice_prog(True)), ("manual", "自分で作る", A.choice_prog(False)))))
+        for key, head, opts in rows:
+            lb = QtWidgets.QLabel(head)
+            lb.setStyleSheet("color:#17212B; font-size:15px; font-weight:700;")
+            self.extra.addWidget(lb)
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(10)
+            for val, text, svg in opts:
+                b = ChoiceButton(text, svg)
+                b.setChecked(self.ctx.get(key) == val)
+                b.clicked.connect(lambda _c=False, k=key, v=val: self._choose(k, v))
+                row.addWidget(b)
+                self._choice_btns[(key, val)] = b
+            self.extra.addLayout(row)
+
+    def _choose(self, key, val):
+        self.ctx[key] = val
+        for (k, v), b in self._choice_btns.items():
+            if k == key:
+                b.setChecked(v == val)
+        self._refresh()
+
+    def _param_list(self):
+        try:
+            self.host.easy_param_list()
+        except Exception as e:
+            self._notice = f"一覧を開けませんでした: {e}"
         self._refresh()
 
     def _act_button(self, text, slot):
@@ -780,6 +874,12 @@ class EasyModeDialog(QtWidgets.QDialog):
             svg = A.counter(self.manual, ph)
         elif art == "scene":
             svg = A.scene()
+        elif art == "choose":
+            svg = A.flowchart(c.get("params"), c.get("prog"))
+        elif art == "params_manual":
+            svg = A.params_manual()
+        elif art == "prog_manual":
+            svg = A.prog_manual()
         elif art == "product":
             svg = A.product(bool(c.get("handoff") or c.get("skip_machine")))
         elif art == "table":
@@ -821,8 +921,20 @@ class EasyModeDialog(QtWidgets.QDialog):
         # 電源を入れ直す手順が済んだら記録（次から出さない）
         if s["id"] == "cycle_power" and easy_flow.is_done("cycled", self.st, self.track):
             self.ctx["cycled"] = True
+        if s["id"] == "machine_in" and self._wiz is not None and self.ctx.get("prog") == "manual":
+            w = self._wiz                                  # プログラムは自分で作る: パラメータが入ったら、ここは終わり
+            if getattr(w, "_params_ok", False) or getattr(w, "_params_same", False):
+                self._params_only_done()
+                return
         # 機械の様子が変わって、いまの手順がもう要らなくなったときは、そのまま見せる（勝手に飛ばさない）
         self._refresh()
+
+    def _params_only_done(self):
+        """パラメータが機械に入った（または同じだった）。プログラムは送らず、次へ進む。"""
+        if self._wiz is not None and not self._close_wizard():
+            return
+        self.ctx["handoff"] = True
+        QtCore.QTimer.singleShot(0, self._next)
 
     def _after_measuring(self):
         self._pending_next = False

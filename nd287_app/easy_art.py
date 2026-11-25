@@ -388,3 +388,91 @@ def alarm_screen(has_alarm=True):
                 f'stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>')
     body = (mark + _t(260, 250, 18, "アラームがあります" if has_alarm else "アラームは出ていません", fill=FG, weight=900))
     return _wide(body, "アラーム")
+
+
+# ------------------------------------------------------------------ はじめに「どうやって準備するか」を選ぶ（分かれ道）
+
+def _pc(x, y, s=1.0):
+    return (f'<rect x="{x}" y="{y}" width="{54 * s:.0f}" height="{36 * s:.0f}" rx="4" fill="{DARK}"/>'
+            f'<rect x="{x + 4}" y="{y + 4}" width="{46 * s:.0f}" height="{28 * s:.0f}" rx="2" fill="#3F7FE0"/>'
+            f'<rect x="{x - 4}" y="{y + 38 * s:.0f}" width="{62 * s:.0f}" height="5" rx="2" fill="{PANEL_EDGE}"/>')
+
+
+def _cnc(x, y):
+    return (f'<rect x="{x}" y="{y}" width="64" height="52" rx="6" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            f'<rect x="{x + 6}" y="{y + 6}" width="32" height="22" rx="2" fill="#0F2A3A"/><circle cx="{x + 50}" cy="{y + 38}" r="6" fill="{RED}"/>')
+
+
+def _hand_keys(x, y):
+    keys = "".join(f'<rect x="{x + (i % 4) * 14}" y="{y + (i // 4) * 12}" width="11" height="9" rx="2" fill="{KEY}" stroke="{KEY_EDGE}"/>'
+                   for i in range(12))
+    return (f'<rect x="{x - 6}" y="{y - 6}" width="68" height="46" rx="5" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="2"/>' + keys
+            + f'<circle cx="{x + 46}" cy="{y + 18}" r="9" fill="{HERE}" fill-opacity="0.85"/>')
+
+
+def choice_params(auto):
+    """パラメータ: 自動（PC が機械へ入れる）／手（操作盤で打つ）。"""
+    if auto:
+        body = _pc(14, 18) + _cnc(130, 14) + (f'<path d="M76 38 L120 38" stroke="{HERE}" stroke-width="5" stroke-linecap="round" stroke-dasharray="2 9"/>'
+                                               f'<path d="M118 29 L132 38 L118 47 Z" fill="{HERE}"/>')
+    else:
+        body = _hand_keys(34, 20) + (f'<rect x="130" y="12" width="56" height="62" rx="4" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+                                     + "".join(f'<rect x="138" y="{22 + i * 12}" width="40" height="5" fill="#DDE2E7"/>' for i in range(4)))
+    return _svg(200, 86, body, "パラメータ")
+
+
+def choice_prog(auto):
+    """プログラム: 自動（PC が作って入れる）／自分で作る（機械の側で用意する）。"""
+    if auto:
+        body = _pc(14, 18) + _cnc(130, 14) + (f'<path d="M76 38 L120 38" stroke="{HERE}" stroke-width="5" stroke-linecap="round" stroke-dasharray="2 9"/>'
+                                               f'<path d="M118 29 L132 38 L118 47 Z" fill="{HERE}"/>'
+                                               + _t(100, 12, 11, "O0100", fill=FG))
+    else:
+        body = _cnc(18, 14) + (f'<rect x="108" y="12" width="76" height="62" rx="4" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+                               + _t(146, 34, 12, "O0100", fill=FG) + "".join(f'<rect x="116" y="{42 + i * 10}" width="{60 - i * 12}" height="4" fill="#DDE2E7"/>' for i in range(3))
+                               + f'<path d="M92 40 L104 40" stroke="{HERE}" stroke-width="4" stroke-linecap="round"/>')
+    return _svg(200, 86, body, "測定プログラム")
+
+
+def flowchart(params, prog):
+    """分かれ道を、流れ図で見せる。選んだものは色が付き、まだのものは「？」。"""
+    names = {"auto": "自動", "manual": "手で打つ"}
+    pnames = {"auto": "自動", "manual": "自分で作る"}
+
+    def box(x, w, head, val, col):
+        fill = {"ok": "#E3F5EA", "ask": "#FFF3CF", "plain": "#EEF2F6"}[col]
+        edge = {"ok": GREEN, "ask": HERE, "plain": PANEL_EDGE}[col]
+        return (f'<rect x="{x}" y="70" width="{w}" height="86" rx="12" fill="{fill}" stroke="{edge}" stroke-width="3"/>'
+                + _t(x + w / 2, 100, 15, head, fill=FG) + _t(x + w / 2, 136, 19, val, fill=FG))
+
+    def arrow(x):
+        return (f'<path d="M{x} 113 L{x + 20} 113" stroke="{PANEL_EDGE}" stroke-width="4" stroke-linecap="round"/>'
+                f'<path d="M{x + 18} 105 L{x + 30} 113 L{x + 18} 121 Z" fill="{PANEL_EDGE}"/>')
+
+    pv = names.get(params) if params else "？"
+    gv = pnames.get(prog) if prog else "？"
+    body = (box(10, 118, "パラメータ", pv, "ok" if params else "ask") + arrow(130)
+            + box(166, 118, "プログラム", gv, "ok" if prog else "ask") + arrow(286)
+            + box(322, 86, "測る", "", "plain") + arrow(410)
+            + box(446, 86, "保存", "", "plain")
+            + _t(270, 36, 16, "分かれ道は、はじめの1回だけです", fill="#59636E"))
+    return _svg(540, 200, body, "流れ図")
+
+
+def params_manual():
+    body = (_hand_keys(60, 90) + _t(100, 60, 15, "操作盤で打つ", fill=FG)
+            + f'<rect x="250" y="40" width="190" height="200" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            + _t(345, 70, 14, "番号  値", fill=FG)
+            + "".join(_t(300, 108 + i * 30, 15, f"{n}", "middle", "#59636E") + f'<rect x="330" y="{94 + i * 30}" width="80" height="6" fill="#DDE2E7"/>'
+                      for i, n in enumerate((1815, 2000, 2024, 2084)))
+            + f'<path d="M244 140 L212 140" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/><path d="M216 131 L202 140 L216 149 Z" fill="{HERE}"/>')
+    return _wide(body, "パラメータを手で打つ")
+
+
+def prog_manual():
+    body = (_cnc(70, 80) + _t(102, 170, 14, "機械", fill=FG)
+            + f'<rect x="250" y="40" width="190" height="200" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            + _t(345, 76, 20, "O0100", fill=FG)
+            + "".join(f'<rect x="274" y="{100 + i * 28}" width="{140 - i * 22}" height="6" fill="#DDE2E7"/>' for i in range(4))
+            + f'<path d="M244 140 L160 140" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/><path d="M164 131 L150 140 L164 149 Z" fill="{HERE}"/>')
+    return _wide(body, "測定プログラムを機械に用意する")

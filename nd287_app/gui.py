@@ -14679,6 +14679,16 @@ class MainWindow(QtWidgets.QMainWindow):
         """かんたん作成を作る（はじめてモードが、自分の画面の中に入れる）。"""
         return ParamWizardDialog(parent, self.settings, model=self.e_model.text().strip(), probe_machine=True)
 
+    def easy_param_list(self):
+        """パラメータを手で打つ人に、番号と値の一覧を見せる（かんたん作成の「全部表示」。設定の表示方法は変えない）。"""
+        w = ParamWizardDialog(self, self.settings, model=self.e_model.text().strip())
+        try:
+            w._mode = "full"
+            w._apply_mode()
+        except Exception:
+            pass
+        w.exec()
+
     def easy_wizard_result(self, dlg):
         """中のかんたん作成が終わった。測定の画面に型式と測り方を入れて、結果を返す。
         {"handoff": 機械に入れ終えた, "cycled": 電源の入れ直しが要った}"""

@@ -44,6 +44,8 @@ STEPS = [
          art="scene", button="はじめる ▶"),
     dict(id="prog_intro", ch=None, fl={"program": 0}, kind="info", title="プログラムを機械に入れる",
          lines=["測るための動きを作って、機械に入れます。"], art="scene", button="はじめる ▶"),
+    dict(id="choose", ch=0, kind="choose", title="どうやって準備しますか？",
+         lines=["パラメータとプログラムを、それぞれ選びます。", "選んだ流れだけを、順に案内します。"], art="choose"),
     dict(id="power", ch=0, fl={"program": 0}, kind="machine", title="機械の電源を入れる",
          lines=["操作盤の緑の「入」を押します。"], part="power", zoom="power", detect="online"),
     dict(id="estop", ch=0, fl={"program": 0}, kind="machine", title="非常停止をもどす",
@@ -55,10 +57,15 @@ STEPS = [
     dict(id="machine_in", ch=2, fl={"program": 1}, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
          lines=["受注伝票番号を入れると、PC が機械を読んで自動で決めます。", "機械に書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
+    dict(id="params_manual", ch=2, kind="machine", title="機械で、パラメータを打つ",
+         lines=["操作盤で、番号と値を1つずつ打ちます。", "打つ一覧は、下のボタンで見られます。"], art="params_manual",
+         button="打つ一覧を見る…"),
     dict(id="cycle_power", ch=2, fl={"program": 1}, kind="machine", title="電源を入れ直す",
          lines=["「切」を押して、画面が消えたら「入」を押します。"], part="power", zoom="power_cycle", detect="cycled"),
     dict(id="estop_release", ch=2, fl={"program": 1}, kind="machine", title="非常停止をもどす",
          lines=["書き終わりました。赤いボタンを右に回します。"], part="estop", zoom="estop", detect="estop_off"),
+    dict(id="prog_manual", ch=2, kind="machine", title="機械に、測定プログラムを用意する",
+         lines=["操作盤で、プログラムを入れます。", "もう入っていれば、そのまま使えます。"], art="prog_manual"),
     dict(id="dial_ref", ch=2, kind="machine", title="つまみを原点復帰に合わせる",
          lines=["電源のあとは、原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
     dict(id="jog_origin", ch=2, kind="machine", title="「＋B」を押し続ける",
@@ -169,8 +176,13 @@ def needed(step_id, st, ctx):
     ctx = ctx or {}
     s = step(step_id)
     d = s.get("detect")
-    if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look"):
+    if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look", "choose"):
         return True
+    params, prog = ctx.get("params") or "auto", ctx.get("prog") or "auto"
+    if step_id == "params_manual":                   # パラメータは手で打つ（アプリは番号と値の一覧を見せるだけ）
+        return params == "manual"
+    if step_id == "prog_manual":                     # プログラムは機械の側で用意する（アプリは送らず、測るだけ）
+        return prog == "manual"
     if step_id == "power":
         return not st["online"]
     mode = ctx.get("param_estop", "estop_only")     # パラメータを書くときの非常停止（focas_ops.estop_mode）
@@ -182,8 +194,8 @@ def needed(step_id, st, ctx):
         return bool(st["online"] and st["emergency"] == 1) and mode != "released_only"
     if step_id in ("dial_mdi", "dial_mem"):
         return not (st["online"] and is_done(d, st))
-    if step_id == "machine_in":
-        return True
+    if step_id == "machine_in":                      # 両方とも手のときは、アプリが機械に入れるものが無い
+        return not (params == "manual" and prog == "manual")
     origin = bool(ctx.get("powered_on") or ctx.get("cycled") or ctx.get("cycled_in_wizard"))
     if step_id == "cycle_power":
         return bool(st["pw"] or ctx.get("cycled_in_wizard")) and not ctx.get("cycled")
@@ -208,6 +220,8 @@ def done_now(step_id, st, ctx, track=None):
     if k == "machine":
         d = s.get("detect")
         return bool(d) and is_done(d, st, track)
+    if step_id == "choose":
+        return bool(ctx.get("params")) and bool(ctx.get("prog"))
     if step_id == "machine_in":
         return bool(ctx.get("handoff") or ctx.get("skip_machine"))
     if step_id == "fields":

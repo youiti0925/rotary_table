@@ -579,10 +579,17 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.flow = flow
         self.history = [INDEX["home"]]
         if flow == "measure":
-            self.ctx.update(handoff=False, skip_machine=False, params=None, prog=None)
+            self.ctx.update(handoff=False, skip_machine=False, params="auto", prog="auto")   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
         if flow == "cond":
-            self.ctx.update(cond_kind=None, cond_tilt=None, cond_registered=False, cond_msgs=[])
+            self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
         self._enter(j)
+
+    def _default_tilt(self):
+        """回転か傾斜かは、いまの測り方（モード）から。決められなければ回転。"""
+        try:
+            return bool(self.host.easy_cond_state().get("tilt"))
+        except Exception:
+            return False
 
     def _go_home(self, force=False):
         if not force and not self._unsaved_ok():
@@ -915,7 +922,7 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _cond_from_check(self):
         """測るの流れの途中から、測り方の流れへ。終わったら、ここにもどる。"""
         self.ctx["cond_return"] = self.i
-        self.ctx.update(cond_kind=None, cond_tilt=None, cond_registered=False, cond_msgs=[])
+        self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
         self.flow = "cond"
         self.history.append(self.i)
         self._enter(easy_flow.first_index(self.st, self._all_ctx(), "cond"))

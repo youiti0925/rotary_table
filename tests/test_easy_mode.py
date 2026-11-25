@@ -599,9 +599,11 @@ class TestDialog(unittest.TestCase):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         dlg._next()
         self.assertEqual(self.sid(dlg), "choose")
-        self.assertFalse(dlg.b_next.isEnabled())            # 2つ選ぶまで進めない
+        self.assertTrue(dlg.b_next.isEnabled())             # 初めから「自動・自動」が選ばれている（人に決めさせない）
+        self.assertTrue(dlg._choice_btns[("params", "auto")].isChecked())
+        self.assertTrue(dlg._choice_btns[("prog", "auto")].isChecked())
         dlg._choice_btns[("params", "manual")].click()
-        self.assertFalse(dlg.b_next.isEnabled())
+        self.assertTrue(dlg.b_next.isEnabled())
         dlg._choice_btns[("prog", "auto")].click()
         self.assertTrue(dlg.b_next.isEnabled())
         self.assertTrue(dlg._choice_btns[("params", "manual")].isChecked())
@@ -738,10 +740,9 @@ class TestDialog(unittest.TestCase):
     def test_condition_flow_division_only(self):
         dlg, host, poller = self.make(S(), flow="cond")
         self.assertEqual(self.sid(dlg), "cond_kind")
-        self.assertFalse(dlg.b_next.isEnabled())
-        dlg._choice_btns[("cond_kind", "division")].click()
-        self.assertFalse(dlg.b_next.isEnabled())              # 回転か傾斜かも選ぶまで
-        dlg._choice_btns[("cond_tilt", False)].click()
+        self.assertTrue(dlg.b_next.isEnabled())               # 初めから「両方・いまの回転/傾斜」が選ばれている
+        self.assertTrue(dlg._choice_btns[("cond_kind", "one")].isChecked())
+        dlg._choice_btns[("cond_kind", "division")].click()   # 違うときだけ押し直す
         self.assertTrue(dlg.b_next.isEnabled())
         dlg._next()
         self.assertIn(("cond_mode", "division", False), host.calls)

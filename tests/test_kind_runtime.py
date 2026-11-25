@@ -179,10 +179,10 @@ class TestHost(unittest.TestCase):
         w = self.w
         w.e_model.setText("NO-KINDS")
         w.on_model_entered()
-        self.assertTrue(w.cmb_kind.isHidden())
+        self.assertTrue(w.kind_btn_box.isHidden())
         w.e_model.setText("TK-1")
         w.on_model_entered()
-        self.assertFalse(w.cmb_kind.isHidden())
+        self.assertFalse(w.kind_btn_box.isHidden())
         self.assertEqual([w.cmb_kind.itemText(i) for i in range(w.cmb_kind.count())][1:], ["モーター", "駆動装置", "フルクロ"])
         w.cmb_kind.setCurrentIndex(w.cmb_kind.findData("セミ・モーター"))
         self.assertEqual(w.measure_kind, "セミ・モーター")

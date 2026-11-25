@@ -13213,6 +13213,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _conn_done = QtCore.Signal(bool, str)
     # FOCAS の機械が LAN に見えたか（見えた IP。見えなくなったら ""）
     _focas_seen = QtCore.Signal(str)
+    _loop_read = QtCore.Signal(str)
     # 通信診断スレッド完了通知（レポート文字列）
     _diag_done = QtCore.Signal(str)
     # SwitchBot Bot押下の経過通知
@@ -13306,6 +13307,15 @@ class MainWindow(QtWidgets.QMainWindow):
         info_grid.addWidget(self.cmb_kind, 5, 1)
         self.l_kind.setVisible(False)
         self.cmb_kind.setVisible(False)
+        # 型式の横に、その型式で登録済みの種類をボタンで並べる（押し直せる）。選ぶ本体は cmb_kind と同じ値
+        self.kind_btn_box = QtWidgets.QWidget()
+        self._kind_btn_lay = QtWidgets.QHBoxLayout(self.kind_btn_box)
+        self._kind_btn_lay.setContentsMargins(0, 0, 0, 0)
+        self._kind_btns = {}
+        info_grid.addWidget(self.kind_btn_box, 6, 0, 1, 2)
+        self.kind_btn_box.setVisible(False)
+        self._kind_user_none = False      # 人が「今までの登録」を押した（自動で選び直さない）
+        self.machine_closed_loop = None   # 機械から読めた "フル"/"セミ"（つながっていなければ None）
         self.suffix_sel = SS.Selection()          # 機番の末尾（社内の表）で選んだもの。画面の表（複数）で共有する
         self._suffix_panels = []
         self.suffix_semi = False                  # かんたん作成で「セミクロにする」を選んだ
@@ -13997,6 +14007,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_machine.clicked.connect(self.show_focas)
         self.statusBar().addPermanentWidget(self.b_machine)
         self._focas_seen.connect(self._on_focas_seen)
+        self._loop_read.connect(self._on_loop_read)
+        self._loop_host = ""
         self._focas_watch_busy = False
         self._focas_watch_ips = None
         self._focas_watch_n = 0
@@ -14333,12 +14345,22 @@ class MainWindow(QtWidgets.QMainWindow):
         return ""
 
     def refresh_kind_choices(self):
-        """画面の型式・モードに合わせて、種類の選び方を作り直す（種類の登録が無ければ隠す）。"""
+        """画面の型式・モードに合わせて、種類の選び方（ボタン）を作り直す。種類の登録が無ければ隠す（今までどおり）。
+        型式を手で入れたとき、1つだけなら自動で選ぶ。複数なら機械の1815（読めたとき）→前回使ったもの。"""
         if not hasattr(self, "cmb_kind"):
             return
-        kinds = KR.kinds_for(self.kind_table, self.e_model.text().strip(), self.is_tilt())
+        model = self.e_model.text().strip()
+        kinds = KR.kinds_for(self.kind_table, model, self.is_tilt())
         if self.measure_kind not in kinds:
             self.measure_kind = ""
+        if model != getattr(self, "_kind_model", None):
+            if getattr(self, "_kind_model", None) is not None:
+                self.measure_kind = ""            # 別の型式に替えた: 前の型式の選びを持ち越さない
+            self._kind_model = model
+            self._kind_user_none = False
+        if kinds and not self.measure_kind and not self._kind_user_none:
+            last = (self.settings.get("last_kinds") or {}).get(model.upper(), "") if hasattr(self.settings, "get") else ""
+            self.measure_kind = KR.pick_kind(kinds, getattr(self, "machine_closed_loop", None), last)
         self.cmb_kind.blockSignals(True)
         self.cmb_kind.clear()
         if kinds:
@@ -14347,8 +14369,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cmb_kind.addItem(KR.label(k), k)
             self.cmb_kind.setCurrentIndex(max(0, self.cmb_kind.findData(self.measure_kind)))
         self.cmb_kind.blockSignals(False)
-        self.l_kind.setVisible(bool(kinds))
-        self.cmb_kind.setVisible(bool(kinds))
+        self.l_kind.setVisible(False)
+        self.cmb_kind.setVisible(False)
+        self._rebuild_kind_buttons(kinds)
+
+    def _rebuild_kind_buttons(self, kinds):
+        lay = self._kind_btn_lay
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._kind_btns = {}
+        self.kind_btn_box.setVisible(bool(kinds))
+        if not kinds:
+            return
+        lay.addWidget(QtWidgets.QLabel("測定の種類"))
+        for key, text in [("", "今までの登録")] + [(k, KR.label(k)) for k in kinds]:
+            b = QtWidgets.QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(key == self.measure_kind)
+            b.setToolTip(KR.HINT.get(key, "種類を選ばず、今までの登録で測ります。"))
+            b.clicked.connect(lambda _c=False, k=key: self._on_kind_button(k))
+            self._kind_btns[key] = b
+            lay.addWidget(b)
+        lay.addStretch(1)
+
+    def _on_kind_button(self, kind):
+        self._kind_user_none = not kind
+        self.measure_kind = kind or ""
+        if kind:
+            try:
+                lk = dict(self.settings.get("last_kinds") or {})
+                lk[self.e_model.text().strip().upper()] = kind
+                self.settings["last_kinds"] = lk
+            except Exception:
+                pass
+        self.refresh_kind_choices()
+        self.apply_auto_suffix()
+        self.on_model_entered()
 
     def _on_kind_combo(self, _i):
         self.measure_kind = self.cmb_kind.currentData() or ""
@@ -14357,6 +14415,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_measure_kind(self, kind):
         """はじめてモードなどから、測定の種類を入れる。"""
         self.measure_kind = kind or ""
+        self._kind_model = self.e_model.text().strip()      # この型式での選び（型式が替わった扱いにしない）
+        self._kind_user_none = not kind
         self.refresh_kind_choices()
         self.apply_auto_suffix()
         self.on_model_entered()
@@ -15751,8 +15811,57 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.b_machine.setText(f"機械が見えます {host} ▶ つなぐ")
         self.b_machine.setVisible(True)
+        self._read_machine_loop(host)
         self.statusBar().showMessage(
             f"LAN に機械が見えました（{host}）。右下のボタンで FOCAS につなげます", 8000)
+
+    def _read_machine_loop(self, host):
+        """機械が見えたら、1815（セミ／フル）を読むだけ読む（書かない・アラームも触らない）。
+        各軸の読みが全部同じときだけ「フル」「セミ」。軸で違う・読めないときは決めない（人がボタンで選ぶ）。"""
+        if host == self._loop_host:
+            return
+        self._loop_host = host
+        settings = dict(self.settings)
+        number = int(settings.get("closed_loop_number", "1815") or 1815)
+        bit = int(settings.get("closed_loop_bit", 1))
+        full = int(settings.get("closed_loop_full", 1))
+        try:
+            port = int(settings.get("focas_port") or 8193)
+        except (TypeError, ValueError):
+            port = 8193
+
+        def work():
+            client, mode = None, ""
+            try:
+                client = focas_client.make_client(settings, log_path=str(app_dir() / "focas_helper.log"))
+                client.call("connect", {"host": host, "port": port, "timeout": focas_client.connect_timeout(settings),
+                                        "families": dict(settings.get("focas_families") or {})})
+                res = client.call("param_read_many", {"items": [{"no": number, "label": f"A{i}"} for i in range(1, 5)]})
+                modes = {fanuc_param.closed_loop_mode(r.get("value"), bit, full)
+                         for r in (res or {}).get("items", []) if r.get("ok")}
+                modes.discard("")
+                mode = modes.pop() if len(modes) == 1 else ""
+            except Exception:
+                mode = ""
+            finally:
+                if client is not None:
+                    try:
+                        if getattr(client, "alive", True):
+                            client.call("disconnect")
+                    except Exception:
+                        pass
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+            self._loop_read.emit(mode)
+        threading.Thread(target=work, daemon=True).start()
+
+    @QtCore.Slot(str)
+    def _on_loop_read(self, mode):
+        self.machine_closed_loop = mode or None
+        if hasattr(self, "e_model") and self.e_model.text().strip():
+            self.on_model_entered()
 
     def show_focas(self):
         """PCから機械を直接読む（FOCAS）。つなぐ・状態・控え・自己診断。"""

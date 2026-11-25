@@ -132,6 +132,20 @@ class TestPlanPerAxis(unittest.TestCase):
         self.assertIsNone(K.find_plan(t, "NONE", True))
 
 
+class TestPickKind(unittest.TestCase):
+    def test_pick(self):
+        from nd287_app import kind_runtime as KR
+        M, D, F = "セミ・モーター", "セミ・駆動装置", "フル・スケール付き"
+        self.assertEqual(KR.pick_kind([M]), M)                       # 1つだけ → 自動
+        self.assertEqual(KR.pick_kind([M, D, F], "フル"), F)         # 機械がフル
+        self.assertEqual(KR.pick_kind([M, F], "セミ"), M)
+        self.assertEqual(KR.pick_kind([M, D, F], "セミ", D), D)      # セミが2つ → 前回
+        self.assertEqual(KR.pick_kind([M, D, F], "セミ"), "")        # 前回も無い → 人が押す
+        self.assertEqual(KR.pick_kind([M, D, F], None, D), D)        # つながっていない → 前回
+        self.assertEqual(KR.pick_kind([M, D, F]), "")
+        self.assertEqual(KR.pick_kind([]), "")
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

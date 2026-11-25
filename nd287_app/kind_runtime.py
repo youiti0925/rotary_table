@@ -74,6 +74,25 @@ def kinds_for(table, model, tilt):
     return K.kinds_of(table, str(model).strip(), bool(tilt))
 
 
+def pick_kind(kinds, machine_loop=None, last=""):
+    """型式を手で入れたとき、登録済みの種類（kinds）から先に選んでおくもの。決まらなければ ""（人が押す）。
+    1つだけ → それ。機械の読み（"フル"/"セミ"）があれば、それに合う種類（セミで2つ以上あれば前回、無ければ決めない）。
+    機械につながっていなければ前回使った種類。"""
+    kinds = list(kinds or [])
+    if not kinds:
+        return ""
+    if len(kinds) == 1:
+        return kinds[0]
+    if machine_loop in ("フル", "セミ"):
+        cand = [k for k in kinds if is_semi(k) == (machine_loop == "セミ")]
+        if len(cand) == 1:
+            return cand[0]
+        if last in cand:
+            return last
+        return ""
+    return last if last in kinds else ""
+
+
 def problems_text(table):
     """画面に出す、種類別の表の問題（無ければ ""）。"""
     ps = [str(x).replace("rotary:", "回転:").replace("tilt:", "傾斜:") for x in ((table or {}).get("problems") or [])]

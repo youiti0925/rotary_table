@@ -59,5 +59,39 @@ class T(unittest.TestCase):
             suffix("normal", kinds=["nope"])
 
 
+class TestSelection(unittest.TestCase):
+    def test_press_order_does_not_matter(self):
+        a = S.Selection("driver")
+        a.press("driver", False, "close")
+        a.press("driver", False, "rotary")
+        self.assertEqual(a.suffix(), "KRC")                      # 押した順ではなく表の左から
+        a.press("driver", False, "close")
+        self.assertEqual(a.suffix(), "KR")                       # もう一度押すと外れる
+        a.press("driver", False, "semi")
+        self.assertEqual(a.suffix(), "K")
+
+    def test_row_switch_drops_na_and_keeps_valid(self):
+        a = S.Selection("driver", False, ["tilt_set", "close"])
+        a.press("driver", True, "rotary")                        # クランプ行へ: 斜線の完組は外れる
+        self.assertEqual(a.suffix(), "KGRC")
+        with self.assertRaises(ValueError):
+            a.press("driver", True, "tilt_set")                  # 斜線は押せない
+        self.assertTrue(a.is_on("driver", True, "close"))
+        self.assertFalse(a.is_on("driver", False, "close"))
+
+    def test_multi_axis_and_ng(self):
+        a = S.Selection("driver", False, ["fixed"], ng=2)
+        a.press("driver", False, "multi", 1)
+        self.assertEqual(a.suffix(), "KMF-X2")                   # 表の例 KMF
+        a.press("driver", False, "multi", 3)
+        self.assertEqual(a.suffix(), "K3F-X2")
+        self.assertTrue(a.is_on("driver", False, "semi") is False)
+
+    def test_normal_row_semi_is_empty(self):
+        a = S.Selection("normal")
+        self.assertEqual(a.suffix(), "")
+        self.assertTrue(a.is_on("normal", False, "semi"))
+
+
 if __name__ == "__main__":
     unittest.main()

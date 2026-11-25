@@ -216,6 +216,11 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         themes.apply_font(self.app, 7)
         return bad
 
+    def test_serial_suffix_dialog(self):
+        """機番末尾の表（社内の表そのまま）。1366x768 / 1024x768 に収まる。"""
+        from nd287_app import serial_suffix_ui as U
+        self.assertEqual(self._check(lambda s: U.SuffixDialog(None, "123456")), [])
+
     def test_kind_conditions_dialog(self):
         """測定条件の種類別の登録画面。"""
         from nd287_app import kind_conditions_ui as U

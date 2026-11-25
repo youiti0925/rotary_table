@@ -160,3 +160,50 @@ def suffix(motor="normal", clamp=False, kinds=(), multi_axis=1, ng=0):
 def file_stem(serial, **kw):
     """機番に末尾を付けた名前（拡張子なし）。"""
     return f"{str(serial).strip()}{suffix(**kw)}"
+
+
+class Selection:
+    """画面の表で押したマスの状態（Qt なし）。押した順ではなく、表の左から順に末尾を作る。
+
+    行（モーター×クランプ）は1つだけ。ほかの行のマスを押すと行が替わり、新しい行で斜線になる条件は外れる。
+    セミクロのマスを押すと、条件は全部外れる（その行のセミクロの記号だけ）。同じマスをもう一度押すと外れる。
+    """
+
+    def __init__(self, motor="normal", clamp=False, kinds=(), multi_axis=1, ng=0):
+        self.motor, self.clamp = motor, bool(clamp)
+        self.kinds = [k for k in KIND_ORDER if k in set(kinds)]
+        self.multi_axis, self.ng = int(multi_axis), int(ng)
+
+    def suffix(self):
+        return suffix(self.motor, self.clamp, self.kinds, self.multi_axis, self.ng)
+
+    def press(self, motor, clamp, kind, multi_axis=1):
+        """表のマスを押す。斜線のマスは ValueError（押せない）。"""
+        cell(motor, clamp, kind, multi_axis)                       # 斜線ならここで止める
+        if (motor, bool(clamp)) != (self.motor, self.clamp):
+            self.motor, self.clamp = motor, bool(clamp)
+            self.kinds = [k for k in self.kinds if TABLE[(motor, bool(clamp))].get(k) is not None]
+        if kind == "semi":
+            self.kinds = []
+        elif kind == "multi":
+            if "multi" in self.kinds and self.multi_axis == int(multi_axis):
+                self.kinds.remove("multi")
+            else:
+                self.multi_axis = int(multi_axis)
+                if "multi" not in self.kinds:
+                    self.kinds.append("multi")
+        elif kind in self.kinds:
+            self.kinds.remove(kind)
+        else:
+            self.kinds.append(kind)
+        self.kinds = [k for k in KIND_ORDER if k in set(self.kinds)]
+
+    def is_on(self, motor, clamp, kind, multi_axis=1):
+        """このマスが選ばれているか（画面で色を付ける用）。セミクロのマスは、その行で条件が空のとき。"""
+        if (motor, bool(clamp)) != (self.motor, self.clamp):
+            return False
+        if kind == "semi":
+            return not self.kinds
+        if kind == "multi":
+            return "multi" in self.kinds and self.multi_axis == int(multi_axis)
+        return kind in self.kinds

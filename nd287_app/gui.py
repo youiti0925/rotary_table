@@ -3298,6 +3298,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._wr_widget = hscroll_buttons(wr)
         cl.addWidget(self._wr_widget)
         v.addWidget(cf, 1)
+        self._cf_box = cf
 
         # 結果
         rg = QtWidgets.QGroupBox("結果")
@@ -3748,6 +3749,15 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self.lbl_backup.setStyleSheet("color:#b91c1c;")
         self._backup = None
         self._refresh_enabled()
+
+    def arrange_embedded(self):
+        """かんたん作成の画面の中に入れたとき: 閉じるを隠し、③確認→書くを対象の行のすぐ下（つなぐ・控えより上）へ出す。"""
+        self._bbx.setVisible(False)
+        self._cl_layout.removeWidget(self._wr_widget)
+        self._cl_layout.insertWidget(0, self._wr_widget)
+        iv = self._cf_box.parentWidget().layout()
+        iv.removeWidget(self._cf_box)
+        iv.insertWidget(iv.indexOf(self.lbl_target) + 1, self._cf_box)
 
     def _cancel_job(self):
         self._cancel = True
@@ -8636,13 +8646,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._close_writer(force=True)
         d = FocasWriteDialog(self, settings, plan_fn, **kw)
         d.setWindowFlags(QtCore.Qt.Widget)
-        # 画面の中に入れたときは、閉じるを隠し、書くボタンを一番上へ（下に隠れないように）
-        try:
-            d._bbx.setVisible(False)
-            d._cl_layout.removeWidget(d._wr_widget)
-            d._cl_layout.insertWidget(0, d._wr_widget)
-        except Exception:
-            pass
+        d.arrange_embedded()
         self.panel.layout().addWidget(d)
         self._params_ok = False
         self._params_same = False
@@ -8998,7 +9002,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         d.setWindowFlags(QtCore.Qt.Widget)
         d.sent.connect(self._p_on_sent)
         d.inspected.connect(self._p_on_inspected)
-        self.panel4.layout().addWidget(d)
+        lay4 = self.panel4.layout()
+        pos = lay4.indexOf(self.tbl_p)
+        if pos >= 0:                         # 「送る」は表のすぐ下（下に隠れて見つからなかった）
+            lay4.insertWidget(pos + 1, d)
+        else:
+            lay4.addWidget(d)
         self._prog_dlg = d
         self._p_refresh()
         d.show()

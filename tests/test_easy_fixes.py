@@ -75,6 +75,17 @@ class TestEasyFixes(unittest.TestCase):
         self.assertEqual(len(set(heights)), 1, heights)
         self.assertLess(heights[0], 120)
 
+    def test_embedded_writer_puts_write_box_up_and_hides_close(self):
+        from nd287_app import gui as G
+        from nd287_app.settings import DEFAULTS
+        import copy
+        d = G.FocasWriteDialog(None, copy.deepcopy(DEFAULTS), lambda raw, zero_scope="product": None)
+        d.arrange_embedded()
+        iv = d._cf_box.parentWidget().layout()
+        self.assertEqual(iv.indexOf(d._cf_box), iv.indexOf(d.lbl_target) + 1)   # ③は対象の行のすぐ下
+        self.assertTrue(d._bbx.isHidden())                                      # 閉じるは二重なので出さない
+        self.assertEqual(d._cl_layout.indexOf(d._wr_widget), 0)                 # 書くボタンは箱の先頭
+
 
 if __name__ == "__main__":
     unittest.main()

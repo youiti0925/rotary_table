@@ -17475,6 +17475,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, (item, value) in enumerate(rows):
             value = value or ""
             text = f"{item}　{value}" if value else item
+            text = text.replace("　", " ")      # 全角の空白は幅を取り、右の列で2行に折れて最終行が切れた（会社PC150%）
             cell = QtWidgets.QTableWidgetItem(text)
             cell.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             cell.setToolTip(text)

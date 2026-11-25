@@ -504,3 +504,80 @@ def unsaved():
             f'<circle cx="400" cy="46" r="22" fill="{YELLOW}" stroke="{INK}" stroke-width="3"/>' + _t(400, 54, 24, "!", fill=INK, weight=900)
             + _t(360, 194, 15, "まだ入っていません", fill=FG))
     return _svg(480, 210, body, "まだ保存していません")
+
+
+# ------------------------------------------------------------------ 測り方（測定条件）を決める
+
+def tile_cond():
+    body = (f'<rect x="30" y="20" width="150" height="124" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            + "".join(f'<rect x="44" y="{34 + i * 24}" width="{[90, 60, 100, 70][i]}" height="8" fill="#DDE2E7"/>'
+                      f'<rect x="{150}" y="{30 + i * 24}" width="22" height="18" rx="3" fill="#FFF3CF" stroke="{HERE}" stroke-width="2"/>' for i in range(4))
+            + f'<circle cx="236" cy="82" r="40" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+            + "".join(f'<line x1="{236 + 40 * math.sin(math.radians(a)):.1f}" y1="{82 - 40 * math.cos(math.radians(a)):.1f}" '
+                      f'x2="{236 + 31 * math.sin(math.radians(a)):.1f}" y2="{82 - 31 * math.cos(math.radians(a)):.1f}" stroke="{INK}" stroke-width="3"/>'
+                      for a in range(0, 360, 30))
+            + f'<path d="M236 82 L236 52" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/>')
+    return _tile(300, 165, body, "測り方を決める・登録する")
+
+
+def choice_kind(kind):
+    """何を測るか: 分割（等間隔の目盛り）／再現性（止まる所に印）／両方。"""
+    def dial(cx, ticks=(), marks=()):
+        b = f'<circle cx="{cx}" cy="43" r="30" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+        for a in ticks:
+            b += (f'<line x1="{cx + 30 * math.sin(math.radians(a)):.1f}" y1="{43 - 30 * math.cos(math.radians(a)):.1f}" '
+                  f'x2="{cx + 23 * math.sin(math.radians(a)):.1f}" y2="{43 - 23 * math.cos(math.radians(a)):.1f}" stroke="{INK}" stroke-width="2"/>')
+        for a in marks:
+            b += f'<circle cx="{cx + 22 * math.sin(math.radians(a)):.1f}" cy="{43 - 22 * math.cos(math.radians(a)):.1f}" r="5" fill="{HERE}"/>'
+        return b
+    ticks, marks = tuple(range(0, 360, 15)), (0, 90, 180, 270)
+    if kind == "division":
+        body = dial(100, ticks=ticks)
+    elif kind == "repeat":
+        body = dial(100, marks=marks)
+    else:
+        body = dial(60, ticks=ticks) + dial(150, marks=marks)
+    return _svg(200, 86, body, "測るもの")
+
+
+def choice_tilt(tilt):
+    """回転（まわる矢印）か、傾斜（かたむく板）。"""
+    if tilt:
+        body = (f'<rect x="60" y="56" width="80" height="14" rx="4" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3" transform="rotate(-22 100 63)"/>'
+                f'<path d="M70 70 L100 70 L100 40 Z" fill="none" stroke="{HERE}" stroke-width="4"/>')
+    else:
+        body = (f'<ellipse cx="100" cy="46" rx="42" ry="14" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+                f'<path d="M62 34 A44 20 0 0 1 138 34" fill="none" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/>'
+                f'<path d="M142 28 L130 40 L124 24 Z" fill="{HERE}"/>')
+    return _svg(200, 86, body, "回転か傾斜か")
+
+
+def cond_dial(pitch=10.0, marks=None, hot=None):
+    """円盤に目盛り。pitch ごとの目盛りを描く（多すぎるときは間引く）。marks があれば、止まる所の印（橙の丸）を描く。"""
+    cx, cy, r = 260, 150, 110
+    body = f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="4"/>'
+    if marks is None:
+        n = max(1, int(round(360 / pitch))) if pitch and pitch > 0 else 1
+        step = max(1, math.ceil(n / 72))
+        for i in range(0, n, step):
+            a = i * 360 / n
+            x1, y1 = _pol(cx, cy, r, a)
+            x2, y2 = _pol(cx, cy, r - 16, a)
+            body += f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{INK}" stroke-width="3"/>'
+        body += _t(cx, cy + 10, 30, f"{n} か所", fill=FG)
+    else:
+        for a in marks:
+            x, y = _pol(cx, cy, r - 24, a)
+            body += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="12" fill="{HERE}" stroke="{INK}" stroke-width="2"/>' + _t(*_pol(cx, cy, r + 22, a), 14, f"{a:g}°", fill=FG)
+        body += _t(cx, cy + 10, 26, f"{len(marks)} か所", fill=FG)
+    return _wide(body.replace('font-size="14"', 'font-size="13"'), "測る所")
+
+
+def cond_drawer():
+    """型式の札が、引き出しに入る。"""
+    body = (f'<rect x="150" y="150" width="240" height="110" rx="10" fill="#E9C46A" stroke="#B88A1B" stroke-width="3"/>'
+            f'<rect x="230" y="190" width="80" height="16" rx="6" fill="#B88A1B"/>'
+            f'<rect x="190" y="40" width="160" height="90" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+            + _t(270, 92, 22, "RWE-200") + f'<path d="M270 136 L270 150" stroke="{HERE}" stroke-width="6" stroke-linecap="round"/>'
+            f'<path d="M258 142 L270 156 L282 142 Z" fill="{HERE}"/>')
+    return _wide(body, "この型式で登録する")

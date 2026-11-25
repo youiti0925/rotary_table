@@ -11023,6 +11023,52 @@ class ParamDBDialog(QtWidgets.QDialog):
         return ""
 
 
+def condition_targets():
+    """測定条件の登録先4つ（回転分割・傾斜分割・回転再現・傾斜再現）。条件編集とはじめてモードで共用。"""
+    from .masters import (ROTARY_USER_FIELDS, TILT_USER_FIELDS, REPEAT_USER_FIELDS)
+    return {
+        "回転分割": dict(key="user_rotary_csv", default="マスタ/ユーザー回転条件.csv",
+                         fields=ROTARY_USER_FIELDS, tilt=False, repeat=False,
+                         note="回転分割の測定条件を型式ごとに登録（提供CSVより優先）。"),
+        "傾斜分割": dict(key="user_tilt_csv", default="マスタ/ユーザー傾斜条件.csv",
+                         fields=TILT_USER_FIELDS, tilt=True, repeat=False,
+                         note="傾斜分割の測定条件を型式ごとに登録（回転とは別ファイル）。"),
+        "回転再現": dict(key="user_rotary_repeat_csv",
+                         default="マスタ/ユーザー回転再現条件.csv",
+                         fields=REPEAT_USER_FIELDS, tilt=False, repeat=True,
+                         note="回転再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
+        "傾斜再現": dict(key="user_tilt_repeat_csv",
+                         default="マスタ/ユーザー傾斜再現条件.csv",
+                         fields=REPEAT_USER_FIELDS, tilt=True, repeat=True,
+                         note="傾斜再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
+    }
+
+
+def condition_record(win, spec):
+    """画面に入っている値から、登録する1行を作る（条件編集の「現在の画面条件で登録/更新」と同じ）。"""
+    w = win
+    model = w.e_model.text().strip()
+    if not model:
+        return None
+    if spec["repeat"]:
+        return {"型式": model, "ブロック数": f"{w.e_blocks.value():g}",
+                "回数": f"{w.e_repeats.value():g}",
+                "再現開始": f"{w.e_rstart.value():g}",
+                "再現終了": f"{w.e_rend.value():g}"}
+    if spec["tilt"]:
+        return {
+            "型式": model,
+            "開始角度": f"{w.e_wstart.value():g}", "終了角度": f"{w.e_wend.value():g}",
+            "刻み": f"{w.e_wheel.value():g}", "ウォーム刻み": f"{w.e_worm.value():g}",
+            "ウォーム範囲": f"{w.e_range.value():g}", "ウォーム開始": f"{w.e_start.value():g}",
+        }
+    return {
+        "型式": model, "ホイール刻み": f"{w.e_wheel.value():g}",
+        "ウォーム刻み": f"{w.e_worm.value():g}", "ウォーム範囲": f"{w.e_range.value():g}",
+        "ウォーム開始": f"{w.e_start.value():g}",
+    }
+
+
 class ConditionRegistryDialog(QtWidgets.QDialog):
     """測定条件の登録/編集（回転分割・傾斜分割・回転再現・傾斜再現を上の「対象」で切替）。
 
@@ -11032,23 +11078,7 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
     def __init__(self, win, target="回転分割"):
         super().__init__(win)
         self.win = win
-        from .masters import (ROTARY_USER_FIELDS, TILT_USER_FIELDS, REPEAT_USER_FIELDS)
-        self.TARGETS = {
-            "回転分割": dict(key="user_rotary_csv", default="マスタ/ユーザー回転条件.csv",
-                             fields=ROTARY_USER_FIELDS, tilt=False, repeat=False,
-                             note="回転分割の測定条件を型式ごとに登録（提供CSVより優先）。"),
-            "傾斜分割": dict(key="user_tilt_csv", default="マスタ/ユーザー傾斜条件.csv",
-                             fields=TILT_USER_FIELDS, tilt=True, repeat=False,
-                             note="傾斜分割の測定条件を型式ごとに登録（回転とは別ファイル）。"),
-            "回転再現": dict(key="user_rotary_repeat_csv",
-                             default="マスタ/ユーザー回転再現条件.csv",
-                             fields=REPEAT_USER_FIELDS, tilt=False, repeat=True,
-                             note="回転再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
-            "傾斜再現": dict(key="user_tilt_repeat_csv",
-                             default="マスタ/ユーザー傾斜再現条件.csv",
-                             fields=REPEAT_USER_FIELDS, tilt=True, repeat=True,
-                             note="傾斜再現性のブロック数・回数・再現範囲を型式ごとに登録。"),
-        }
+        self.TARGETS = condition_targets()
         self.setWindowTitle("測定条件の登録/編集")
         fit_to_screen(self, 660, 480)
         layout = QtWidgets.QVBoxLayout(self)
@@ -11121,28 +11151,7 @@ class ConditionRegistryDialog(QtWidgets.QDialog):
         self.table.resizeColumnsToContents()
 
     def _current_record(self):
-        w = self.win
-        model = w.e_model.text().strip()
-        if not model:
-            return None
-        spec = self.spec
-        if spec["repeat"]:
-            return {"型式": model, "ブロック数": f"{w.e_blocks.value():g}",
-                    "回数": f"{w.e_repeats.value():g}",
-                    "再現開始": f"{w.e_rstart.value():g}",
-                    "再現終了": f"{w.e_rend.value():g}"}
-        if spec["tilt"]:
-            return {
-                "型式": model,
-                "開始角度": f"{w.e_wstart.value():g}", "終了角度": f"{w.e_wend.value():g}",
-                "刻み": f"{w.e_wheel.value():g}", "ウォーム刻み": f"{w.e_worm.value():g}",
-                "ウォーム範囲": f"{w.e_range.value():g}", "ウォーム開始": f"{w.e_start.value():g}",
-            }
-        return {
-            "型式": model, "ホイール刻み": f"{w.e_wheel.value():g}",
-            "ウォーム刻み": f"{w.e_worm.value():g}", "ウォーム範囲": f"{w.e_range.value():g}",
-            "ウォーム開始": f"{w.e_start.value():g}",
-        }
+        return condition_record(self.win, self.spec)
 
     def register_current(self):
         from .masters import upsert_user_condition
@@ -14685,6 +14694,85 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError("まだ保存していません")
         from PySide6 import QtGui, QtCore
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(Path(path).parent)))
+
+    # ----- はじめてモード: 測定条件の入れ方・登録 -----
+    _EASY_COND = {"wheel": "e_wheel", "worm": "e_worm", "range": "e_range", "start": "e_start",
+                  "wstart": "e_wstart", "wend": "e_wend", "blocks": "e_blocks", "repeats": "e_repeats",
+                  "rstart": "e_rstart", "rend": "e_rend"}
+
+    def easy_cond_get(self):
+        return {k: getattr(self, a).value() for k, a in self._EASY_COND.items()}
+
+    def easy_cond_set(self, key, val):
+        w = getattr(self, self._EASY_COND[key])
+        w.setValue(int(val) if key in ("blocks", "repeats") else float(val))
+
+    def easy_cond_mode(self, kind, tilt):
+        """何を測るか（division／repeat／one）と回転か傾斜かを、測定の画面のモードに入れる。
+        そのあと型式の登録を読み直す（登録があれば、その値が入る）。"""
+        from .wizard_programs import MODE_FOR
+        self.mode_combo.setCurrentText(MODE_FOR[kind][1 if tilt else 0])
+        self.on_model_entered()
+
+    def easy_cond_state(self):
+        """画面の型式・モードと、その型式の条件が どこにあるか。
+        {"model","mode","tilt","div":"登録"/"会社の一覧"/"なし","rep":"登録"/"なし","div_same_master":bool,
+         "blocks":[角度…]}"""
+        from .masters import find_entry, condition_params
+        text = self.e_model.text().strip()
+        key = text.upper()
+        tilt = self.is_tilt()
+        m = self.masters or {}
+        rep = "登録" if key and m.get("user_tilt_repeat" if tilt else "user_rotary_repeat", {}).get(key) else "なし"
+        if tilt:
+            div = "登録" if key and m.get("user_tilt", {}).get(key) else "なし"
+        elif key and m.get("user_rotary", {}).get(key):
+            div = "登録"
+        elif text and find_entry(m.get("conditions", {}), text):
+            div = "会社の一覧"
+        else:
+            div = "なし"
+        same = False
+        if div == "会社の一覧":
+            try:
+                p = condition_params(find_entry(m["conditions"], text), find_entry(m["judgement"], text))
+                same = (abs(p.get("wheel_pitch", -1) - self.e_wheel.value()) < 1e-9
+                        and abs(p.get("worm_pitch", -1) - self.e_worm.value()) < 1e-9
+                        and abs(p.get("worm_range", -1) - self.e_range.value()) < 1e-9)
+            except Exception:
+                same = False
+        try:
+            blocks = list(self.repeat_blocks())
+        except Exception:
+            blocks = []
+        return dict(model=text, mode=self.current_mode(), tilt=tilt, div=div, rep=rep,
+                    div_same_master=same, blocks=blocks)
+
+    def easy_cond_register(self, kind, tilt):
+        """要る分（分割・再現性）を、画面の値で登録する。会社の一覧と同じ値のときは、分割を登録しない。
+        戻り値: 文のリスト（何を登録した／しなかった）。"""
+        from .masters import upsert_user_condition, _user_path
+        text = self.e_model.text().strip()
+        if not text:
+            raise RuntimeError("型式を入れてください")
+        st = self.easy_cond_state()
+        targets = condition_targets()
+        out = []
+        want = []
+        if kind in ("division", "one"):
+            want.append("傾斜分割" if tilt else "回転分割")
+        if kind in ("repeat", "one"):
+            want.append("傾斜再現" if tilt else "回転再現")
+        for name in want:
+            spec = targets[name]
+            if not spec["repeat"] and not tilt and st["div"] == "会社の一覧" and st["div_same_master"]:
+                out.append("分割: もう会社の一覧に登録されています（そのまま使います）")
+                continue
+            rec = condition_record(self, spec)
+            upsert_user_condition(_user_path(self.settings, spec["key"], spec["default"]), spec["fields"], rec)
+            out.append(f"{name[2:]}: 登録しました")
+        self.reload_masters()
+        return out
 
     def easy_next_mode(self, mode):
         self.mode_combo.setCurrentText(mode)

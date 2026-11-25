@@ -369,7 +369,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         hg.setContentsMargins(0, 0, 0, 0)
         hg.setSpacing(18)
         pics = {"measure": easy_art.tile_measure, "program": easy_art.tile_program,
-                "results": easy_art.tile_results, "alarm": easy_art.tile_alarm}
+                "results": easy_art.tile_results, "alarm": easy_art.tile_alarm, "cond": easy_art.tile_cond}
         self.tiles = {}
         for n, (fid, fl) in enumerate(easy_flow.FLOWS.items()):
             t = TileButton(fl["title"], fl["sub"], pics[fid](), badge=fl.get("badge", ""))
@@ -423,6 +423,10 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _all_ctx(self):
         c = dict(self.ctx)
         c.update(self._hctx())
+        try:
+            c["cond_missing"] = not self.host.e_model.text().strip()
+        except Exception:
+            c["cond_missing"] = False
         return c
 
     def _first(self):
@@ -463,6 +467,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.history = [INDEX["home"]]
         if flow == "measure":
             self.ctx.update(handoff=False, skip_machine=False, params=None, prog=None)
+        if flow == "cond":
+            self.ctx.update(cond_kind=None, cond_tilt=None, cond_registered=False, cond_msgs=[])
         self._enter(j)
 
     def _go_home(self, force=False):
@@ -484,8 +490,19 @@ class EasyModeDialog(QtWidgets.QDialog):
                 return
             self._go_home()
             return
+        if s["id"] == "cond_kind":                       # 選んだ測り方を、測定の画面のモードに入れる（登録があれば、その値が入る）
+            try:
+                self.host.easy_cond_mode(self.ctx["cond_kind"], bool(self.ctx["cond_tilt"]))
+            except Exception as e:
+                self._notice = f"測り方を入れられませんでした: {e}"
+        if s["id"] == "cond_done" and self.ctx.get("cond_return") is not None:      # 測るの流れから来たとき: そこへもどる
+            back = self.ctx.pop("cond_return")
+            self.flow = "measure"
+            self.history.append(self.i)
+            self._enter(back)
+            return
         j = easy_flow.next_index(self.i, self.st, c, self.flow)
-        if j is None or s["id"] in ("output", "alarm_look", "prog_done"):
+        if j is None or s["id"] in ("output", "alarm_look", "prog_done", "cond_done"):
             self._go_home()
             return
         self.history.append(self.i)
@@ -636,7 +653,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         self.lbl_who.setText(easy_flow.WHO.get("auto" if s["kind"] == "run" else s["kind"], "PC で")
                              if s["kind"] != "info" else "")
-        self.lbl_who.setVisible(s["kind"] not in ("info", "choose"))
+        self.lbl_who.setVisible(s["kind"] not in ("info", "choose", "cond"))
         if s["kind"] == "machine":
             self.lbl_who.setStyleSheet("background:#F0A400; color:#2A1E00;")
         else:
@@ -671,6 +688,17 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._open_wizard_inside()
         elif sid == "choose":
             self._build_choose()
+        elif sid == "cond_check":
+            self._build_cond_check()
+        elif sid == "cond_kind":
+            self._build_cond_kind()
+        elif sid in ("cond_div", "cond_rep"):
+            self._build_cond_fields(sid)
+        elif sid == "cond_reg":
+            self._build_cond_reg()
+        elif sid == "cond_done":
+            lines = list(self.ctx.get("cond_msgs") or []) + ["次から、この型式を入れると自動で入ります。"]
+            self.lbl_lines.setText("\n".join(lines))
         elif sid == "params_manual":
             self._extra_widgets["act"] = self._act_button("打つ一覧を見る…", self._param_list)
             self._small_note("機械の操作は、まだ実機で確かめていません。")
@@ -706,6 +734,182 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
         self._refresh()
+
+    # ------------------------------------------------------------ 測り方（測定条件）
+    def _cond_get(self):
+        try:
+            return self.host.easy_cond_get()
+        except Exception:
+            return {}
+
+    def _cond_marks(self):
+        try:
+            return list(self.host.easy_cond_state().get("blocks") or [])
+        except Exception:
+            return []
+
+    def _model_edit(self):
+        h = self.host
+        lb = QtWidgets.QLabel("型式（例 RWE-200）")
+        lb.setStyleSheet("color:#5A6876; font-size:13px;")
+        self.extra.addWidget(lb)
+        e = QtWidgets.QLineEdit(h.e_model.text())
+        e.setObjectName("fld")
+        e.setMaximumWidth(340)
+        e.textChanged.connect(lambda t: h.e_model.setText(t))
+        self.extra.addWidget(e)
+        self._edits = [e]
+
+    def _build_cond_check(self):
+        """「測る」の流れの中で、測り方がもう登録されているか見せる。無ければ、その場で決めて登録できる。"""
+        self._model_edit()
+        try:
+            st = self.host.easy_cond_state()
+        except Exception:
+            st = {}
+        if st.get("model"):
+            have = [n for n, k in (("分割", st.get("div")), ("再現性", st.get("rep"))) if k in ("登録", "会社の一覧")]
+            lb = QtWidgets.QLabel(("登録から自動で入りました: " + "・".join(have)) if have else
+                                  "この型式は、まだ測り方が登録されていません。下のボタンで決めて登録できます。")
+            lb.setWordWrap(True)
+            lb.setStyleSheet("font-size:14px; font-weight:700; color:" + ("#16864C" if have else "#B02A20") + ";")
+            self.extra.addWidget(lb)
+        r = QtWidgets.QPushButton("測り方を決める・登録する…")
+        r.setObjectName("sub")
+        r.setCursor(QtCore.Qt.PointingHandCursor)
+        r.clicked.connect(self._cond_from_check)
+        self.extra.addWidget(r)
+
+    def _cond_from_check(self):
+        """測るの流れの途中から、測り方の流れへ。終わったら、ここにもどる。"""
+        self.ctx["cond_return"] = self.i
+        self.ctx.update(cond_kind=None, cond_tilt=None, cond_registered=False, cond_msgs=[])
+        self.flow = "cond"
+        self.history.append(self.i)
+        self._enter(easy_flow.first_index(self.st, self._all_ctx(), "cond"))
+
+    def _build_cond_kind(self):
+        A = easy_art
+        self._choice_btns = {}
+        rows = (("cond_kind", "何を測りますか", (("division", "分割だけ", A.choice_kind("division")),
+                                                  ("repeat", "再現性だけ", A.choice_kind("repeat")),
+                                                  ("one", "両方", A.choice_kind("one")))),
+                ("cond_tilt", "回転ですか、傾斜ですか", ((False, "回転", A.choice_tilt(False)), (True, "傾斜", A.choice_tilt(True)))))
+        self._model_edit()
+        for key, head, opts in rows:
+            lb = QtWidgets.QLabel(head)
+            lb.setStyleSheet("color:#17212B; font-size:15px; font-weight:700;")
+            self.extra.addWidget(lb)
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(10)
+            for val, text, svg in opts:
+                b = ChoiceButton(text, svg)
+                b.setChecked(self.ctx.get(key) is not None and self.ctx.get(key) == val)
+                b.clicked.connect(lambda _c=False, k=key, v=val: self._choose(k, v))
+                row.addWidget(b)
+                self._choice_btns[(key, val)] = b
+            self.extra.addLayout(row)
+
+    _COND_FIELDS = {
+        "cond_div": (("wheel", "何度ごとに測るか（°）", "ホイールの刻みです。360 ÷ 刻み ＝ 測る場所の数。"),
+                     ("worm", "細かく測る刻み（°）", "ウォームを細かく見る所の刻みです。"),
+                     ("range", "細かく測る範囲（°）", "細かく測る範囲の広さです。"),
+                     ("start", "細かく測り始める角度（°）", "")),
+        "cond_div_tilt": (("wstart", "どこから（°）", "傾斜の開始角度です。"),
+                          ("wend", "どこまで（°）", "傾斜の終了角度です。"),
+                          ("wheel", "何度ごとに測るか（°）", ""),
+                          ("worm", "細かく測る刻み（°）", ""),
+                          ("range", "細かく測る範囲（°）", ""),
+                          ("start", "細かく測り始める角度（°）", "")),
+        "cond_rep": (("blocks", "何か所で測るか", "止まる所の数です。"),
+                     ("repeats", "何回ずつ測るか", "同じ所へ行って、くり返す回数です。"),
+                     ("rstart", "どこから（°）", "最初の止まる所です。"),
+                     ("rend", "どこまで（°）", "最後の止まる所です。")),
+    }
+
+    def _build_cond_fields(self, sid):
+        tilt = bool(self.ctx.get("cond_tilt"))
+        key = "cond_div_tilt" if (sid == "cond_div" and tilt) else sid
+        self._cond_spins = {}
+        vals = self._cond_get()
+        for name, label, help_ in self._COND_FIELDS[key]:
+            lb = QtWidgets.QLabel(label + ("　" + help_ if help_ else ""))
+            lb.setStyleSheet("color:#5A6876; font-size:13px;")
+            lb.setWordWrap(True)
+            self.extra.addWidget(lb)
+            integer = name in ("blocks", "repeats")
+            sp = QtWidgets.QSpinBox() if integer else QtWidgets.QDoubleSpinBox()
+            sp.setRange(0, 999 if integer else 3600)
+            if not integer:
+                sp.setDecimals(3)
+            sp.setValue(int(vals.get(name, 0)) if integer else float(vals.get(name, 0)))
+            sp.setMaximumWidth(200)
+            sp.valueChanged.connect(lambda v, n=name: self._cond_changed(n, v))
+            self.extra.addWidget(sp)
+            self._cond_spins[name] = sp
+        self.lbl_cond = QtWidgets.QLabel("")
+        self.lbl_cond.setStyleSheet("background:#FFF3CF; color:#7A5200; padding:6px; font-size:15px; font-weight:700;")
+        self.extra.addWidget(self.lbl_cond)
+        self._cond_summary(sid)
+
+    def _cond_changed(self, name, v):
+        try:
+            self.host.easy_cond_set(name, v)
+        except Exception as e:
+            self._notice = f"入れられませんでした: {e}"
+        self._cond_summary(STEPS[self.i]["id"])
+        self._refresh()
+
+    def _cond_summary(self, sid):
+        g = self._cond_get()
+        if sid == "cond_div":
+            w = g.get("wheel") or 0
+            txt = f"360 ÷ {w:g} ＝ {360 / w:g} か所" if w else "刻みを入れてください"
+        else:
+            marks = self._cond_marks()
+            txt = (" ・ ".join(f"{a:g}°" for a in marks) + f"　の {len(marks)} か所 × {g.get('repeats', 0):g} 回") if marks else ""
+        if getattr(self, "lbl_cond", None) is not None:
+            try:
+                self.lbl_cond.setText(txt)
+            except RuntimeError:
+                pass
+
+    def _build_cond_reg(self):
+        try:
+            st = self.host.easy_cond_state()
+        except Exception:
+            st = {}
+        ck = self.ctx.get("cond_kind")
+        lines = [f"型式 {st.get('model', '')}　（{'傾斜' if self.ctx.get('cond_tilt') else '回転'}）"]
+        if ck in ("division", "one"):
+            lines.append("分割: " + {"登録": "登録あり", "会社の一覧": "会社の一覧にあります", "なし": "まだ登録なし"}.get(st.get("div"), ""))
+        if ck in ("repeat", "one"):
+            lines.append("再現性: " + ("登録あり（上書きします）" if st.get("rep") == "登録" else "まだ登録なし"))
+        if (ck in ("division", "one") and not self.ctx.get("cond_tilt") and st.get("div") == "会社の一覧"
+                and not st.get("div_same_master")):
+            lines.append("これからは、あなたの登録を先に使います。測る順番は標準にもどります。")
+        lb = QtWidgets.QLabel("\n".join(lines))
+        lb.setWordWrap(True)
+        lb.setStyleSheet("font-size:14px; color:#17212B;")
+        self.extra.addWidget(lb)
+        self._extra_widgets["act"] = self._act_button("この型式で登録する", self._cond_register)
+
+    def _cond_register(self):
+        try:
+            msgs = self.host.easy_cond_register(self.ctx["cond_kind"], bool(self.ctx["cond_tilt"]))
+        except Exception as e:
+            self._notice = f"登録できませんでした: {e}"
+            self._refresh()
+            return
+        self.ctx["cond_msgs"] = list(msgs)
+        self.ctx["cond_registered"] = True
+        self.history.append(self.i)
+        self._next_after_register()
+
+    def _next_after_register(self):
+        j = easy_flow.next_index(self.i, self.st, self._all_ctx(), self.flow)
+        if j is not None:
+            self._enter(j)
 
     def _small_note(self, text):
         lb = QtWidgets.QLabel(text)
@@ -918,7 +1122,9 @@ class EasyModeDialog(QtWidgets.QDialog):
             label, enabled = "測り終わるまで待ちます", False
         elif sid == "finish":
             label, go, enabled = ("次の測定へ ▶" if c.get("next_mode") else "ホームへ"), True, True
-        elif sid in ("output", "alarm_look", "prog_done"):
+        elif sid == "cond_done" and self.ctx.get("cond_return") is not None:
+            label, go, enabled = "もどる ▶", True, True
+        elif sid in ("output", "alarm_look", "prog_done", "cond_done"):
             label, go, enabled = "ホームへ", True, True
         elif sid == "open_past":
             label, enabled = "次へ ▶", bool(c.get("has_data"))
@@ -1034,6 +1240,15 @@ class EasyModeDialog(QtWidgets.QDialog):
             svg = A.scene()
         elif art == "choose":
             svg = A.flowchart(c.get("params"), c.get("prog"))
+        elif art == "cond_kind":
+            svg = A.tile_cond()
+        elif art == "cond_div":
+            g = self._cond_get()
+            svg = A.cond_dial(g.get("wheel") or 0)
+        elif art == "cond_rep":
+            svg = A.cond_dial(marks=self._cond_marks())
+        elif art == "cond_reg":
+            svg = A.cond_drawer()
         elif art == "params_manual":
             svg = A.params_manual()
         elif art == "prog_manual":

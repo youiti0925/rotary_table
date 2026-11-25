@@ -290,6 +290,29 @@ class FakeHost:
     def easy_next_mode(self, mode):
         self.calls.append(("mode", mode))
 
+    def easy_cond_get(self):
+        return dict(getattr(self, "cond", dict(wheel=10.0, worm=1.0, range=20.0, start=0.0, wstart=0.0, wend=90.0,
+                                               blocks=4, repeats=7, rstart=0.0, rend=270.0)))
+
+    def easy_cond_set(self, key, val):
+        self.cond = self.easy_cond_get()
+        self.cond[key] = val
+        self.calls.append(("cond_set", key, val))
+
+    def easy_cond_mode(self, kind, tilt):
+        self.calls.append(("cond_mode", kind, tilt))
+
+    def easy_cond_state(self):
+        c = self.easy_cond_get()
+        n = int(c["blocks"])
+        blocks = [c["rstart"] + i * (c["rend"] - c["rstart"]) / (n - 1) for i in range(n)] if n > 1 else [c["rstart"]]
+        return dict(model=self.e_model.text(), mode="回転分割", tilt=False, div="会社の一覧", rep="なし",
+                    div_same_master=False, blocks=blocks)
+
+    def easy_cond_register(self, kind, tilt):
+        self.calls.append(("cond_reg", kind, tilt))
+        return ["分割: 登録しました"]
+
     def easy_undo(self):
         self.calls.append("undo")
 
@@ -378,6 +401,12 @@ class TestDialog(unittest.TestCase):
         dlg.ctx["params"], dlg.ctx["prog"] = params, prog
         dlg._refresh()
         dlg._next()
+        self.skip_cond_check(dlg)
+
+    def skip_cond_check(self, dlg):
+        """「測り方を確かめる」は、機械の手順（電源・つまみ・非常停止）のあと。そこまで来ていたら、そのまま進む。"""
+        if self.sid(dlg) == "cond_check":
+            dlg._next()
 
     def test_walk_through_to_the_end(self):
         dlg, host, poller = self.make(S(aut=0))
@@ -389,6 +418,7 @@ class TestDialog(unittest.TestCase):
         dlg._tick()
         self.assertTrue(dlg.b_next.isEnabled())
         dlg._next()
+        self.skip_cond_check(dlg)
         self.assertEqual(self.sid(dlg), "machine_in")
         self.assertIsNotNone(dlg._wiz)                # かんたん作成は、この画面の中に入っている
         self.assertFalse(dlg.embed.isHidden())
@@ -451,7 +481,7 @@ class TestDialog(unittest.TestCase):
     def test_starts_at_home_with_four_tiles(self):
         dlg, host, poller = self.make(S(), flow=None)
         self.assertEqual(self.sid(dlg), "home")
-        self.assertEqual(set(dlg.tiles), {"measure", "program", "results", "alarm"})
+        self.assertEqual(set(dlg.tiles), {"measure", "program", "results", "alarm", "cond"})
         self.assertFalse(dlg.home.isHidden())
         self.assertTrue(dlg.b_next.isHidden())
         dlg._start_flow("measure")
@@ -512,6 +542,8 @@ class TestDialog(unittest.TestCase):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         self.pass_choose(dlg)
         self.assertEqual(self.sid(dlg), "machine_in")
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "cond_check")
         dlg._back()
         self.assertEqual(self.sid(dlg), "choose")
         dlg._back()
@@ -574,6 +606,7 @@ class TestDialog(unittest.TestCase):
         self.assertTrue(dlg._choice_btns[("params", "manual")].isChecked())
         self.assertFalse(dlg._choice_btns[("params", "auto")].isChecked())
         dlg._next()
+        self.skip_cond_check(dlg)
         self.assertEqual(self.sid(dlg), "machine_in")       # プログラムは自動で入れる（パラメータは手の分を、このあと打つ）
         dlg.close()
 
@@ -700,6 +733,92 @@ class TestDialog(unittest.TestCase):
         PauseDialog(dlg, True, [("continue", "つづける")]).close()
         PauseDialog(dlg, False, [("continue", "つづける"), ("save", "保存する")]).close()
         dlg.close()
+
+    def test_condition_flow_division_only(self):
+        dlg, host, poller = self.make(S(), flow="cond")
+        self.assertEqual(self.sid(dlg), "cond_kind")
+        self.assertFalse(dlg.b_next.isEnabled())
+        dlg._choice_btns[("cond_kind", "division")].click()
+        self.assertFalse(dlg.b_next.isEnabled())              # 回転か傾斜かも選ぶまで
+        dlg._choice_btns[("cond_tilt", False)].click()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertIn(("cond_mode", "division", False), host.calls)
+        self.assertEqual(self.sid(dlg), "cond_div")           # 分割だけ → 再現性の手順は出ない
+        self.assertIn("36 か所", dlg.lbl_cond.text())           # 360 ÷ 10
+        dlg._cond_spins["wheel"].setValue(15)
+        self.assertIn(("cond_set", "wheel", 15.0), host.calls)
+        self.assertIn("24 か所", dlg.lbl_cond.text())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_reg")
+        self.assertFalse(dlg.b_next.isEnabled())              # 登録するまで進めない
+        dlg._cond_register()
+        self.assertIn(("cond_reg", "division", False), host.calls)
+        self.assertEqual(self.sid(dlg), "cond_done")
+        self.assertIn("分割: 登録しました", dlg.lbl_lines.text())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "home")
+        dlg.close()
+
+    def test_condition_flow_both_shows_repeat_marks(self):
+        dlg, host, poller = self.make(S(), flow="cond")
+        dlg._choice_btns[("cond_kind", "one")].click()
+        dlg._choice_btns[("cond_tilt", True)].click()
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_div")
+        self.assertIn("wstart", dlg._cond_spins)               # 傾斜は どこから・どこまで
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_rep")
+        self.assertIn("4 か所 × 7 回", dlg.lbl_cond.text())
+        self.assertIn("90°", dlg.lbl_cond.text())
+        dlg.close()
+
+    def test_measure_flow_checks_conditions_and_returns(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
+        dlg._next()
+        dlg.ctx["params"], dlg.ctx["prog"] = "auto", "auto"
+        dlg._refresh()
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_check")           # 測る前に、測り方を確かめる
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._cond_from_check()                                  # その場で決めて登録する
+        self.assertEqual(self.sid(dlg), "cond_kind")
+        dlg._choice_btns[("cond_kind", "one")].click()
+        dlg._choice_btns[("cond_tilt", False)].click()
+        dlg._next()
+        dlg._next()
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_reg")
+        dlg._cond_register()
+        self.assertEqual(self.sid(dlg), "cond_done")
+        self.assertEqual(dlg.b_next.text(), "もどる ▶")
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_check")           # 測るの流れにもどる
+        self.assertEqual(dlg.flow, "measure")
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "machine_in")
+        dlg.close()
+
+    def test_condition_needs_model(self):
+        dlg, host, poller = self.make(S(), flow="cond")
+        host.e_model.setText("")
+        dlg._choice_btns[("cond_kind", "repeat")].click()
+        dlg._choice_btns[("cond_tilt", False)].click()
+        self.assertFalse(dlg.b_next.isEnabled())              # 型式が空
+        host.e_model.setText("RWE-200")
+        dlg._refresh()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "cond_rep")           # 再現性だけ → 分割の手順は出ない
+        dlg.close()
+
+    def test_condition_pictures_render(self):
+        from nd287_app import easy_art as A
+        from PySide6 import QtSvg, QtCore
+        for svg in (A.tile_cond(), A.choice_kind("division"), A.choice_kind("repeat"), A.choice_kind("one"),
+                    A.choice_tilt(True), A.choice_tilt(False), A.cond_dial(10), A.cond_dial(0.5),
+                    A.cond_dial(marks=[0, 90, 180, 270]), A.cond_drawer()):
+            self.assertTrue(QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8"))).isValid())
 
     def test_fits_small_screens(self):
         dlg, host, poller = self.make(S())

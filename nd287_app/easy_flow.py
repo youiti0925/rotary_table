@@ -25,6 +25,7 @@ FLOWS = {
     "program": dict(title="プログラムだけ機械に入れる", sub="測りません。入れるだけ", chapters=("つなぐ", "機械に入れる", "おわり")),
     "results": dict(title="結果を見る・印刷", sub="保存した結果", chapters=("えらぶ", "見る", "出す")),
     "alarm": dict(title="アラームを調べる", sub="意味とやること", chapters=("調べる",)),
+    "cond": dict(title="測り方を決める・登録する", sub="分割・再現性。登録すると次から自動で入ります", chapters=("決める", "入れる", "登録")),
 }
 
 # 機械の状態の読み（focas_helper.STATUS_TEXT と同じ。実機で見たのは MDI(0) だけ）
@@ -54,6 +55,8 @@ STEPS = [
          lines=["操作モードのつまみを回します。"], part="dial", zoom="dial", to="MDI", detect="aut_mdi"),
     dict(id="estop_press", ch=1, fl={"program": 0}, kind="machine", title="非常停止を押す",
          lines=["設定を書くあいだは、押したままにします。"], part="estop", zoom="estop_press", detect="estop_on"),
+    dict(id="cond_check", ch=1, kind="pc", title="測り方を確かめる",
+         lines=["型式を入れると、登録してある測り方が自動で入ります。"], art="cond_kind", button="このまま進む ▶"),
     dict(id="machine_in", ch=2, fl={"program": 1}, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
          lines=["受注伝票番号を入れると、PC が機械を読んで自動で決めます。", "機械に書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
@@ -100,6 +103,15 @@ STEPS = [
          lines=["どちらも、検査記録と同じ内容です。"], art="printer", button="ホームへ"),
     dict(id="alarm_look", ch=None, fl={"alarm": 0}, kind="alarm", title="アラームを調べる",
          lines=[], art="alarm", button="ホームへ"),
+    # 測り方（測定条件）を決めて登録する。値は通常の画面の欄とつなぐだけ。登録は条件編集と同じ中身（gui.condition_record）
+    dict(id="cond_kind", ch=None, fl={"cond": 0}, kind="cond", title="何を測りますか？",
+         lines=["測るものと、回転か傾斜かを選びます。"], art="cond_kind"),
+    dict(id="cond_div", ch=None, fl={"cond": 1}, kind="cond", title="分割の条件", lines=[], art="cond_div"),
+    dict(id="cond_rep", ch=None, fl={"cond": 1}, kind="cond", title="再現性の条件", lines=[], art="cond_rep"),
+    dict(id="cond_reg", ch=None, fl={"cond": 2}, kind="cond", title="この型式で登録する",
+         lines=["登録すると、次からこの型式を入れただけで、この値が自動で入ります。"], art="cond_reg"),
+    dict(id="cond_done", ch=None, fl={"cond": 2}, kind="info", title="できました",
+         lines=["次から、この型式を入れると自動で入ります。"], art="auto_done", button="ホームへ"),
 ]
 for _s in STEPS:                      # 各手順が、どの流れの何章目か（測るの章は ch のまま）
     _s.setdefault("fl", {})
@@ -176,8 +188,14 @@ def needed(step_id, st, ctx):
     ctx = ctx or {}
     s = step(step_id)
     d = s.get("detect")
-    if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look", "choose"):
+    if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look", "choose",
+                   "cond_kind", "cond_reg", "cond_done"):
         return True
+    ck = ctx.get("cond_kind") or ""
+    if step_id == "cond_div":                        # 分割だけ・両方のとき
+        return ck in ("division", "one")
+    if step_id == "cond_rep":                        # 再現性だけ・両方のとき
+        return ck in ("repeat", "one")
     params, prog = ctx.get("params") or "auto", ctx.get("prog") or "auto"
     if step_id == "params_manual":                   # パラメータは手で打つ（アプリは番号と値の一覧を見せるだけ）
         return params == "manual"
@@ -222,6 +240,14 @@ def done_now(step_id, st, ctx, track=None):
         return bool(d) and is_done(d, st, track)
     if step_id == "choose":
         return bool(ctx.get("params")) and bool(ctx.get("prog"))
+    if step_id == "cond_check":
+        return not ctx.get("cond_missing")
+    if step_id == "cond_kind":
+        return bool(ctx.get("cond_kind")) and ctx.get("cond_tilt") is not None and not ctx.get("cond_missing")
+    if step_id in ("cond_div", "cond_rep"):
+        return not ctx.get("cond_missing")
+    if step_id == "cond_reg":
+        return bool(ctx.get("cond_registered"))
     if step_id == "machine_in":
         return bool(ctx.get("handoff") or ctx.get("skip_machine"))
     if step_id == "fields":

@@ -57,6 +57,24 @@ class TestEasyFixes(unittest.TestCase):
         d._p_register("cond")
         self.assertEqual(called, [("cond", "")])
 
+    def test_now_band_does_not_keep_growing(self):
+        """かんたん作成の色の帯の高さが、呼ぶたびに +20 ずつ伸び続けた（会社PC 150% の確認）。何度呼んでも同じ高さ。"""
+        import copy
+        from nd287_app import gui as G
+        from nd287_app.settings import DEFAULTS
+        d = G.ParamWizardDialog(None, copy.deepcopy(DEFAULTS), model="RWE-200")
+        d.resize(900, 600)
+        d.show()
+        self.app.processEvents()
+        d._set_now("機械の今の中身を、PC に控えています（読むだけ）。待ってください。" * 2, "wait")
+        heights = []
+        for _ in range(6):
+            self.app.processEvents()
+            d._set_now("機械の今の中身を、PC に控えています（読むだけ）。待ってください。" * 2, "wait")
+            heights.append(d.lbl_now.minimumHeight())
+        self.assertEqual(len(set(heights)), 1, heights)
+        self.assertLess(heights[0], 120)
+
 
 if __name__ == "__main__":
     unittest.main()

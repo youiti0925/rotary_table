@@ -8694,7 +8694,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
                                        + self.NOW_STYLE[kind])
         wd = self.lbl_now.width()
         if wd > 50:                               # 折り返した文が切れない高さにする（幅が変わっても追いかける）
-            h = self.lbl_now.heightForWidth(wd) + 20      # 枠と余白のぶん
+            # 文字そのものの高さから決める。heightForWidth は今の最低の高さを含んで返すので、使うと 0.5 秒ごとに +20 ずつ伸び続けた
+            # （会社PC 150% の確認: 30 秒で帯が画面を埋めた）
+            fm = self.lbl_now.fontMetrics()
+            f = self.lbl_now.font()
+            f.setBold(True)
+            fm = QtGui.QFontMetrics(f)
+            h = fm.boundingRect(0, 0, max(10, wd - 16), 10000, QtCore.Qt.TextWordWrap, self.lbl_now.text()).height() + 20     # 余白 8px×2 と枠
             if h > 20 and h != self.lbl_now.minimumHeight():
                 self.lbl_now.setMinimumHeight(h)
 

@@ -13930,6 +13930,13 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addWidget(self.lbl_save_name, 0)
         self.suffix_panel = self.make_suffix_panel(left_col)
         lv.addWidget(self.suffix_panel, 0)
+        try:        # 低い画面（1366x768 など）では表を畳んでおく（グラフを押し下げて窓が画面からはみ出すため）。見出しを押すと開く
+            _scr = QtWidgets.QApplication.primaryScreen()
+            if _scr is not None and _scr.availableGeometry().height() < 900:
+                self.suffix_panel.setChecked(False)
+                self.suffix_panel.setTitle("機番の末尾（ここを押すと表が開きます）")
+        except Exception:
+            pass
         self.e_machine.textChanged.connect(lambda *_: self.refresh_save_name())
         self.apply_auto_suffix()
         lv.addWidget(self.bar_scroll, 0)

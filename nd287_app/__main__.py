@@ -9,6 +9,7 @@
     python -m nd287_app --dummy            # 実機なしで画面確認
     python -m nd287_app --port COM3 --baud 19200 --parity N
     nd287_bunkatsu.exe --install [--quiet]  # このPCに入れる（配布セットの インストール.bat から）
+    nd287_bunkatsu.exe --cli-write plan|write|check|status ...   # 機械へ書く（画面なし。cli_write.py）
 """
 
 import argparse
@@ -23,6 +24,11 @@ def main():
     if "--install" in sys.argv[1:]:
         from .install import main as install_main
         sys.exit(install_main(sys.argv[1:]))
+    # 機械へ書く、画面なしの固定の入口（cli_write.py。進み具合を1行ずつ出す）
+    if "--cli-write" in sys.argv[1:]:
+        from .cli_write import main as cli_main
+        rest = [a for a in sys.argv[1:] if a != "--cli-write"]
+        sys.exit(cli_main(rest))
     ap = argparse.ArgumentParser(description="ND287 分割測定アプリ")
     ap.add_argument(
         "--port",

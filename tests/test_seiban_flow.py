@@ -292,6 +292,15 @@ class TestCapableControllers(unittest.TestCase):
         self.assertNotIn("27", units)
         self.assertNotIn("28", units)
 
+    def test_convert_400v_product_on_200v_machine(self):
+        # 400V 20A の製品は 200V 号機では 40A の軸。外さずに読み替えて探す
+        got = S.capable_controllers(self.ctls, ["20A"], voltage="400V", convert=True)
+        units = {c.unit for c, _ in got}
+        self.assertTrue(units - {"27", "28"})          # 200V号機も候補に残る
+        for c, asg in got:
+            want = "20A" if S.controller_voltage(c) in ("400V", "") else "40A"
+            self.assertEqual(c.caps[asg[0]], want)
+
     def test_controller_voltage_norm(self):
         c27 = next(c for c in self.ctls if c.unit == "27")
         self.assertEqual(S.controller_voltage(c27), "400V")

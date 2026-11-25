@@ -495,22 +495,30 @@ def controller_voltage(controller) -> str:
     return ""
 
 
-def capable_controllers(controllers, needs: list, voltage: str = "") -> list:
+def capable_controllers(controllers, needs: list, voltage: str = "", convert: bool = False) -> list:
     """needs（作りたい軸ぶんの容量）を満たせる制御装置と軸割り当てを返す。
 
     voltage を指定すると、電圧の合う号機だけに絞る（400V製品は400V号機のみ等）。
     号機の電圧が不明（空欄）なら除外しない。戻り値 [(controller,[軸文字,...]),...]。
     needs が空なら（電圧フィルタは効かせつつ）全件。
+    convert=True のときは、電圧が違う号機も外さず、容量を読み替えて探す
+    （400V 40A の製品は 200V 号機では 80A の軸。`equivalent_cap`）。読み替えられない号機だけ外す。
     """
     pool = controllers
-    if voltage:
+    if voltage and not convert:
         pool = [c for c in controllers
                 if controller_voltage(c) in ("", voltage)]
     if not needs:
         return [(c, []) for c in pool]
     out = []
     for c in pool:
-        asg = assign_axes(c, needs)
+        cv = controller_voltage(c)
+        use = needs
+        if convert and voltage and cv and cv != voltage:
+            use = [equivalent_cap(n, voltage, cv) if n else "" for n in needs]
+            if any(n == "" and o for n, o in zip(use, needs)):
+                continue
+        asg = assign_axes(c, use)
         if asg is not None:
             out.append((c, asg))
     return out

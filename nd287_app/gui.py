@@ -7609,7 +7609,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             else:
                 self._cand = seiban_flow.capable_controllers(self._controllers, [""] * len(sel), "")
         else:
-            self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage)
+            self._cand = seiban_flow.capable_controllers(self._controllers, needs, voltage, convert=True)
         if temp and self._decided_axis:
             # 機械から決めた軸（2165 など）が書く先。仮モーターの容量で軸を選び直さない
             un = str((self._machine_probe or {}).get("unit") or "")

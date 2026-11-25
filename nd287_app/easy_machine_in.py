@@ -194,6 +194,48 @@ def read_machine(settings, client_factory, *, port_open=None, on_client=None):
                 pass
 
 
+def read_loop_state(settings, client_factory, *, port_open=None):
+    """機械の今の「位置を読む検出器」がフルかセミかを読む（読むだけ。書かない）。1815 の #1（1＝フル）を全軸で見る。
+    戻り値 {"ok","state":"フル"/"セミ"/""（読めない・軸で違う）,"error","values":{軸:値}}。"""
+    from . import fanuc_param
+    port_open = port_open or focas_find.port_open
+    try:
+        port = int(settings.get("focas_port", focas_find.DEFAULT_PORT))
+    except (TypeError, ValueError):
+        port = focas_find.DEFAULT_PORT
+    reg = focas_find.registry_path(settings)
+    try:
+        host = next((ip for ip in wizard_probe.candidate_hosts(settings, reg) if port_open(ip, port, timeout=0.3)), "")
+    except Exception as e:
+        return {"ok": False, "state": "", "error": str(e), "values": {}}
+    if not host:
+        return {"ok": False, "state": "", "error": "機械が見つかりません", "values": {}}
+    client = None
+    try:
+        client = client_factory(settings)
+        client.call("connect", {"host": host, "port": port, "timeout": focas_client.connect_timeout(settings),
+                                "families": dict(settings.get("focas_families") or {})})
+        ident = client.call("identify")
+        names = ident.get("axis_names") or []
+        n = max(1, min(len(names) or wizard_probe.MAX_AXES, wizard_probe.MAX_AXES))
+        res = client.call("param_read_many", {"items": [{"no": 1815, "label": f"A{k}"} for k in range(1, n + 1)]})
+        vals, modes = {}, set()
+        for it in res.get("items", []):
+            if it.get("ok"):
+                vals[it.get("label")] = wizard_probe._clean(it.get("value"))
+                modes.add(fanuc_param.closed_loop_mode(it.get("value"), 1, 1))
+        state = next(iter(modes)) if len(modes) == 1 else ""
+        return {"ok": True, "state": state, "error": "" if state else "1815 を読めないか、軸で違います", "values": vals}
+    except Exception as e:
+        return {"ok": False, "state": "", "error": f"機械を読めませんでした（{getattr(e, 'message', None) or e}）", "values": {}}
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def identify(probe, controllers_list):
     """号機を決める（machine_decide.identify_unit。IP は使わない）。系列（31i と 35i など）の違う号機は外す。
     戻り値 {"unit","units","how","unknown"}。"""

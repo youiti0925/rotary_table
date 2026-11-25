@@ -13321,7 +13321,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._suffix_panels = []
         self.suffix_semi = False                  # かんたん作成で「セミクロにする」を選んだ
         self.suffix_motor = ""                    # モーターの種類: ""=自動（正規）／driver／temp／normal
-        self.measure_kind = ""        # 選んだ測定の種類（kind_conditions の種類名。""=選ばない）
+        self.kind_by_axis = {False: "", True: ""}    # 回転／傾斜ごとに選んだ測定の種類（2軸の製品は、別々に選べる）
+        self.measure_kind = ""        # 今の軸（回転/傾斜）の、選んだ測定の種類（kind_conditions の種類名。""=選ばない）
         self.measure_scale = ""
         self.kind_table = {"rotary": [], "tilt": [], "plan": [], "problems": []}
         info_grid.setColumnStretch(2, 1)  # 右に余白を作って左へ寄せる
@@ -14296,10 +14297,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 機番の末尾（社内の表 serial_suffix）。セミ・フルどちらの保存にも付く -----
 
-    def suffix_auto_args(self):
+    def suffix_auto_args(self, kind=None):
         """画面の状態から決まる記号。モーター=駆動装置（種類）／仮（かんたん作成で選んだ）／正規、
         クランプ=設定（クランプ分割）、測る種類=フルクロ→クローズ（C）だけ・セミクロ→なし。単品・完組は人が押したときだけ。"""
-        kind = self.active_kind()
+        kind = self.active_kind() if kind is None else kind
         semi = KR.is_semi(kind) or bool(getattr(self, "suffix_semi", False))      # かんたん作成でセミクロにした製品も
         if kind == "セミ・駆動装置":
             motor = "driver"
@@ -14433,10 +14434,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_name_labels = getattr(self, "_save_name_labels", []) + [label]
         self.refresh_save_name()
 
-    def active_kind(self):
-        """いま使う測定の種類。型式に種類の登録が無ければ ""（今までどおり）。"""
-        k = getattr(self, "measure_kind", "")
-        if k and k in KR.kinds_for(getattr(self, "kind_table", None), self.e_model.text().strip(), self.is_tilt()):
+    def _axis_tilt(self):
+        """いまのモードが傾斜か（画面ができる前は回転）。"""
+        try:
+            return bool(self.is_tilt())
+        except Exception:
+            return False
+
+    @property
+    def measure_kind(self):
+        return self.kind_by_axis.get(self._axis_tilt(), "")
+
+    @measure_kind.setter
+    def measure_kind(self, v):
+        self.kind_by_axis[self._axis_tilt()] = v or ""
+
+    def active_kind(self, tilt=None):
+        """いま使う測定の種類（tilt を渡すと、その軸のもの）。型式に種類の登録が無ければ ""（今までどおり）。"""
+        tilt = self._axis_tilt() if tilt is None else bool(tilt)
+        k = self.kind_by_axis.get(tilt, "")
+        if k and k in KR.kinds_for(getattr(self, "kind_table", None), self.e_model.text().strip(), tilt):
             return k
         return ""
 
@@ -14508,8 +14525,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.measure_kind = self.cmb_kind.currentData() or ""
         self.on_model_entered()
 
-    def set_measure_kind(self, kind):
-        """はじめてモードなどから、測定の種類を入れる。"""
+    def set_measure_kind(self, kind, tilt=None):
+        """はじめてモードなどから、測定の種類を入れる。tilt を渡すと、その軸（回転/傾斜）の種類として入れる
+        （2軸の製品で、回転と傾斜の種類が違うことがあるため。今の軸でなければ、入れるだけで画面の値は変えない）。"""
+        if tilt is not None and bool(tilt) != self._axis_tilt():
+            self.kind_by_axis[bool(tilt)] = kind or ""
+            return
         self.measure_kind = kind or ""
         self._kind_model = self.e_model.text().strip()      # この型式での選び（型式が替わった扱いにしない）
         self._kind_user_none = not kind
@@ -14577,21 +14598,104 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.active_kind():
             self.on_model_entered()
 
-    def easy_kind_state(self):
-        """はじめてモードの「測り方」の段へ渡す、測定の種類の状態。
-        {"model","kinds":[{"kind","label","hint","semi"}…],"kind":選んだ種類 or "","error":決まらない理由 or "","problems":表の問題の文}"""
+    def easy_kind_state(self, tilt=None):
+        """はじめてモードの「測り方」の段へ渡す、測定の種類の状態（tilt を渡すとその軸の分。無ければ今の軸）。
+        {"model","kind":選んだ種類 or "","error":決まらない理由 or "","problems":表の問題の文,"tilt":bool,
+         "kinds":[{"kind","label","hint","semi"}…]}"""
         model = self.e_model.text().strip()
-        tilt = self.is_tilt()
+        tilt = self._axis_tilt() if tilt is None else bool(tilt)
         kinds = KR.kinds_for(self.kind_table, model, tilt)
-        cur = self.active_kind()
+        cur = self.active_kind(tilt)
         err = ""
         if cur:
             _rec, _p, err = KR.resolve(self.kind_table, model, tilt, cur, self.measure_scale)
-        return dict(model=model, kind=cur, error=err, problems=KR.problems_text(self.kind_table),
+        return dict(model=model, kind=cur, error=err, problems=KR.problems_text(self.kind_table), tilt=tilt,
                     kinds=[dict(kind=k, label=KR.label(k), hint=KR.HINT.get(k, ""), semi=KR.is_semi(k)) for k in kinds])
 
-    def easy_set_kind(self, kind):
-        self.set_measure_kind(kind)
+    def easy_kind_axes(self):
+        """種類の登録がある軸ごとの状態 [{"axis":"rotary"/"tilt","label":"回転"/"傾斜","state":easy_kind_state}…]。
+        2軸の製品（回転にも傾斜にも登録がある）は2つ。回転・傾斜で別々に選べる。登録が無ければ空。"""
+        out = []
+        for tilt, axis, label in ((False, "rotary", "回転"), (True, "tilt", "傾斜")):
+            st = self.easy_kind_state(tilt)
+            if st["kinds"]:
+                out.append({"axis": axis, "label": label, "state": st})
+        return out
+
+    def easy_set_kind(self, kind, tilt=None):
+        self.set_measure_kind(kind, tilt)
+
+    # ----- 連続測定（フルクロ → セミクロ。renzoku.py）。はじめてモードが呼ぶ。機械には書かない -----
+
+    def easy_rz_plan(self):
+        """この型式の測る予定。無ければ None。{"stages":[…],"continuous":bool,"problems":[…],"suffix":{工程:末尾}}。
+        どの軸（回転・傾斜）にも、予定の種類の測り方が登録されているかと、フルとセミの保存名が同じにならないかも確かめる。"""
+        from . import renzoku as RZ
+        model = self.e_model.text().strip()
+        plan = RZ.make_plan(self.kind_table, model)
+        if plan is None:
+            return None
+        plan["suffix"] = {}
+        if not plan["stages"]:
+            return plan
+        axes = [t for t in (False, True) if KR.kinds_for(self.kind_table, model, t)]
+        if plan["continuous"] and not axes:
+            plan["problems"].append("この型式は、種類別（モーター・駆動装置・フルクロ）の測り方が登録されていません")
+        for t in axes:
+            for st in plan["stages"]:
+                label = "傾斜" if t else "回転"
+                if st["kind"] not in KR.kinds_for(self.kind_table, model, t):
+                    plan["problems"].append(f"{label}に「{KR.label(st['kind'])}」の測り方が登録されていません")
+                else:
+                    _r, _p, err = KR.resolve(self.kind_table, model, t, st["kind"], self.measure_scale)
+                    if err:
+                        plan["problems"].append(f"{label}: {err}")
+        for st in plan["stages"]:
+            try:
+                plan["suffix"][st["stage"]] = SS.suffix(**self.suffix_auto_args(st["kind"]))
+            except Exception as e:
+                plan["problems"].append(f"{st['label']}の保存名の末尾を作れません: {e}")
+        dup = RZ.save_name_conflict(list(plan["suffix"].values()))
+        if dup:
+            plan["problems"].append("フルとセミで、機番の末尾が同じになります（" + "・".join(f"「{d or 'なし'}」" for d in dup)
+                                    + "）。フルの結果を上書きしてしまうので、このままでは測れません")
+        plan["problems"] = list(dict.fromkeys(plan["problems"]))
+        plan["continuous"] = bool(plan["continuous"] and not plan["problems"])
+        plan["blocked"] = bool(plan["problems"])
+        return plan
+
+    def easy_rz_apply(self, stage):
+        """連続測定の1工程を、測定の画面に入れる。種類は、登録のある軸（回転・傾斜）の両方に入れる。何を測るか（分割・再現性）も入れる。"""
+        model = self.e_model.text().strip()
+        axes = [t for t in (False, True) if KR.kinds_for(self.kind_table, model, t)]
+        for t in axes:
+            self.set_measure_kind(stage["kind"], t)
+        tilt = self._axis_tilt() if (not axes or self._axis_tilt() in axes) else axes[0]
+        self.easy_cond_mode(stage["ck"], tilt)
+
+    def easy_machine_loop(self):
+        """機械の今の検出器（フル／セミ）を読む。読むだけ。{"ok","stage":"full"/"semi"/None,"error"}。"""
+        from . import easy_machine_in as M, focas_client, renzoku as RZ
+        from .settings import app_dir
+        factory = getattr(self, "_rz_client_factory", None) or (
+            lambda st: focas_client.make_client(st, log_path=str(app_dir() / "focas_helper.log")))
+        r = M.read_loop_state(self.settings, factory, port_open=getattr(self, "_rz_port_open", None))
+        return {"ok": bool(r.get("ok")), "stage": RZ.stage_of_loop(r.get("state")), "error": r.get("error", "")}
+
+    def easy_rz_discard(self):
+        """次の工程のために、測った値を空にする（機番・型式はそのまま。保存したファイルは消さない）。"""
+        self.discard_measurement()
+        self._flow_saved_path = ""
+        self.suffix_sel.ng = 0
+        self._suffix_sync_panels()
+
+    def easy_new_unit(self):
+        """載せ替えて、次の1台。測った値と機番を空にする（型式・測り方は、そのまま）。"""
+        self.discard_measurement()
+        self._flow_saved_path = ""
+        self.e_machine.setText("")
+        self.suffix_sel.ng = 0
+        self._suffix_sync_panels()
 
     def easy_open_kind_conditions(self, model=""):
         """はじめてモードの「測り方」の段から、同じ登録画面を開く。"""
@@ -14840,6 +14944,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return "+再現" in self.current_mode()
 
     def on_mode_changed(self, mode):
+        if hasattr(self, "cmb_kind"):
+            self.refresh_kind_choices()             # 回転と傾斜で選んだ種類が違うことがある: 軸が変わったら、その軸の種類を出す
         if hasattr(self, "suffix_sel"):
             self.apply_auto_suffix()                # 回転／傾斜が変わると、末尾の自動の記号も変わる
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
@@ -15864,8 +15970,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.e_model.setText(m)
                 self.on_model_entered()
         return {"settings": self.settings, "set_model": set_model, "save_settings": self.easy_save_settings,
+                "client_factory": getattr(self, "_rz_client_factory", None), "port_open": getattr(self, "_rz_port_open", None),
                 "model_fn": lambda: self.e_model.text().strip(),
-                "kind_fn": lambda: (self.active_kind(), self.measure_scale),
+                "kind_fn": lambda tilt=None: (self.active_kind(tilt), self.measure_scale),
                 "kind_table_fn": lambda: self.kind_table}
 
     def easy_apply_handoff(self, h):
@@ -16975,6 +17082,46 @@ class MainWindow(QtWidgets.QMainWindow):
         meta[META_KEYS["comment"]] = self.e_comment.text().strip()
         return meta
 
+    def _suffix_with_ng(self, n):
+        sel = self.suffix_sel
+        return SS.suffix(sel.motor, sel.clamp, sel.kinds, sel.multi_axis, n)
+
+    def save_existing_files(self, csv_path, file_no):
+        """このセーブで書くファイルのうち、もう有るもの（上書きになるもの）。CSV・再現性CSV・検査表(.BS/.KS/.RS/.RSK)。"""
+        out = []
+        csv_path = Path(csv_path)
+        names = [csv_path]
+        if self.view_kind == "combined" and self.has_repeat_data():
+            names.append(csv_path.with_name(f"{csv_path.stem}_再現{csv_path.suffix}"))
+        bs_root = str(self.settings.get("bs_save_root") or "").strip()
+        if bs_root:
+            stem = sanitize_filename(file_no)
+            if self.view_kind in ("indexing", "combined"):
+                names.append(Path(bs_root) / (stem + (".KS" if self.is_tilt() else ".BS")))
+            if self.view_kind == "repeat" or (self.view_kind == "combined" and self.has_repeat_data()):
+                names.append(Path(bs_root) / (stem + (".RSK" if self.is_tilt() else ".RS")))
+        for p_ in names:
+            if p_.exists() and p_ not in out:
+                out.append(p_)
+        return out
+
+    def _ask_overwrite(self, existing, x_name):
+        """同じ名前が有るとき聞く。戻り値 "overwrite"（上書き）／"x"（-X +1 の名前で保存）／"cancel"（名前を変える）。
+        既定は cancel（上書きしない）。試験ではこの関数を差し替える。"""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("セーブ")
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setText("・".join(existing) + " が既にあります。上書きしますか？（いいえ＝名前を変える）")
+        box.setInformativeText(f"精度NGの測り直しなら、「{x_name}」で保存できます。")
+        b_x = box.addButton(f"精度NG: {x_name} で保存", QtWidgets.QMessageBox.AcceptRole)
+        b_ow = box.addButton("上書きする", QtWidgets.QMessageBox.DestructiveRole)
+        b_no = box.addButton("いいえ（名前を変える）", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(b_no)
+        box.setEscapeButton(b_no)
+        box.exec()
+        c = box.clickedButton()
+        return "x" if c is b_x else ("overwrite" if c is b_ow else "cancel")
+
     def save(self):
         if not self.has_view_data():
             return
@@ -17004,34 +17151,29 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "セーブ", f"機番の末尾が作れません: {e}")
             return
         path = build_save_path(root, self.e_model.text(), file_no)
-        if path.exists() and self.suffix_sel.ng == 0:
-            # 同じ名前がある: 精度NGの測り直しとして、-X の数字を +1 して提案する（表の数字で直せる）
-            n = 1
-            while build_save_path(root, self.e_model.text(), machine_no + self.suffix_sel.suffix() + f"-X{n}").exists() and n < 99:
+        # 同じ名前のファイル（CSV・再現性CSV・検査表 .BS/.KS/.RS/.RSK）が1つでもあれば、必ず聞く（黙って上書きしない）。
+        # 既定は「上書きしない」。精度NGの測り直しなら、-X の数字を +1 した名前も同じ画面で選べる。
+        for _guard in range(120):
+            existing = self.save_existing_files(path, file_no)
+            if not existing:
+                break
+            n = self.suffix_sel.ng + 1
+            while n < 99 and self.save_existing_files(
+                    build_save_path(root, self.e_model.text(), machine_no + self._suffix_with_ng(n)),
+                    machine_no + self._suffix_with_ng(n)):
                 n += 1
-            self.suffix_sel.ng = n
-            self._suffix_sync_panels()
-            file_no = self.save_file_no()
-            new_path = build_save_path(root, self.e_model.text(), file_no)
-            answer = QtWidgets.QMessageBox.question(
-                self, "セーブ",
-                f"{path.name} が既にあります。精度NGの測り直しとして「{new_path.name}」で保存しますか？\n"
-                "（-X の数字は、画面の表の「精度NG」で直せます。0 にすると上書きの確認になります）",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.Yes)
-            if answer != QtWidgets.QMessageBox.Yes:
-                self.statusBar().showMessage(f"セーブを中止しました（精度NGの数字を -X{n} にしてあります。直して、もう一度セーブしてください）")
+            x_name = machine_no + self._suffix_with_ng(n)
+            choice = self._ask_overwrite([p_.name for p_ in existing], x_name)
+            if choice == "x":
+                self.suffix_sel.ng = n
+                self._suffix_sync_panels()
+                file_no = self.save_file_no()
+                path = build_save_path(root, self.e_model.text(), file_no)
+                continue
+            if choice != "overwrite":
+                self.statusBar().showMessage("セーブを中止しました（上書きせず。機番か末尾を変えて、もう一度セーブしてください）")
                 return
-            path = new_path
-        if path.exists():
-            answer = QtWidgets.QMessageBox.question(
-                self, "セーブ",
-                f"元データ {path.name} が既にあります。上書き保存しますか？",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
-            )
-            if answer != QtWidgets.QMessageBox.Yes:
-                self.statusBar().showMessage("セーブを中止しました（上書きせず）")
-                return
+            break
         meta = self.build_meta()
         if kind:
             meta["測定の種類"] = KR.label(kind)

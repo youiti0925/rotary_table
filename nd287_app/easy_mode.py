@@ -14,6 +14,8 @@ from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
 from . import easy_art, easy_flow, easy_photo, easy_words, flow_guide
 from . import kind_runtime as KR
+from . import renzoku as RZ
+from .easy_renzoku import RenzokuMixin, RZ_CTX_RESET
 from .easy_flow import STEPS, INDEX, CHAPTERS
 
 # 機械の「状態の数値」→ 絵のつまみの位置（easy_art.MODES の番号）
@@ -186,19 +188,20 @@ class TileButton(QtWidgets.QAbstractButton):
 class ChoiceButton(QtWidgets.QAbstractButton):
     """分かれ道の小さなボタン（絵と短い言葉。選ぶと緑の枠とチェックが付く）。"""
 
-    def __init__(self, title, svg, parent=None):
+    def __init__(self, title, svg, parent=None, compact=False):
         super().__init__(parent)
         self._title = title
+        self._compact = compact                      # 2軸の製品など、選びが縦に並ぶとき: 低くする
         self._r = QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8")), self)
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setMinimumSize(150, 96)
+        self.setMinimumSize(150, 66 if compact else 96)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setAccessibleName(title)
 
     def sizeHint(self):
-        return QtCore.QSize(190, 100)
+        return QtCore.QSize(190, 68 if self._compact else 100)
 
     def paintEvent(self, _e):
         p = QtGui.QPainter(self)
@@ -370,7 +373,7 @@ class ChapterBar(QtWidgets.QWidget):
                        f"{k + 1} {name}")
 
 
-class EasyModeDialog(QtWidgets.QDialog):
+class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
     """はじめてモード。host（測定の画面）の easy_* を呼ぶだけ。poller は機械の様子を読む（読むだけ）。"""
 
     def __init__(self, host, poller, parent=None):
@@ -385,6 +388,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.history = []
         self.ctx = {"powered_on": False, "cycled": False, "cycled_in_wizard": False, "handoff": False,
                     "skip_machine": False, "counter_reset": True, "offline_go": False}
+        self._rz_init()
         self.track = {"offline": False}
         self.manual = False              # 人が「やりました」を押した（機械から読めない手順）
         self._entered_at = 0.0
@@ -445,6 +449,13 @@ class EasyModeDialog(QtWidgets.QDialog):
         right = QtWidgets.QVBoxLayout(self.card)
         right.setContentsMargins(26, 22, 26, 22)
         right.setSpacing(10)
+        self.lbl_rz = QtWidgets.QLabel("")                # 連続測定のあいだだけ出す帯（いま何番目の工程か）
+        self.lbl_rz.setObjectName("rz_band")
+        self.lbl_rz.setWordWrap(True)
+        self.lbl_rz.setStyleSheet("background:#FFF3CF; color:#5A4300; border:2px solid #F0A400; border-radius:10px;"
+                                  " padding:6px 12px; font-size:14px; font-weight:700;")
+        self.lbl_rz.setVisible(False)
+        right.addWidget(self.lbl_rz)
         self.lbl_who = QtWidgets.QLabel("")
         self.lbl_who.setObjectName("who")
         self.lbl_who.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
@@ -500,6 +511,12 @@ class EasyModeDialog(QtWidgets.QDialog):
             sv.addWidget(wd)
         sl.addLayout(sv, 1)
         el.addWidget(self.strip)
+        self.lbl_rz_in = QtWidgets.QLabel("")              # 連続測定の帯（「機械に入れる」の中でも、いま何番目かが見えるように）
+        self.lbl_rz_in.setObjectName("rz_band_in")
+        self.lbl_rz_in.setWordWrap(True)
+        self.lbl_rz_in.setStyleSheet(self.lbl_rz.styleSheet())
+        self.lbl_rz_in.setVisible(False)
+        el.insertWidget(0, self.lbl_rz_in)
         self.embed.setVisible(False)
         mid.addWidget(self.embed, 1)
         self.home = QtWidgets.QWidget()               # 入り口: 絵のタイルから選ぶ
@@ -596,11 +613,11 @@ class EasyModeDialog(QtWidgets.QDialog):
         except Exception:
             c["cond_missing"] = False
         try:                                                    # 型式に種類の登録があるのに、まだ選んでいない・決まらない
-            ks = self.host.easy_kind_state()
-            c["kind_missing"] = bool(ks.get("kinds")) and (not ks.get("kind") or bool(ks.get("error")))
+            axes = self._kind_axes()
+            c["kind_missing"] = any((not a["state"].get("kind")) or bool(a["state"].get("error")) for a in axes)
         except Exception:
             c["kind_missing"] = False
-        return c
+        return self._rz_ctx(c)
 
     def _first(self):
         self.st = self.poller.state() if self.poller else easy_flow.OFFLINE
@@ -617,6 +634,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.track = {"offline": not self.st["online"]} if s["id"] == "cycle_power" else {"offline": False}
         if s["id"] == "power":
             self.ctx["powered_on"] = True
+        if s["id"] == "rz_plan":
+            self._rz_enter_plan()
         if s["id"] == "start1" or (s["id"] == "start2" and False):
             self._start_capture()
         self._shown_key = None
@@ -645,6 +664,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.history = [INDEX["home"]]
         self.ctx["offline_go"] = False
         if flow == "measure":
+            self.rz, self.rz_last_machine = None, None
+            self.ctx.update(RZ_CTX_RESET)
             self.ctx.update(handoff=False, skip_machine=False, offline_go=False, params="auto", prog="auto")   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
         if flow == "cond":
             self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
@@ -669,6 +690,12 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _next(self):
         s = STEPS[self.i]
         c = self._all_ctx()
+        if s["id"] == "rz_plan":
+            self._rz_confirm()
+            return
+        if s["id"] == "finish" and self.rz is not None and not self.rz.is_last and not self.ctx.get("rz_return_mode"):
+            self._rz_advance()
+            return
         if s["id"] == "finish":
             nm = c.get("next_mode")
             if nm:
@@ -897,6 +924,15 @@ class EasyModeDialog(QtWidgets.QDialog):
                 lines = [f"保存先: {folder} フォルダ（{os.path.basename(path)}）"]
             if c.get("next_mode"):
                 lines.append(f"つぎは「{c['next_mode']}」。")
+        if sid == "rz_plan":
+            plan = self._rz_plan() or {}
+            lines = []                                    # 予定の一行は、下の札の中に出す（二重にしない）
+            title = "つづけて測ります"
+        if sid == "finish" and self.rz is not None:
+            title, lines2, _b = self._rz_finish_lines()
+            if lines2:
+                lines = (lines[:1] if c.get("saved_path") else []) + lines2
+        self._rz_band(sid)
         self.lbl_title.setText(title)
         self.lbl_lines.setText("\n".join(lines))
         self.lbl_lines.setVisible(bool(lines))
@@ -906,6 +942,10 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._ng_rows(c.get("view_ng_items") or [])
         if sid == "machine_in":
             self._open_wizard_inside()
+        elif sid == "rz_plan":
+            self._build_rz_plan()
+        elif sid == "rz_return":
+            self._build_rz_return()
         elif sid == "choose":
             self._build_choose()
         elif sid == "cond_check":
@@ -934,6 +974,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             self._act_button("PDFにする", self._pdf)
             if c.get("saved_path"):
                 self._act_button("保存した場所を開く", self._open_folder)
+            if self.rz is not None and self.rz.is_last and not self.ctx.get("rz_return_mode"):
+                self._act_button("つぎの1台へ（載せ替え）", self._rz_next_unit)
         elif sid == "fields":
             self._build_fields()
         elif sid == "open_past":
@@ -1037,7 +1079,7 @@ class EasyModeDialog(QtWidgets.QDialog):
             st = self.host.easy_cond_state()
         except Exception:
             st = {}
-        if st.get("model"):
+        if st.get("model") and not self._kind_axes():
             have = [n for n, k in (("分割", st.get("div")), ("再現性", st.get("rep"))) if k in ("登録", "会社の一覧")]
             lb = QtWidgets.QLabel(("登録から自動で入りました: " + "・".join(have)) if have else
                                   "この型式は、まだ測り方が登録されていません。下のボタンで決めて登録できます。")
@@ -1110,24 +1152,46 @@ class EasyModeDialog(QtWidgets.QDialog):
             band.setStyleSheet("background:#FBE9E7; color:#B02A20; border:2px solid #D43A2F; border-radius:10px;"
                                " padding:8px 12px; font-size:14px; font-weight:700;")
             lay.addWidget(band)
-        kinds = st.get("kinds") or []
-        if not kinds:
+        axes = self._kind_axes()
+        if not axes:
             return
-        head = QtWidgets.QLabel("何を測りますか？（この型式は、測り方が3通りまで登録されています）")
+        self._kind_btns, self._kind_btns_axis = {}, {}
+        two = len(axes) > 1
+        for ax in axes:
+            self._fill_kind_axis(lay, ax["state"], ax["label"] if two else "", ax["axis"], first=(ax is axes[0]))
+
+    def _kind_axes(self):
+        """種類の登録がある軸ごとの状態。ホストが軸ごとに答えられないとき（古い形）は、今の軸だけ。"""
+        try:
+            return list(self.host.easy_kind_axes())
+        except AttributeError:
+            st = self._kind_state()
+            return [{"axis": "rotary", "label": "", "state": st}] if st.get("kinds") else []
+        except Exception:
+            return []
+
+    def _fill_kind_axis(self, lay, st, axis_label, axis, first=True):
+        kinds = st.get("kinds") or []
+        head = QtWidgets.QLabel((f"【{axis_label}】" if axis_label else "") + "何を測りますか？"
+                                + ("" if axis_label else "（この型式は、測り方が3通りまで登録されています）"))
+        head.setObjectName("kind_head_" + axis)
         head.setWordWrap(True)
         head.setStyleSheet("color:#17212B; font-size:15px; font-weight:700;")
         lay.addWidget(head)
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(10)
-        self._kind_btns = {}
+        btns = {}
         for k in kinds:
-            b = ChoiceButton(k["label"], easy_art.choice_measure_kind(k["kind"]))
+            b = ChoiceButton(k["label"], easy_art.choice_measure_kind(k["kind"]), compact=bool(axis_label))
             b.setChecked(st.get("kind") == k["kind"])
             b.setToolTip(k.get("hint", ""))
-            b.clicked.connect(lambda _c=False, kk=k["kind"]: self._choose_kind(kk))
+            b.clicked.connect(lambda _c=False, kk=k["kind"], tt=bool(st.get("tilt")): self._choose_kind(kk, tt))
             row.addWidget(b)
-            self._kind_btns[k["kind"]] = b
+            btns[k["kind"]] = b
         lay.addLayout(row)
+        self._kind_btns_axis[axis] = btns
+        if first:
+            self._kind_btns = btns
         cur = next((k for k in kinds if k["kind"] == st.get("kind")), None)
         if cur is None:
             msg, col = "どれで測るか、選んでください。選ぶと「次へ」が押せます。", "#8A6A00"
@@ -1135,16 +1199,19 @@ class EasyModeDialog(QtWidgets.QDialog):
             msg, col = st["error"] + "\nこのままでは測定プログラムを作りません。登録を直してください。", "#B02A20"
         else:
             msg, col = cur.get("hint", ""), "#16864C"
-            if cur.get("semi"):
+            if cur.get("semi") and not axis_label:
                 msg += "\nセミクロの結果も、フルクロと同じく検査表とWebに出します。保存のとき、機番の末尾（社内の表）でフルと名前を分けます。"
         lb = QtWidgets.QLabel(msg)
         lb.setWordWrap(True)
         lb.setStyleSheet(f"font-size:14px; font-weight:700; color:{col};")
         lay.addWidget(lb)
 
-    def _choose_kind(self, kind):
+    def _choose_kind(self, kind, tilt=None):
         try:
-            self.host.easy_set_kind(kind)
+            if tilt is None:
+                self.host.easy_set_kind(kind)
+            else:
+                self.host.easy_set_kind(kind, tilt)
         except Exception as e:
             self._notice = f"種類を入れられませんでした: {e}"
         self._fill_kind_box()
@@ -1874,6 +1941,10 @@ class EasyModeDialog(QtWidgets.QDialog):
             label, enabled = "測り終わるまで待ちます", False
         elif sid == "finish":
             label, go, enabled = ("次の測定へ ▶" if c.get("next_mode") else "ホームへ"), True, True
+            if self.rz is not None and not self.ctx.get("rz_return_mode"):
+                b = self._rz_finish_lines()[2]
+                if b:
+                    label = b
         elif sid == "cond_done" and self.ctx.get("cond_return") is not None:
             label, go, enabled = "もどる ▶", True, True
         elif sid == "alarm_look" and getattr(self, "_alarm_return", None):
@@ -2020,12 +2091,17 @@ class EasyModeDialog(QtWidgets.QDialog):
             return
         self.v_map.setVisible(False)
         art = s.get("art")
+        if sid == "finish" and self.rz is not None:                  # 連続測定: 済んだ工程の印つきの絵
+            self.v_main.set_svg(A.renzoku(self._rz_art_items(), self.rz.pos + 1, back=False))
+            return
         if sid == "counter0":
             svg = A.counter(self.manual, ph)
         elif art == "scene":
             svg = A.scene()
         elif art == "choose":
             svg = A.flowchart(c.get("params"), c.get("prog"))
+        elif art == "renzoku":
+            svg = A.renzoku(self._rz_art_items(), 0 if sid == "rz_plan" else 2, back=(sid == "rz_return"))
         elif art == "cond_kind":
             svg = A.tile_cond()
         elif art == "cond_div":
@@ -2112,6 +2188,7 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _skip_machine(self):
         if self._wiz is not None and not self._close_wizard():
             return
+        self._rz_skip_machine()
         self.ctx["skip_machine"] = True
         self._render()
 
@@ -2127,6 +2204,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             env = None
         if env:                                            # 専用の画面（伝票番号→号機→つなぐ→決まったこと→書く。すでにつながっていれば先につなぐ）
             from .easy_machine_in_ui import MachineInPanel
+            if self.rz is not None:                        # 連続測定: 今の工程に合わせて、初めの選びを決めておく（人が直せる）
+                env = dict(env, semi_pref=bool(self.ctx.get("rz_semi")), choice_pref=self.ctx.get("rz_choice"))
             panel = MachineInPanel(env, self.embed)
             self.strip.setVisible(False)
             self.embed.layout().addWidget(panel, 1)
@@ -2163,6 +2242,7 @@ class EasyModeDialog(QtWidgets.QDialog):
             return
         res = (w.result() if type(w).__name__ == "MachineInPanel" else self.host.easy_wizard_result(w)) or {}
         self._drop_wizard()
+        self._rz_after_wizard(res)
         if res.get("unit"):
             self.ctx["unit"] = res["unit"]
         if res.get("program_manual"):                      # 測定プログラムを送らなかったときは、機械で用意する

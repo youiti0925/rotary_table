@@ -58,6 +58,8 @@ STEPS = [
          lines=["設定を書くあいだは、押したままにします。"], part="estop", zoom="estop_press", detect="estop_on"),
     dict(id="cond_check", ch=1, kind="pc", title="測り方を確かめる",
          lines=["型式を入れると、登録してある測り方が自動で入ります。"], art="cond_kind", button="このまま進む ▶"),
+    dict(id="rz_plan", ch=1, kind="pc", title="つづけて測ります",
+         lines=["この型式は、フルクロとセミクロを続けて測る予定です。"], art="renzoku", button="次へ ▶"),
     dict(id="machine_in", ch=2, fl={"program": 1}, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
          lines=["受注伝票番号を入れると、PC が、その製品を動かせる号機の一覧を出します。", "選んだ号機の機械につないで、軸は自動で決めます。書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
@@ -94,6 +96,8 @@ STEPS = [
          lines=["終わるまで、機械にさわらないでください。"], art="measure"),
     dict(id="result", ch=5, kind="pc", title="測り終わりました",
          lines=[], art="verdict", button="保存する"),
+    dict(id="rz_return", ch=5, kind="pc", title="フルクロにもどしますか？",
+         lines=["セミクロで測り終わりました。", "もどす・もどさないは、どちらでも選べます。"], art="renzoku"),
     dict(id="finish", ch=5, kind="info", title="おつかれさまでした",
          lines=["保存しました。"], art="verdict_saved", button="ホームへ"),
     dict(id="open_past", ch=None, fl={"results": 0}, kind="pc", title="保存した結果をえらぶ",
@@ -200,6 +204,19 @@ def needed(step_id, st, ctx):
         return ck in ("division", "one")
     if step_id == "cond_rep":                        # 再現性だけ・両方のとき
         return ck in ("repeat", "one")
+    # ---- 連続測定（フル → セミ）。機械に書く手順は、同じ状態のまま載せ替えたときだけ飛ばす（rz_skip_write）
+    if step_id == "rz_plan":
+        return bool(ctx.get("rz_active")) and not ctx.get("rz_planned")
+    if step_id == "rz_return":
+        return bool(ctx.get("rz_can_return")) and not ctx.get("rz_return_mode") and not ctx.get("rz_return_done")
+    if step_id == "cond_check" and (ctx.get("rz_pos") or (ctx.get("rz_unit") or 1) >= 2 or ctx.get("rz_return_mode")):
+        return False                                  # 型式・種類は最初の1台の最初に決めた。2つ目の工程・載せ替えでは聞き直さない
+    if ctx.get("rz_return_mode") and step_id in ("fields", "dial_mem", "prog_select", "override", "start1", "counter0",
+                                                  "start2", "measuring", "result", "prog_manual"):
+        return False                                  # フルへもどすだけ（測らない）
+    if ctx.get("rz_skip_write") and step_id in ("power", "estop", "dial_mdi", "estop_press", "machine_in", "params_manual",
+                                                "cycle_power", "estop_release", "prog_manual", "dial_ref", "jog_origin"):
+        return False
     params, prog = ctx.get("params") or "auto", ctx.get("prog") or "auto"
     if step_id == "params_manual":                   # パラメータは手で打つ（アプリは番号と値の一覧を見せるだけ）
         return params == "manual"
@@ -246,6 +263,10 @@ def done_now(step_id, st, ctx, track=None):
         return bool(ctx.get("params")) and bool(ctx.get("prog"))
     if step_id == "cond_check":
         return not ctx.get("cond_missing") and not ctx.get("kind_missing")
+    if step_id == "rz_plan":
+        return bool(ctx.get("rz_order")) and not ctx.get("rz_problems")
+    if step_id == "rz_return":
+        return bool(ctx.get("rz_return_answered"))
     if step_id == "cond_kind":
         return bool(ctx.get("cond_kind")) and ctx.get("cond_tilt") is not None and not ctx.get("cond_missing")
     if step_id in ("cond_div", "cond_rep"):

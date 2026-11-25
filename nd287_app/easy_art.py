@@ -677,3 +677,33 @@ def choice_measure_kind(kind):
         body += (f'<rect x="132" y="30" width="30" height="26" rx="5" fill="{PANEL}" stroke="{HERE}" stroke-width="3"/>'
                  f'<line x1="132" y1="43" x2="118" y2="43" stroke="{HERE}" stroke-width="3"/>')
     return _svg(200, 86, body, "測定の種類")
+
+
+def renzoku(items, cur=0, back=False):
+    """連続測定: 2つの札（フルクロ→セミクロ）を矢印でつなぐ。items=[(名前,何を測る,種類)]、cur=いま何番目（全部済んだら len）。
+    済んだ札は緑のチェック・いまの札はオレンジの枠。back=最後にフルへもどす矢印を描く。"""
+    n = max(1, min(2, len(items)))
+    xs = [30, 290] if n == 2 else [150]
+    body = ""
+    for i, (name, what, kind) in enumerate(items[:2]):
+        x = xs[i]
+        done, here = i < cur, i == cur
+        edge = GREEN if done else (HERE if here else PANEL_EDGE)
+        body += (f'<rect x="{x}" y="46" width="200" height="190" rx="14" fill="#fff" stroke="{edge}" stroke-width="{6 if here else 3}"/>')
+        body += f'<g transform="translate({x + 6},{60})">' + choice_measure_kind(kind).split("</title>")[1].rsplit("</svg>", 1)[0] + "</g>"
+        body += _t(x + 100, 172, 28, name, fill=FG)
+        body += _t(x + 100, 206, 16, what, fill="#59636E", weight=600)
+        if done:
+            body += (f'<circle cx="{x + 176}" cy="70" r="18" fill="{GREEN}"/><path d="M{x + 167} 70 L{x + 174} 78 L{x + 187} 61" '
+                     f'fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>')
+        elif here:
+            body += _t(x + 100, 36, 15, "いま", fill="#8A6A00")
+    if n == 2:
+        body += (f'<path d="M232 141 L276 141" stroke="{PANEL_EDGE}" stroke-width="7" stroke-linecap="round"/>'
+                 f'<path d="M264 128 L280 141 L264 154" fill="none" stroke="{PANEL_EDGE}" stroke-width="7" '
+                 f'stroke-linecap="round" stroke-linejoin="round"/>')
+    if back:
+        body += (f'<path d="M390 244 C390 282 130 282 130 244" fill="none" stroke="{HERE}" stroke-width="5" stroke-linecap="round" '
+                 f'stroke-dasharray="3 10"/><path d="M122 254 L130 240 L142 252" fill="none" stroke="{HERE}" stroke-width="5" '
+                 f'stroke-linecap="round" stroke-linejoin="round"/>' + _t(260, 296, 13, "最後に、フルへもどすか選びます", fill="#8A6A00"))
+    return _wide(body, "連続して測る")

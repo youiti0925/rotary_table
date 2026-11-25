@@ -229,7 +229,17 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
     def test_kind_conditions_dialog(self):
         """測定条件の種類別の登録画面。"""
         from nd287_app import kind_conditions_ui as U
-        self.assertEqual(self._check(lambda s: U.KindConditionDialog(None, s, "RTV-231")), [])
+        import tempfile
+        from pathlib import Path
+        from nd287_app import kind_conditions as K
+        tmp = tempfile.mkdtemp()                       # 本物のマスタ/測定条件_種類別.xlsx は読まない（行数で大きさが変わるため）
+        K.build_template(Path(tmp) / "k.xlsx")
+
+        def make(s):
+            s = dict(s)
+            s["kind_conditions_xlsx"] = str(Path(tmp) / "k.xlsx")
+            return U.KindConditionDialog(None, s, "RTV-231")
+        self.assertEqual(self._check(make), [])
 
     def test_param_dialog(self):
         import nd287_app.gui as G

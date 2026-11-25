@@ -325,6 +325,7 @@ class MachineInPanel(QtWidgets.QWidget):
         self.semi_report = []        # 書く中身を作ったときの、セミクロを選んだ製品ごとの結果
         self._semi_busy = False      # 同じ型式のフル/セミの組を探している最中
         self._semi_searched = set()
+        self._semi_forced = set()    # 連続測定で「セミクロにする」を初めから選んだ製品（人が選び直したあとは、もう押し付けない）
         self.trial_ok = False
         self._job_error = ""
         self._writing = False
@@ -485,7 +486,9 @@ class MachineInPanel(QtWidgets.QWidget):
 
     def result(self):
         out = {"handoff": True, "cycled": bool(self.cycled), "model": self.env.get("model", ""),
-               "unit": self.unit, "program_manual": not self.prog_sent, "panel": True}
+               "unit": self.unit, "program_manual": not self.prog_sent, "panel": True,
+               "semi_written": any(self.semi_on(i) for i in range(len(self.products))),       # 連続測定: 実際にセミクロの値で書いたか
+               "has_full_product": any(o.get("full") for o in self.semi_opts)}
         if self.prog_sent and self.prog_plan:                 # 送ったプログラムに合わせて、測定の画面の型式・測り方を入れる
             out["program_handoff"] = WP.handoff(self._masters(), self._model(), self.prog_plan)
         return out
@@ -856,6 +859,19 @@ class MachineInPanel(QtWidgets.QWidget):
             self.semi_opts = []
         if len(self.semi) != len(self.products):
             self.semi = [False] * len(self.products)
+        self._pref_semi()
+
+    def _pref_semi(self):
+        """連続測定がセミクロの工程を測るとき（env["semi_pref"]）: フルクロの製品の「位置を読む検出器」を、初めから
+        「セミクロにする」にしておく（選ぶのは今までと同じ画面。人が「製品どおり」に直すことはできる）。1製品に1回だけ。"""
+        if not self.env.get("semi_pref"):
+            return
+        for i, o in enumerate(list(self.semi_opts)):
+            if i in self._semi_forced or not o.get("full"):
+                continue
+            self._semi_forced.add(i)
+            if not o.get("stop"):
+                self._set_semi(i, True)
 
     def semi_on(self, i):
         """製品 i を、実際にセミクロにするか（選んでいて、変換できるとき）。"""
@@ -934,6 +950,7 @@ class MachineInPanel(QtWidgets.QWidget):
         self.products = self.planner.search(sb)
         self.job, self.rows, self._job_error = None, [], ""
         self.semi, self.semi_report, self._semi_searched, self._semi_busy = [False] * len(self.products), [], set(), False
+        self._semi_forced = set()
         self.cand = self.planner.candidates() if self.products else {"units": [], "assign": {}, "notes": []}
         if self.unit not in self.cand["units"]:             # 製品を替えて、選んでいた号機が合わなくなった
             self.unit = ""
@@ -1315,10 +1332,11 @@ class MachineInPanel(QtWidgets.QWidget):
                 m = ""
         return m
 
-    def _kind_args(self):
-        """測り方の段で選んだ測定の種類（モーター／駆動装置／フルクロ）と、種類別の表。選んでいなければ ("", "", None)。"""
+    def _kind_args(self, tilt=None):
+        """測り方の段で選んだ測定の種類（モーター／駆動装置／フルクロ）と、種類別の表。選んでいなければ ("", "", None)。
+        tilt（これから作るプログラムが傾斜か）を渡すと、その軸（回転/傾斜）で選んだ種類を使う。"""
         try:
-            kind, scale = self.env["kind_fn"]() if self.env.get("kind_fn") else ("", "")
+            kind, scale = (self.env["kind_fn"](tilt) if tilt is not None else self.env["kind_fn"]()) if self.env.get("kind_fn") else ("", "")
             table = self.env["kind_table_fn"]() if (kind and self.env.get("kind_table_fn")) else None
         except Exception:
             return "", "", None
@@ -1340,9 +1358,12 @@ class MachineInPanel(QtWidgets.QWidget):
 
     def _prog_make_plan(self):
         try:
-            kind, scale, table = self._kind_args()
+            kinds_of_products = [p["kind"] for p in self.products]
+            tilt_now = self._prog_tilt if self._prog_tilt is not None else WP.decide_kind(kinds_of_products)[0]
+            kind, scale, table = self._kind_args(tilt_now)          # 回転と傾斜で種類が違うときは、作る軸の種類で
             self.prog_plan = M.prog_plan(self.settings, self._model(), [p["kind"] for p in self.products],
-                                         tilt=self._prog_tilt, choice=self._prog_choice, masters_dict=self._masters(),
+                                         tilt=self._prog_tilt, choice=self._prog_choice or self.env.get("choice_pref") or None,
+                                         masters_dict=self._masters(),
                                          kind=kind, scale=scale, kind_table=table)
         except Exception as e:
             self.prog_plan = {"problems": [f"測定プログラムを作れませんでした: {e}"], "programs": [], "slots": [], "allowed": [],

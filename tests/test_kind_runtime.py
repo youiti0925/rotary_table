@@ -343,9 +343,7 @@ class TestHost(unittest.TestCase):
         w.save_bs_file = lambda no, *a, **k: calls.append(("bs", no))
         w.sync_to_webapp = lambda no, *a, **k: calls.append(("web", no))
         asked = []
-        orig = QtWidgets.QMessageBox.question
-        QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: (asked.append(a[2]), QtWidgets.QMessageBox.Yes)[1])
-        self.addCleanup(lambda: setattr(QtWidgets.QMessageBox, "question", orig))
+        w._ask_overwrite = lambda existing, x_name: (asked.append(x_name), "x")[1]
         w.e_model.setText("TK-1")
         w.on_model_entered()
         w.easy_set_kind("フル・スケール付き")
@@ -372,14 +370,52 @@ class TestHost(unittest.TestCase):
         w.on_model_entered()
         self.fill_data()
         w.save()
-        orig = QtWidgets.QMessageBox.question
-        QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No)
-        self.addCleanup(lambda: setattr(QtWidgets.QMessageBox, "question", orig))
+        w._ask_overwrite = lambda existing, x_name: "cancel"
         w.save()
         d = self.t / "save" / "TK"
         self.assertEqual(sorted(x.name for x in d.glob("*.csv")), ["M100C.csv"])
-        self.assertEqual(w.suffix_sel.ng, 1)                        # 提案の数字は、表に残って直せる
+        self.assertEqual(w.suffix_sel.ng, 0)                        # 提案の数字は、表に残って直せる
 
+
+    def test_overwrite_default_is_no_and_covers_inspection_files(self):
+        """CSV だけでなく検査表(.BS)が有っても聞く。既定（閉じる・いいえ）は上書きしない。上書きを選んだときだけ書き換える。"""
+        w = self.w
+        w.sync_to_webapp = lambda *a, **k: None
+        w.e_model.setText("TK-1")
+        w.on_model_entered()
+        self.fill_data()
+        w.easy_set_kind("セミ・モーター")
+        bs = self.t / "bs"
+        bs.mkdir(parents=True, exist_ok=True)
+        (bs / "M100.BS").write_text("OLD", encoding="cp932")             # CSV は無く、検査表だけ有る
+        seen = []
+        w._ask_overwrite = lambda existing, x_name: (seen.append((list(existing), x_name)), "cancel")[1]
+        w.save()
+        self.assertEqual((bs / "M100.BS").read_text(encoding="cp932"), "OLD")      # 黙って上書きしない
+        self.assertEqual(seen[0][0], ["M100.BS"])
+        self.assertEqual(seen[0][1], "M100-X1")
+        self.assertFalse((self.t / "save" / "TK" / "M100.csv").exists())
+        w._ask_overwrite = lambda existing, x_name: "overwrite"
+        w.save()
+        self.assertNotEqual((bs / "M100.BS").read_text(encoding="cp932"), "OLD")
+
+    def test_overwrite_dialog_default_button_is_not_overwrite(self):
+        from PySide6 import QtWidgets
+        w = self.w
+        seen = {}
+        orig = QtWidgets.QMessageBox.exec
+        def fake(self_):
+            seen["default"] = self_.defaultButton().text()
+            seen["text"] = self_.text()
+            self_._clicked = self_.defaultButton()
+            return 0
+        QtWidgets.QMessageBox.exec = fake
+        orig_cb = QtWidgets.QMessageBox.clickedButton
+        QtWidgets.QMessageBox.clickedButton = lambda self_: self_._clicked
+        self.addCleanup(lambda: (setattr(QtWidgets.QMessageBox, "exec", orig), setattr(QtWidgets.QMessageBox, "clickedButton", orig_cb)))
+        self.assertEqual(w._ask_overwrite(["M100.csv", "M100.BS"], "M100-X1"), "cancel")
+        self.assertIn("既に", seen["text"])
+        self.assertIn("いいえ", seen["default"])
 
     def test_kind_reset_when_model_has_no_kinds(self):
         w = self.w

@@ -338,11 +338,14 @@ def tile_program():
 
 
 def tile_results():
-    body = (f'<rect x="60" y="18" width="130" height="120" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
-            f'<polyline points="76,100 100,70 124,86 148,52 172,78" fill="none" stroke="#1560D4" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>'
-            f'<line x1="76" y1="116" x2="174" y2="116" stroke="{PANEL_EDGE}"/>'
-            f'<circle cx="214" cy="104" r="34" fill="{GREEN}"/><path d="M198 105 L210 118 L232 90" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>'
-            f'<rect x="224" y="24" width="56" height="40" rx="6" fill="{DARK}"/><rect x="232" y="14" width="40" height="14" rx="3" fill="#fff" stroke="{PANEL_EDGE}"/>')
+    """保存したグラフを、虫めがねで見る。右上は印刷。"""
+    body = (f'<rect x="40" y="14" width="150" height="130" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            f'<polyline points="56,104 82,66 108,86 136,42 170,72" fill="none" stroke="#1560D4" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>'
+            f'<line x1="56" y1="122" x2="174" y2="122" stroke="{PANEL_EDGE}"/>'
+            f'<circle cx="188" cy="92" r="30" fill="#fff" fill-opacity="0.85" stroke="{DARK}" stroke-width="7"/>'
+            f'<line x1="210" y1="114" x2="238" y2="142" stroke="{DARK}" stroke-width="11" stroke-linecap="round"/>'
+            f'<rect x="232" y="30" width="46" height="30" rx="6" fill="{DARK}"/><rect x="240" y="14" width="30" height="20" rx="2" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+            f'<rect x="240" y="48" width="30" height="18" rx="2" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>')
     return _tile(300, 165, body, "結果を見る・印刷")
 
 
@@ -356,12 +359,13 @@ def tile_alarm():
 
 
 def folder():
-    sheet = lambda x, y: (f'<rect x="{x}" y="{y}" width="80" height="104" rx="6" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
-                          f'<polyline points="{x + 10},{y + 70} {x + 28},{y + 48} {x + 44},{y + 60} {x + 62},{y + 36}" fill="none" stroke="#1560D4" stroke-width="3"/>'
-                          f'<rect x="{x + 10}" y="{y + 82}" width="60" height="6" fill="#DDE2E7"/>')
-    body = (sheet(120, 40) + sheet(210, 52) + sheet(300, 40)
-            + f'<path d="M60 130 L60 250 L460 250 L460 130 L260 130 L240 106 L80 106 Q60 106 60 130 Z" fill="{HERE}" stroke="#B57A00" stroke-width="3" stroke-linejoin="round"/>'
-            + _t(260, 292, 14, "保存した結果", fill=FG))
+    """保存した結果（グラフの紙）が、フォルダに入っている。"""
+    sheet = lambda x, y: (f'<rect x="{x}" y="{y}" width="96" height="130" rx="6" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+                          f'<polyline points="{x + 12},{y + 72} {x + 32},{y + 44} {x + 52},{y + 58} {x + 76},{y + 28}" fill="none" stroke="#1560D4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>'
+                          f'<rect x="{x + 12}" y="{y + 86}" width="72" height="6" fill="#DDE2E7"/>')
+    body = (sheet(100, 24) + sheet(208, 14) + sheet(316, 24)
+            + f'<path d="M50 150 L50 262 Q50 272 60 272 L460 272 Q470 272 470 262 L470 160 Q470 150 460 150 L280 150 L260 128 L64 128 Q50 128 50 142 Z" fill="{HERE}" stroke="#B57A00" stroke-width="3" stroke-linejoin="round"/>'
+            + _t(260, 224, 26, "保存した結果", fill="#3A2A00", weight=900))
     return _wide(body, "保存した結果")
 
 

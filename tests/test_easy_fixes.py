@@ -42,6 +42,21 @@ class TestEasyFixes(unittest.TestCase):
     def test_past_result_with_ng_does_not_say_saved(self):
         self.assertNotIn("保存しました", A.verdict(False, saved=False))
 
+    def test_wizard_program_step_has_register_buttons_and_finds_the_host(self):
+        import copy, tempfile
+        from nd287_app import gui as G
+        from nd287_app.settings import DEFAULTS
+        host = QtWidgets.QWidget()
+        called = []
+        host.show_kind_conditions = lambda m="": called.append(("kind", m))
+        host.show_condition_editor = lambda: called.append(("cond", ""))
+        st = copy.deepcopy(DEFAULTS)
+        d = G.ParamWizardDialog(host, st, model="ZZZ-999")
+        self.assertIs(d._p_host(), host)
+        self.assertFalse(d.box_p_register.isVisibleTo(d))
+        d._p_register("cond")
+        self.assertEqual(called, [("cond", "")])
+
 
 if __name__ == "__main__":
     unittest.main()

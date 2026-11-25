@@ -1382,6 +1382,7 @@ class MachineInPanel(QtWidgets.QWidget):
             self.env[key]()
         except Exception as e:
             self._prog_error = f"登録の画面を開けませんでした: {e}"
+        self._masters_cache = None                           # 登録した内容を読み直す（前の写しのままだと、エラーが消えない）
         self._prog_reset()
         self._prog_make_plan()
         self._render()

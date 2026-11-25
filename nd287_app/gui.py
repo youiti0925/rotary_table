@@ -8808,6 +8808,18 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_p_problem.setStyleSheet("color:#b91c1c; font-weight:bold;")
         self.lbl_p_problem.setVisible(False)
         lay.addWidget(self.lbl_p_problem)
+        self.box_p_register = QtWidgets.QWidget()          # 測定条件が無い型式: 行き止まりにせず、その場で登録して先へ進む
+        rl = QtWidgets.QHBoxLayout(self.box_p_register)
+        rl.setContentsMargins(0, 0, 0, 0)
+        self.b_p_reg_kind = QtWidgets.QPushButton("測り方を種類別に登録する…")
+        self.b_p_reg_kind.clicked.connect(lambda: self._p_register("kind"))
+        self.b_p_reg_cond = QtWidgets.QPushButton("測り方を手で入れる…")
+        self.b_p_reg_cond.clicked.connect(lambda: self._p_register("cond"))
+        rl.addWidget(self.b_p_reg_kind)
+        rl.addWidget(self.b_p_reg_cond)
+        rl.addStretch(1)
+        self.box_p_register.setVisible(False)
+        lay.addWidget(self.box_p_register)
         self.lbl_p_done = QtWidgets.QLabel("")
         self.lbl_p_done.setWordWrap(True)
         self.lbl_p_done.setStyleSheet("color:#166534; font-weight:bold;")
@@ -8837,6 +8849,48 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _p_log_path(self):
         p = str(self.settings.get("prog_log_csv") or "")
         return Path(p) if p else app_dir() / WP.LOG_NAME
+
+    def _p_host(self):
+        """測定の画面（MainWindow）。登録の画面を開く先。見つからなければ None。"""
+        w = self.parent()
+        for _ in range(8):
+            if w is None:
+                return None
+            if hasattr(w, "show_kind_conditions") and hasattr(w, "show_condition_editor"):
+                return w
+            h = getattr(w, "host", None)
+            if h is not None and hasattr(h, "show_kind_conditions"):
+                return h
+            w = w.parent() if hasattr(w, "parent") else None
+        return None
+
+    def _p_register(self, which):
+        """測り方の登録画面を開き、閉じたら、送るプログラムを作り直す（登録できていれば、そのまま先へ進める）。"""
+        host = self._p_host()
+        if host is None:
+            return
+        try:
+            if which == "kind":
+                host.show_kind_conditions(self._p_model())
+            else:
+                host.show_condition_editor()
+        except Exception as e:
+            self.lbl_p_problem.setText(f"登録の画面を開けませんでした: {e}")
+            return
+        try:
+            self._p_masters = load_masters(self.settings)         # 登録した内容を読み直す（前の写しを持ち越さない）
+        except Exception:
+            self._p_masters = {}
+        self._kind_table = None
+        try:
+            host.refresh_kind_choices()
+            k = host.active_kind()
+            if k:
+                self._kind = k                                    # 登録したら、その種類で作る（選び直しを頼まない）
+        except Exception:
+            pass
+        self._p_results = {}
+        self._p_refresh()
 
     def _p_kind_table(self):
         """種類を選んでいるときだけ、種類別の表を返す（選んでいなければ None＝今までどおり）。"""
@@ -8951,6 +9005,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
             msgs = list(plan["problems"])
             self.lbl_p_problem.setText("\n".join(msgs))
             self.lbl_p_problem.setVisible(bool(msgs))
+            self.box_p_register.setVisible(bool(msgs) and bool(self._p_model()) and self._p_host() is not None)
             if rebuild_table:
                 self._p_fill_table(plan)
             self._p_states = {}
@@ -14428,7 +14483,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """数字の入力欄（開始・終了角度・範囲・刻み）の幅を、値と単位と上下ボタンが切れない広さにする。
         固定の上限（74 など）があると、150% の画面で -90.00 ° や /pt が切れた（会社PC 2026-11-25）。"""
         for sp in root.findChildren(QtWidgets.QAbstractSpinBox):
-            need = sp.minimumSizeHint().width() + 6
+            need = sp.minimumSizeHint().width() + 22          # 文字の左右の余白ぶんも（hint だけでは「/pt」が切れた）
             if sp.minimumWidth() < need:
                 sp.setMinimumWidth(need)
             if 0 < sp.maximumWidth() < 16777215 and sp.maximumWidth() < need:
@@ -16149,7 +16204,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "model_fn": lambda: self.e_model.text().strip(),
                 "kind_fn": lambda tilt=None: (self.active_kind(tilt), self.measure_scale),
                 "kind_table_fn": lambda: self.kind_table,
-                "register_kind": lambda: self.show_kind_conditions(self.e_model.text().strip()),     # 測定条件が無い型式は、その場で登録して先へ進む
+                "register_kind": lambda: (self.show_kind_conditions(self.e_model.text().strip()), self.refresh_kind_choices()),     # 測定条件が無い型式は、その場で登録して先へ進む
                 "register_cond": self.show_condition_editor}
 
     def easy_apply_handoff(self, h):

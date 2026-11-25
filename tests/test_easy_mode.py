@@ -952,3 +952,11 @@ class TestPoller(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMachineStateAlarms(unittest.TestCase):
+    def test_alarm_type_no_axis_are_kept(self):
+        st = F.machine_state({"values": {"emergency": 0}}, [{"code": "SV0436", "text": "x", "type": 3, "no": 436, "axis": 2},
+                                                           {"code": "PS0010", "text": "y"}], online=True)
+        self.assertEqual((st["alarms"][0]["type"], st["alarms"][0]["no"], st["alarms"][0]["axis"]), (3, 436, 2))
+        self.assertIsNone(st["alarms"][1]["axis"])            # 読めなかった値は None（推測で埋めない）

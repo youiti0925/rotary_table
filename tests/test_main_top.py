@@ -223,25 +223,3 @@ class TestLowScreen(TestTopRows):
         w.fill_misc_table([("総合バックラッシ MIN", '-0.9"')])
         self.assertFalse(w.lbl_no_result.isVisibleTo(w))
         self.assertGreater(w.table_misc.height(), 0)
-
-    def test_bottom_strip_is_lifted_when_the_maximized_window_is_taller_than_the_screen(self):
-        # 2026-11-25 会社PC: 最大にした窓の中身が画面の使える高さと同じ 672 になり、題名の帯のぶん下の帯が画面の外へ出た
-        from PySide6 import QtCore
-        w = self._low(640)
-        avail = w.screen().availableGeometry()
-        w.move(avail.x(), avail.y())
-        w.resize(w.width(), avail.height() + 30)
-        w.isMaximized = lambda: True
-        for _ in range(5):
-            self.app.processEvents()
-        w._keep_bottom_on_screen()
-        for _ in range(8):
-            self.app.processEvents()
-        over = w.mapToGlobal(QtCore.QPoint(0, w.height())).y() - (avail.y() + avail.height())
-        self.assertGreater(over, 1)
-        self.assertEqual(w.contentsMargins().bottom(), over)
-        sb = w.statusBar()
-        self.assertLessEqual(sb.mapToGlobal(QtCore.QPoint(0, sb.height())).y(), avail.y() + avail.height())
-        w.isMaximized = lambda: False                 # 最大でなくなったら、あきは戻す
-        w._keep_bottom_on_screen()
-        self.assertEqual(w.contentsMargins().bottom(), 0)

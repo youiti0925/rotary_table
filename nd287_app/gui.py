@@ -15730,7 +15730,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scr = self.screen() or QtWidgets.QApplication.primaryScreen()
         avail = scr.availableGeometry().height() if scr else 768
         frame = self.frameGeometry().height() - self.geometry().height() if self.isVisible() else 0
-        return avail - max(frame, 32, getattr(self, "_bottom_pad", 0))
+        return avail - max(frame, 32)
 
     def _screen_tight(self):
         """低い画面か（字の高さの 62 行ぶんに足りない。1920×1080 を 150% 表示にした会社PCがこれ）。"""
@@ -17150,31 +17150,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if over > 0 and self.plots_widget.minimumHeight() > 110:
             self._plot_min_fix = getattr(self, "_plot_min_fix", 0) + over
             self.plots_widget.setMinimumHeight(max(110, self.plots_widget.minimumHeight() - over))
-        self._keep_bottom_on_screen()
-
-    def _keep_bottom_on_screen(self):
-        """最大にした窓の中身の下の端が、画面の使える所より下に出ていたら、そのぶん中身を上へ詰める。
-
-        2026-11-25 会社PC（1920×1080 を 150% 表示）: 最大にした窓の中身の高さが 672（画面の使える高さと同じ）になり、
-        題名の帯のぶん（約22〜30）だけ一番下の帯（接続先・通信診断）が画面の外へ出た。なぜ窓が大きくなるかは
-        未確認なので、原因によらず「実際に出ている分」を測って下にあきを取る（下の帯が必ず画面の中に来る）。"""
-        pad = 0
         scr = self.screen()
-        if scr is not None and self.isVisible() and self.isMaximized():
-            avail = scr.availableGeometry()
-            bottom = self.mapToGlobal(QtCore.QPoint(0, self.height())).y()
-            pad = max(0, bottom - (avail.y() + avail.height()))
-            if pad <= 1:
-                pad = 0
-        if pad != getattr(self, "_bottom_pad", 0):
-            self._bottom_pad = pad
-            self.setContentsMargins(0, 0, 0, pad)
-            QtCore.QTimer.singleShot(0, self._fit_cond_box)
+        # 比べるのは窓の中身の高さ（Windows では、最大にした窓の枠は画面より少し外まであるのが普通）
+        if (scr is not None and self.isMaximized() and not getattr(self, "_remaximized", False)
+                and self.height() > scr.availableGeometry().height() + 2):
+            self._remaximized = True        # 最低の高さが大きいうちに広がった窓は自分では縮まないので、1回だけ最大にし直す
+            QtCore.QTimer.singleShot(50, self._remaximize)
+
+    def _remaximize(self):
+        if self.minimumSizeHint().height() <= self._screen_room() + 32:
+            self.showNormal()
+            self.showMaximized()
 
     def resizeEvent(self, event):
         if hasattr(self, "top_scroll") and hasattr(self, "chip_machine"):
             QtCore.QTimer.singleShot(0, self._fit_top)
-            QtCore.QTimer.singleShot(0, self._keep_bottom_on_screen)
         super().resizeEvent(event)
         # 窓の大きさが変わったら測定条件の頭打ち高さ・右カラムの頭打ち幅を合わせ直す
         self._fit_cond_box()

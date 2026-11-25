@@ -127,7 +127,7 @@ class TestFlow(unittest.TestCase):
 
     def test_watch_lines(self):
         self.assertEqual(F.watch_line("estop", S(emergency=1))[0], "stop")
-        self.assertEqual(F.watch_line("dial_mdi", S(aut=1))[1], "いまは「メモリ運転」です")
+        self.assertIn("「メモリ運転」と答えています", F.watch_line("dial_mdi", S(aut=1))[1])
         self.assertEqual(F.watch_line("dial_mdi", S(aut=0))[0], "ok")
         self.assertEqual(F.watch_line("power", F.OFFLINE)[0], "wait")
 
@@ -1234,3 +1234,25 @@ class TestMachineStateAlarms(unittest.TestCase):
                                                            {"code": "PS0010", "text": "y"}], online=True)
         self.assertEqual((st["alarms"][0]["type"], st["alarms"][0]["no"], st["alarms"][0]["axis"]), (3, 436, 2))
         self.assertIsNone(st["alarms"][1]["axis"])            # 読めなかった値は None（推測で埋めない）
+
+
+class TestLayoutAndModeMismatch(TestDialog):
+    def test_embedded_wizard_uses_the_whole_width(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1))
+        dlg._enter(F.INDEX["machine_in"])
+        self.app.processEvents()
+        self.assertTrue(dlg.art_wrap.isHidden())              # 左の絵の場所ごと隠れる（左を空けない）
+        self.assertGreater(dlg.embed.width(), dlg.width() * 0.8)
+        dlg.close()
+
+    def test_mode_mismatch_offers_the_manual_button_early_and_says_the_number(self):
+        import time
+        from nd287_app import easy_mode
+        dlg, host, poller = self.make(S(aut=2, emergency=1))
+        dlg._enter(F.INDEX["dial_mdi"])
+        self.assertTrue(dlg.b_manual.isHidden())
+        dlg._entered_at = time.time() - easy_mode.FALLBACK_MISMATCH_SEC - 1
+        dlg._refresh()
+        self.assertFalse(dlg.b_manual.isHidden())              # 読みが合わなくても、人が進められる
+        self.assertIn("数字は 2", dlg.lbl_watch.text())
+        dlg.close()

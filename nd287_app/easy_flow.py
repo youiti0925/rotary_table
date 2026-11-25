@@ -329,7 +329,7 @@ def watch_line(step_id, st, ctx=None, track=None):
             return ("ok", f"「{want}」になりました")
         if st["aut"] is None:
             return None
-        return ("wait", f"いまは「{aut_name(st['aut'])}」です")
+        return ("wait", f"機械は「{aut_name(st['aut'])}」と答えています（数字は {st['aut']}）。つまみが合っているのに進まないときは、下の小さいボタンを押します")
     if d == "running":
         return ("ok", "機械が動き出しました") if done else ("wait", "PC は待っています")
     if d == "cycled":

@@ -19,6 +19,7 @@ from .easy_flow import STEPS, INDEX, CHAPTERS
 AUT_TO_DIAL = {0: 3, 1: 5, 3: 6, 4: 4, 5: 1, 9: 2}
 WATCH_COLORS = {"wait": ("#E9EEF5", "#5A6876"), "ok": ("#E3F4EA", "#16864C"), "stop": ("#FBE9E7", "#C8362B")}
 FALLBACK_SEC = 25        # 機械から「できた」を読めないまま、これだけたったら、人が押す小さなボタンを出す
+FALLBACK_MISMATCH_SEC = 6   # つまみの位置を読めているのに「合っていない」と出つづけるとき、早めに「やりました」を出す（読みが違う機械でも進める）
 
 QSS = """
 QDialog#easy { background:#EEF1F4; }
@@ -392,11 +393,13 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_photo.clicked.connect(self._toggle_photo)
         self.b_photo.setVisible(False)
         self.show_photo = True                      # 写真があれば、初めは写真を出す（絵とは「絵 ／ 写真」で切り替え）
-        art_col = QtWidgets.QVBoxLayout()
+        self.art_wrap = QtWidgets.QWidget()          # 絵と写真の切り替えを1つにまとめる（隠すときは、まとめて隠す＝左を空けない）
+        art_col = QtWidgets.QVBoxLayout(self.art_wrap)
+        art_col.setContentsMargins(0, 0, 0, 0)
         art_col.setSpacing(6)
         art_col.addWidget(self.art, 1)
         art_col.addWidget(self.b_photo, 0, QtCore.Qt.AlignRight)
-        mid.addLayout(art_col, 6)
+        mid.addWidget(self.art_wrap, 6)
         self.right_w = QtWidgets.QWidget()
         right = QtWidgets.QVBoxLayout(self.right_w)
         right.setContentsMargins(0, 0, 0, 0)
@@ -1499,7 +1502,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_w, self.art_wrap, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -1514,7 +1517,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._update_alarm_button()
         inside = sid == "machine_in" and self._wiz is not None
         self.right_w.setVisible(not inside)
-        self.art.setVisible(not inside)
+        self.art_wrap.setVisible(not inside)
         self.embed.setVisible(inside)
         self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff") and self.flow == "measure")
         self.b_next.setVisible(not inside)
@@ -1556,7 +1559,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         d = s.get("detect")
         waited = time.time() - self._entered_at
         show_manual = bool(s["kind"] == "machine" and d and d != "online" and not done
-                           and (not easy_flow.can_detect(d, st) and st["online"] or waited > FALLBACK_SEC))
+                           and (not easy_flow.can_detect(d, st) and st["online"] or waited > FALLBACK_SEC
+                                or (str(d).startswith("aut_") and st["online"] and waited > FALLBACK_MISMATCH_SEC)))
         self.b_manual.setVisible(show_manual)
         # 「次へ」
         no_detect = s["kind"] == "machine" and not d

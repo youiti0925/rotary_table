@@ -299,6 +299,24 @@ class TestLowScreen(TestTopRows):
         bs = w.bar_scroll
         self.assertLessEqual(bs.widget().minimumSizeHint().width(), bs.viewport().width())
 
+    def test_counts_keep_all_four_series_when_narrow(self):
+        # 2026-11-25 会社PC 150%: 使える幅 225 で、4つ目の「ウォーム CCW」が消えた。どの幅でも4つ全部を出す（今の点数だけでも）
+        from nd287_app import gui as G
+        w = self._window(1280)
+        full = "データ数:  ホイール CW 15/37　ホイール CCW 15/37　ウォーム CW 37/37　ウォーム CCW 37/37"
+        forms = G._counts_short_forms(full)
+        self.assertEqual(forms[-1], "ホCW15 ホCCW15 ウCW37 ウCCW37")
+        w.counts.setText(full)
+        fm = w.counts.fontMetrics()
+        w.counts.setMinimumWidth(0)
+        w.counts.resize(fm.horizontalAdvance(forms[-1]) + 8, w.counts.height())
+        w.counts._apply()
+        shown = QtCore_text(w.counts)
+        self.assertEqual(shown, forms[-1])
+        self.assertIn("ウCCW37", shown)
+        self.assertEqual(w.counts.toolTip(), full)
+        self.assertEqual(w.counts.text(), full)
+
 
 def QtCore_text(label):
     from PySide6 import QtWidgets

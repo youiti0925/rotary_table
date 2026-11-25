@@ -484,7 +484,13 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.v_map.setMinimumSize(200, 130)
         self.v_map.setMaximumHeight(300)
         right.addWidget(self.v_map, 3)
-        mid.addWidget(self.right_w, 5)
+        self.right_scroll = QtWidgets.QScrollArea()   # 右の札が窓より高くなっても、中を潰さない（足りない分は縦に動かす）
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.right_scroll.setStyleSheet("QScrollArea{background:transparent;} QScrollArea > QWidget > QWidget{background:transparent;}")
+        self.right_scroll.setWidget(self.right_w)
+        mid.addWidget(self.right_scroll, 5)
         self.embed = QtWidgets.QWidget()           # 「機械に入れる」: かんたん作成を、この画面の中に入れる
         el = QtWidgets.QVBoxLayout(self.embed)
         el.setContentsMargins(0, 0, 0, 0)
@@ -1035,9 +1041,18 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             m = QtWidgets.QLabel(f"…ほか {len(items) - limit} か所")
             m.setObjectName("line")
             v.addWidget(m)
+        sc = QtWidgets.QScrollArea()                 # 件数が多くても1行ずつの高さは潰さない。足りない分は縦に動かす
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         box.setObjectName("ng_rows")
-        self.extra.addWidget(box)
-        self._extra_widgets["ng"] = box
+        sc.setObjectName("ng_rows")
+        sc.setWidget(box)
+        box.setMinimumWidth(10)
+        h = box.sizeHint().height() + 4
+        sc.setFixedHeight(max(40, min(h, 150)))
+        self.extra.addWidget(sc)
+        self._extra_widgets["ng"] = sc
 
     # ------------------------------------------------------------ 測り方（測定条件）
     def _cond_get(self):
@@ -1112,6 +1127,19 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             lb.setStyleSheet("color:#17212B; font-size:14px; font-weight:700;")
             self.extra.addWidget(lb)
             panel = h.make_suffix_panel(self)
+            panel.blockSignals(True)
+            panel.setChecked(False)                 # 表はこの狭い札の中には広げない（押すと別の窓で大きく開く）
+            panel.blockSignals(False)
+            panel.picker.setVisible(False)
+
+            def _open(on, _p=panel):
+                if on:
+                    _p.blockSignals(True)
+                    _p.setChecked(False)
+                    _p.blockSignals(False)
+                    _p.picker.setVisible(False)
+                    h._open_suffix_dialog(True)
+            panel.toggled.connect(_open)
             self.extra.addWidget(panel)
             self._save_name_lbl, self._suffix_panel = lb, panel
 
@@ -1535,6 +1563,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.alarm_scroll.setWidgetResizable(True)
         self.alarm_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.alarm_scroll.setMaximumHeight(130)
+        self.alarm_scroll.setMinimumHeight(78)
         self.alarm_box = QtWidgets.QWidget()
         self.alarm_list = QtWidgets.QVBoxLayout(self.alarm_box)
         self.alarm_list.setContentsMargins(0, 0, 0, 0)
@@ -1867,7 +1896,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_w, self.art_wrap, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_scroll, self.art_wrap, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -1881,7 +1910,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.b_words.setVisible(True)
         self._update_alarm_button()
         inside = sid == "machine_in" and self._wiz is not None
-        self.right_w.setVisible(not inside)
+        self.right_scroll.setVisible(not inside)
         self.art_wrap.setVisible(not inside and sid != "result")      # 結果の段は、機番の末尾の表を広く見せるため、左の絵を外す
         self.embed.setVisible(inside)
         self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff") and self.flow == "measure")
@@ -2128,7 +2157,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         elif art == "verdict":
             if sid == "view_result":
                 ng, spec = c.get("view_ng", 0), c.get("view_spec", False)
-                svg = A.verdict(False if ng else (True if spec else None), saved=True)
+                svg = A.verdict(False if ng else (True if spec else None), saved=False)
             else:
                 ng, spec = c.get("ng", 0), c.get("has_spec", False)
                 svg = A.verdict(False if ng else (True if spec else None), saved=bool(c.get("saved")))
@@ -2145,7 +2174,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             elif pic == "estop":
                 svg = A.estop(False, ph)
             else:
-                svg = A.alarm_screen(bool(st.get("alarms")))
+                svg = A.alarm_screen(bool(st.get("alarms")), online=bool(st.get("online", True)))
         elif art == "auto_done":
             svg = A.auto(True, "入りました")
 

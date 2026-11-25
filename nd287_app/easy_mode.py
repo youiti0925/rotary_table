@@ -12,7 +12,7 @@
 """
 from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
-from . import easy_art, easy_flow, flow_guide
+from . import easy_art, easy_flow, easy_words, flow_guide
 from .easy_flow import STEPS, INDEX, CHAPTERS
 
 # 機械の「状態の数値」→ 絵のつまみの位置（easy_art.MODES の番号）
@@ -214,6 +214,61 @@ class PauseDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class WordsDialog(QtWidgets.QDialog):
+    """ことばの説明カード（絵1つ＋3行まで）。上の小さなボタンで、ほかのカードに切り替える。"""
+
+    def __init__(self, parent, ids):
+        super().__init__(parent)
+        self.setWindowTitle("ことばの説明")
+        self.ids = tuple(ids)
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        self.row = QtWidgets.QHBoxLayout()
+        self._btns = {}
+        if len(self.ids) > 1:
+            wrap = QtWidgets.QScrollArea()
+            wrap.setWidgetResizable(True)
+            wrap.setFixedHeight(54)
+            wrap.setFrameShape(QtWidgets.QFrame.NoFrame)
+            inner = QtWidgets.QWidget()
+            inner.setLayout(self.row)
+            wrap.setWidget(inner)
+            v.addWidget(wrap)
+            for cid in self.ids:
+                b = QtWidgets.QPushButton(easy_words.card(cid)["title"])
+                b.setCheckable(True)
+                b.clicked.connect(lambda _c=False, c=cid: self.show_card(c))
+                self.row.addWidget(b)
+                self._btns[cid] = b
+            self.row.addStretch(1)
+        self.pic = SvgView()
+        self.pic.setMinimumHeight(220)
+        v.addWidget(self.pic, 1)
+        self.lbl_t = QtWidgets.QLabel("")
+        self.lbl_t.setStyleSheet("font-size:20px; font-weight:900; color:#17212B;")
+        v.addWidget(self.lbl_t)
+        self.lbl_l = QtWidgets.QLabel("")
+        self.lbl_l.setWordWrap(True)
+        self.lbl_l.setStyleSheet("font-size:16px; color:#17212B;")
+        v.addWidget(self.lbl_l)
+        b = QtWidgets.QPushButton("とじる")
+        b.clicked.connect(self.accept)
+        v.addWidget(b)
+        self.setMinimumWidth(520)
+        self.show_card(self.ids[0])
+
+    def show_card(self, cid):
+        c = easy_words.card(cid)
+        self.current = cid
+        for k, b in self._btns.items():
+            b.setChecked(k == cid)
+        self.lbl_t.setText(c["title"])
+        self.lbl_l.setText("\n".join(c["lines"]))
+        art = getattr(easy_art, c["art"], easy_art.blank)
+        self.pic.set_svg(art() if c["art"] not in ("verdict",) else easy_art.verdict(False))
+
+
 class ChapterBar(QtWidgets.QWidget):
     """上の6つの章。済んだ章は緑、いまの章は青。"""
 
@@ -369,7 +424,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         hg.setContentsMargins(0, 0, 0, 0)
         hg.setSpacing(18)
         pics = {"measure": easy_art.tile_measure, "program": easy_art.tile_program,
-                "results": easy_art.tile_results, "alarm": easy_art.tile_alarm, "cond": easy_art.tile_cond}
+                "results": easy_art.tile_results, "alarm": easy_art.tile_alarm, "cond": easy_art.tile_cond, "words": easy_art.tile_words}
         self.tiles = {}
         for n, (fid, fl) in enumerate(easy_flow.FLOWS.items()):
             t = TileButton(fl["title"], fl["sub"], pics[fid](), badge=fl.get("badge", ""))
@@ -384,10 +439,18 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.b_back.setObjectName("back")
         self.b_back.clicked.connect(self._back)
         foot.addWidget(self.b_back)
+        self.b_words = QtWidgets.QPushButton("？ことば")
+        self.b_words.setObjectName("sub")
+        self.b_words.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_words.clicked.connect(lambda: self._open_words(easy_words.cards_for(STEPS[self.i]["id"])))
+        self.b_words.setStyleSheet("QPushButton{background:#FFFFFF;color:#17212B;font-size:14px;font-weight:700;border:2px solid #C5CCD3;border-radius:10px;padding:8px 14px;}QPushButton:hover{border-color:#1560D4;}")
+        self.b_words.setVisible(False)
+        foot.addWidget(self.b_words)
         self.b_pause = QtWidgets.QPushButton("■ 一旦やめる")
         self.b_pause.setObjectName("sub")
         self.b_pause.setCursor(QtCore.Qt.PointingHandCursor)
         self.b_pause.clicked.connect(self._open_pause)
+        self.b_pause.setStyleSheet("QPushButton{background:#FFFFFF;color:#17212B;font-size:14px;font-weight:700;border:2px solid #C5CCD3;border-radius:10px;padding:8px 14px;}QPushButton:hover{border-color:#1560D4;}")
         self.b_pause.setVisible(False)
         foot.addWidget(self.b_pause)
         self.b_skip = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
@@ -459,6 +522,9 @@ class EasyModeDialog(QtWidgets.QDialog):
 
     def _start_flow(self, flow):
         """ホームのタイルが押された: その流れの最初の手順へ。"""
+        if flow == "words":                              # ことばの説明は手順ではなく、カードの窓を開く
+            self._open_words(easy_words.ALL)
+            return
         c = self._all_ctx()
         j = easy_flow.first_index(self.st, c, flow)
         if j is None:
@@ -618,6 +684,9 @@ class EasyModeDialog(QtWidgets.QDialog):
         elif key == "save":
             self._save()
 
+    def _open_words(self, ids):
+        WordsDialog(self, ids).exec()
+
     def _cancel_capture(self):
         try:
             self.host.easy_cancel()
@@ -668,14 +737,15 @@ class EasyModeDialog(QtWidgets.QDialog):
                 title = f"{flow_guide._o(progs[:1])} を呼び出す"
         if sid == "result":
             ng, spec = c.get("ng", 0), c.get("has_spec", False)
-            lines = ([f"外れた所が {ng} か所あります。"] if ng else
+            lines = ([f"外れた所が {ng} か所あります。"] + easy_words.ng_lines(c.get("ng_items") or []) if ng else
                      ["ぜんぶ規格の中です。"] if spec else
                      ["規格は画面に出ていません。値を見て、保存します。"])
             title = "測り終わりました"
         if sid == "view_result":
             ng, spec = c.get("view_ng", 0), c.get("view_spec", False)
             title = "規格から外れた所があります" if ng else ("ぜんぶ規格の中です" if spec else "結果")
-            lines = [f"外れた所は {ng} か所です。通常の画面で、くわしく見られます。"] if ng else []
+            lines = ([f"外れた所は {ng} か所です。"] + easy_words.ng_lines(c.get("view_ng_items") or [])
+                     + ["通常の画面で、くわしく見られます。"]) if ng else []
         if sid == "finish":
             path = c.get("saved_path") or ""
             lines = [("保存先: " + path) if path else "保存しました。"]
@@ -1056,7 +1126,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_w, self.art, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -1065,6 +1135,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.bar.setVisible(True)
         self.b_back.setVisible(True)
         self.b_pause.setVisible(True)
+        self.b_words.setVisible(True)
         inside = sid == "machine_in" and self._wiz is not None
         self.right_w.setVisible(not inside)
         self.art.setVisible(not inside)

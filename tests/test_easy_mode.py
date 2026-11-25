@@ -277,7 +277,8 @@ class FakeHost:
         return dict(missing=missing, capturing=self.capturing, count=(10, 36) if self.capturing else (0, 0),
                     finished=self.finished, ng=self.ng, has_spec=True, saved=self.saved, saved_path="x.BS",
                     programs=(100,), next_mode="", mode="回転分割", counter_reset=True,
-                    has_data=self.has_data, view_ng=self.view_ng, view_spec=True)
+                    has_data=self.has_data, view_ng=self.view_ng, view_spec=True,
+                    ng_items=getattr(self, "ng_items", []))
 
     def easy_start_capture(self):
         self.calls.append("start")
@@ -481,7 +482,7 @@ class TestDialog(unittest.TestCase):
     def test_starts_at_home_with_four_tiles(self):
         dlg, host, poller = self.make(S(), flow=None)
         self.assertEqual(self.sid(dlg), "home")
-        self.assertEqual(set(dlg.tiles), {"measure", "program", "results", "alarm", "cond"})
+        self.assertEqual(set(dlg.tiles), {"measure", "program", "results", "alarm", "cond", "words"})
         self.assertFalse(dlg.home.isHidden())
         self.assertTrue(dlg.b_next.isHidden())
         dlg._start_flow("measure")
@@ -587,10 +588,10 @@ class TestDialog(unittest.TestCase):
         dlg, host, poller = self.make(S(aut=0, emergency=1))
         vis = lambda: sorted(b.text() for b in dlg.findChildren(__import__("PySide6.QtWidgets", fromlist=["x"]).QPushButton)
                              if not b.isHidden() and not dlg.embed.isAncestorOf(b))
-        self.assertEqual(len(vis()), 3)               # もどる・一旦やめる・次へ
+        self.assertEqual(len(vis()), 4)               # もどる・一旦やめる・？ことば・次へ
         self.pass_choose(dlg)
         self.app.processEvents()
-        self.assertEqual(len(vis()), 3)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
+        self.assertEqual(len(vis()), 4)               # もどる・飛ばす（あとは中のかんたん作成が案内する。ここの「次へ」は隠れる）
         self.assertTrue(dlg.b_next.isHidden())
         dlg.close()
 
@@ -797,6 +798,52 @@ class TestDialog(unittest.TestCase):
         self.assertEqual(dlg.flow, "measure")
         dlg._next()
         self.assertEqual(self.sid(dlg), "machine_in")
+        dlg.close()
+
+    def test_words_cards_and_dialog(self):
+        from nd287_app import easy_words
+        from nd287_app.easy_mode import WordsDialog
+        from PySide6 import QtSvg, QtCore
+        import nd287_app.easy_art as A
+        for cid, c in easy_words.CARDS.items():
+            self.assertLessEqual(len(c["lines"]), 3, cid)           # 1枚＝3行まで
+            self.assertTrue(hasattr(A, c["art"]), cid)
+            svg = A.verdict(False) if c["art"] == "verdict" else getattr(A, c["art"])()
+            self.assertTrue(QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8"))).isValid(), cid)
+        for sid, ids in easy_words.FOR_STEP.items():
+            self.assertIn(sid, F.INDEX)
+            for cid in ids:
+                self.assertIn(cid, easy_words.CARDS)
+        self.assertEqual(easy_words.cards_for("home"), easy_words.ALL)
+        self.assertIn("規格が画面に無いときは", "".join(easy_words.CARDS["verdict"]["lines"]))
+        d = WordsDialog(None, easy_words.cards_for("result"))
+        d.show_card("graph")
+        self.assertEqual(d.lbl_t.text(), "グラフの見方")
+        d.close()
+        self.assertEqual(easy_words.ng_lines([("a", "1")] * 10, limit=2)[-1], "…ほか 8 か所")
+
+    def test_words_button_and_home_tile(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=1), flow=None)
+        self.assertIn("words", dlg.tiles)
+        self.assertTrue(dlg.b_words.isHidden())                  # ホームには出さない
+        opened = []
+        dlg._open_words = lambda ids: opened.append(tuple(ids))
+        dlg._start_flow("words")
+        self.assertEqual(opened[-1], __import__("nd287_app.easy_words", fromlist=["x"]).ALL)
+        dlg._start_flow("measure")
+        self.assertFalse(dlg.b_words.isHidden())
+        dlg.b_words.click()
+        self.assertEqual(len(opened), 2)
+        dlg.close()
+
+    def test_result_lists_the_ng_items(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.ng = 2
+        host.ng_items = [("ホイール CW 精度PP", "12.3"), ("総合バックラッシ", "8.1")]
+        dlg._enter(F.INDEX["result"])
+        self.assertIn("ホイール CW 精度PP", dlg.lbl_lines.text())
+        host.saved = True
         dlg.close()
 
     def test_condition_needs_model(self):

@@ -581,3 +581,38 @@ def cond_drawer():
             + _t(270, 92, 22, "RWE-200") + f'<path d="M270 136 L270 150" stroke="{HERE}" stroke-width="6" stroke-linecap="round"/>'
             f'<path d="M258 142 L270 156 L282 142 Z" fill="{HERE}"/>')
     return _wide(body, "この型式で登録する")
+
+
+# ------------------------------------------------------------------ ことばの説明の絵
+
+def graph():
+    """横が角度、縦がずれ。規格の線の中に入っている。"""
+    body = (f'<line x1="60" y1="240" x2="480" y2="240" stroke="{INK}" stroke-width="3"/><line x1="60" y1="30" x2="60" y2="240" stroke="{INK}" stroke-width="3"/>'
+            f'<line x1="60" y1="70" x2="480" y2="70" stroke="{RED}" stroke-width="2" stroke-dasharray="8 6"/>'
+            f'<line x1="60" y1="190" x2="480" y2="190" stroke="{RED}" stroke-width="2" stroke-dasharray="8 6"/>'
+            f'<polyline points="60,140 110,110 160,150 210,95 260,160 310,120 360,170 410,105 470,130" fill="none" stroke="#1560D4" stroke-width="4" stroke-linejoin="round"/>'
+            + _t(270, 270, 15, "角度 →", fill=FG) + _t(34, 140, 15, "ずれ", fill=FG) + _t(470, 62, 13, "規格", "end", RED) + _t(470, 208, 13, "規格", "end", RED))
+    return _wide(body.replace('height="300"', 'height="300"'), "グラフの見方")
+
+
+def repeat():
+    """同じ所に何度も止まる。止まる位置が少しばらつく。"""
+    body = f'<line x1="260" y1="40" x2="260" y2="250" stroke="{PANEL_EDGE}" stroke-width="3" stroke-dasharray="6 6"/>'
+    pts = ((248, 80), (270, 110), (255, 140), (266, 170), (252, 200), (262, 225))
+    for x, y in pts:
+        body += f'<circle cx="{x}" cy="{y}" r="9" fill="{HERE}" stroke="{INK}" stroke-width="2"/>'
+    body += _t(380, 150, 16, "止まった所の", fill=FG) + _t(380, 174, 16, "ばらつき", fill=FG) + f'<path d="M320 160 L290 160" stroke="{HERE}" stroke-width="5" stroke-linecap="round"/>'
+    return _wide(body, "再現性")
+
+
+def tile_words():
+    body = (f'<rect x="50" y="22" width="130" height="120" rx="8" fill="#fff" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+            f'<rect x="62" y="38" width="80" height="8" fill="#DDE2E7"/><rect x="62" y="56" width="104" height="8" fill="#DDE2E7"/><rect x="62" y="74" width="64" height="8" fill="#DDE2E7"/>'
+            f'<polyline points="62,126 88,104 112,116 140,92 168,108" fill="none" stroke="#1560D4" stroke-width="3"/>'
+            f'<circle cx="218" cy="84" r="44" fill="#E3EEFF" stroke="#1560D4" stroke-width="5"/>' + _t(218, 106, 64, "?", fill="#1560D4", weight=900))
+    return _tile(300, 165, body, "使い方・ことばの説明")
+
+
+def measure_demo():
+    """ことばの説明用: 36 か所のうち 10 か所まで入った絵。"""
+    return measure(10, 36)

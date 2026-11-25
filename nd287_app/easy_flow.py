@@ -25,6 +25,7 @@ FLOWS = {
     "program": dict(title="プログラムだけ機械に入れる", sub="測りません。入れるだけ", chapters=("つなぐ", "機械に入れる", "おわり")),
     "results": dict(title="結果を見る・印刷", sub="保存した結果", chapters=("えらぶ", "見る", "出す")),
     "alarm": dict(title="アラームを調べる", sub="意味とやること", chapters=("調べる",)),
+    "words": dict(title="使い方・ことばの説明", sub="結果の見方・用語（絵つき）", chapters=("見る",)),
     "cond": dict(title="測り方を決める・登録する", sub="分割・再現性。登録すると次から自動で入ります", chapters=("決める", "入れる", "登録")),
 }
 

@@ -14524,6 +14524,22 @@ class MainWindow(QtWidgets.QMainWindow):
                         ng += 1
         return ng, spec
 
+    def _flow_ng_items(self):
+        """規格から外れた所（右の表の赤い字）の [(項目名, 値)]。数えるだけの _flow_verdict と同じ見方で、中身も返す。"""
+        out = []
+        for tbl in (self.table_series, self.table_series2, self.table_misc):
+            if not tbl.isVisibleTo(self):
+                continue
+            heads = [tbl.horizontalHeaderItem(j).text() if tbl.horizontalHeaderItem(j) else "" for j in range(tbl.columnCount())]
+            for i in range(tbl.rowCount()):
+                first = tbl.item(i, 0).text() if tbl.item(i, 0) is not None else ""
+                for j in range(tbl.columnCount()):
+                    it = tbl.item(i, j)
+                    if it is not None and it.foreground().color().name().lower() == "#dc2626":
+                        name = " ".join(x for x in (first if j else "", heads[j]) if x) or first
+                        out.append((name or f"{i + 1}行目", it.text()))
+        return out
+
     def _flow_inputs(self):
         capturing = self.seq is not None and not self.seq.done()
         count = (0, 0)
@@ -14640,7 +14656,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     ng=g["ng"], has_spec=g["has_spec"], saved=g["saved"], saved_path=g["saved_path"],
                     programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset,
                     param_estop=focas_ops.estop_mode(True),
-                    has_data=self.has_view_data(), **self._easy_view())
+                    has_data=self.has_view_data(), ng_items=self._safe_ng_items(g["ng"]), **self._easy_view())
+
+    def _safe_ng_items(self, ng):
+        try:
+            return self._flow_ng_items() if ng else []
+        except Exception:
+            return []
 
     def _easy_view(self):
         """画面に出ている結果の、規格から外れた所の数（画面の赤い字を数えるだけ）。"""
@@ -14648,7 +14670,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ng, spec = self._flow_verdict() if self.has_view_data() else (0, False)
         except Exception:
             ng, spec = 0, False
-        return dict(view_ng=ng, view_spec=spec)
+        try:
+            items = self._flow_ng_items() if (self.has_view_data() and ng) else []
+        except Exception:
+            items = []
+        return dict(view_ng=ng, view_spec=spec, view_ng_items=items)
 
     def easy_open_past(self):
         """保存した結果をえらぶ（通常の「過去データ」と同じ画面）。"""

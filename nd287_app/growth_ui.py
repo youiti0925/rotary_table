@@ -206,6 +206,7 @@ class GrowthDialog(QtWidgets.QDialog):
             grid.addWidget(self._label(t, color=GREY), 0, j)
         for i, it in enumerate(GR.items(s["counts"]), start=1):
             name = self._label(it["name"], bold=True, wrap=False)      # 名前は途中で折らない（短い名前にしてある）
+            name.setMinimumWidth(name.fontMetrics().horizontalAdvance(it["name"]) + 14)    # 太字ぶんの余りを持たせる
             grid.addWidget(name, i, 0, QtCore.Qt.AlignTop)
             n = self._label(GR.count_text(it), bold=True, color=GREY if not it["count"] else GREEN, wrap=False)
             grid.addWidget(n, i, 1, QtCore.Qt.AlignTop)

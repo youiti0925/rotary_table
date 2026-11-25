@@ -1034,6 +1034,13 @@ class EasyModeDialog(QtWidgets.QDialog):
         r.setCursor(QtCore.Qt.PointingHandCursor)
         r.clicked.connect(self._cond_from_check)
         self.extra.addWidget(r)
+        if hasattr(self.host, "easy_open_kind_conditions"):
+            # モーター・駆動装置・フルクロの3種類をまとめて登録する画面（専用 Excel にも保存）。型式を渡して開く
+            k = QtWidgets.QPushButton("種類別（モーター・駆動装置・フルクロ）にまとめて登録…")
+            k.setObjectName("sub")
+            k.setCursor(QtCore.Qt.PointingHandCursor)
+            k.clicked.connect(lambda: self.host.easy_open_kind_conditions(st.get("model") or ""))
+            self.extra.addWidget(k)
 
     def _cond_from_check(self):
         """測るの流れの途中から、測り方の流れへ。終わったら、ここにもどる。"""

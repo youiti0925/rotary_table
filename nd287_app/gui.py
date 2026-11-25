@@ -13669,6 +13669,8 @@ class MainWindow(QtWidgets.QMainWindow):
              "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
             ("機械に入れる（設定と測定プログラム）…", self.show_param_dialog,
              "受注番号から かんたん作成（詳細設定・パラメータDBも中から）"),
+            ("測定条件を種類別に登録…", self.show_kind_conditions,
+             "1つの型式に、モーター・駆動装置・フルクロの測定条件をまとめて登録（専用の Excel にも保存）"),
             ("型式ごとに一括作成…", self.show_batch_dialog,
              "測定条件マスタの型式ぶんの測定プログラムをまとめて作る"
              "（フォルダ分け／カード向けの平置きを選べる）"),
@@ -14183,6 +14185,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "このままだと型式の自動適用・合否判定ができません。\n"
             "「設定」でCSVの場所（または設置）を確認してください。\n\n" + lines,
         )
+
+    def show_kind_conditions(self, model=None):
+        """測定条件の種類別の登録（kind_conditions_ui.KindConditionDialog）。型式は今の画面の型式を先に入れる。"""
+        from .kind_conditions_ui import KindConditionDialog
+        if model is None or isinstance(model, bool):
+            model = self.e_model.text().strip() if hasattr(self, "e_model") else ""
+        KindConditionDialog(self, self.settings, model=model or "").exec()
+
+    def easy_open_kind_conditions(self, model=""):
+        """はじめてモードの「測り方」の段から、同じ登録画面を開く。"""
+        self.show_kind_conditions(model or "")
 
     def show_condition_editor(self):
         """条件登録/編集ダイアログを開く（現在のモードに合った対象を初期選択）"""

@@ -1417,3 +1417,21 @@ class TestLayoutAndModeMismatch(TestDialog):
         self.assertFalse(dlg.b_manual.isHidden())              # 読みが合わなくても、人が進められる
         self.assertIn("数字は 2", dlg.lbl_watch.text())
         dlg.close()
+
+
+class TestKindConditionsButton(unittest.TestCase):
+    """測り方の段から、種類別の登録画面を型式つきで開ける（ホストに入口があるときだけ）。"""
+    setUpClass = TestDialog.__dict__["setUpClass"]
+    make = TestDialog.make
+
+    def test_button_opens_with_model(self):
+        from PySide6 import QtWidgets
+        dlg, host, poller = self.make(F.machine_state({}, [], online=False))
+        got = []
+        host.easy_open_kind_conditions = lambda model="": got.append(model)
+        dlg._enter(F.INDEX["cond_check"])
+        self.app.processEvents()
+        btns = [b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text().startswith("種類別")]
+        self.assertEqual(len(btns), 1)
+        btns[0].click()
+        self.assertEqual(len(got), 1)

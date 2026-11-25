@@ -13968,15 +13968,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_save_name = QtWidgets.QLabel("")
         self.lbl_save_name.setStyleSheet("font-weight:bold;")
         lv.addWidget(self.lbl_save_name, 0)
-        self.suffix_panel = self.make_suffix_panel(left_col)
+        self.suffix_panel = self.make_suffix_panel(left_col, tight=True)
         lv.addWidget(self.suffix_panel, 0)
-        try:        # 低い画面（1366x768 など）では表を畳んでおく（グラフを押し下げて窓が画面からはみ出すため）。見出しを押すと開く
-            _scr = QtWidgets.QApplication.primaryScreen()
-            if _scr is not None and _scr.availableGeometry().height() < 900:
-                self.suffix_panel.setChecked(False)
-                self.suffix_panel.setTitle("機番の末尾（ここを押すと表が開きます）")
-        except Exception:
-            pass
+        self._suffix_fit_pending = True      # 開いたままで画面に収まらないときだけ、最初に畳む（_fit_suffix_panel）
+        QtCore.QTimer.singleShot(0, self._fit_suffix_panel)
         self.e_machine.textChanged.connect(lambda *_: self.refresh_save_name())
         self.apply_auto_suffix()
         lv.addWidget(self.bar_scroll, 0)
@@ -14324,18 +14319,72 @@ class MainWindow(QtWidgets.QMainWindow):
         self.suffix_sel.__init__(**a)
         self._suffix_sync_panels()
 
-    def make_suffix_panel(self, parent=None):
-        """機番末尾の表（SuffixPanel）。画面ごとに作るが、選んだ状態は1つを共有する。"""
+    def make_suffix_panel(self, parent=None, tight=False):
+        """機番末尾の表（SuffixPanel）。画面ごとに作るが、選んだ状態は1つを共有する。
+        tight=True（通常画面）: 低い画面でも開いたまま収まるよう、行・見出しを詰める。"""
         p = SuffixPanel(parent, selection=self.suffix_sel, compact=True)
-        # 見出しは2文字ずつ折り返す（幅が狭くても切れない）
-        from .serial_suffix_ui import COLUMNS
-        heads = [(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
-        p.picker.tbl.setHorizontalHeaderLabels(heads)
-        p.picker.tbl.horizontalHeader().setMinimumHeight(40)
-        p.picker.tbl.setMinimumHeight(235)                 # 行見出し（2行）が切れない高さ
+        from .serial_suffix_ui import COLUMNS, ROWS
+        tbl = p.picker.tbl
+        if tight:
+            short = ["駆動K", "駆動KG", "正規", "正規G", "仮I", "仮IG"]     # 全文は吹き出し
+            tbl.setVerticalHeaderLabels(short)
+            for i, (_m, _c, full) in enumerate(ROWS):
+                tbl.verticalHeaderItem(i).setToolTip(full.replace("\n", " "))
+            abbr = {"傾斜完組\n慣らし後": "傾完\n慣後", "回転完組\n慣らし後": "回完\n慣後"}
+            heads = [abbr.get(h) or (h if ("\n" in h or len(h) <= 2 or h.isascii()) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
+            tbl.setHorizontalHeaderLabels(heads)
+            for i, (_k, _a, h) in enumerate(COLUMNS):
+                tbl.horizontalHeaderItem(i).setToolTip(h.replace("\n", ""))
+            tbl.horizontalHeader().setMinimumHeight(30)
+            tbl.horizontalHeader().setMaximumHeight(34)
+            tbl.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
+            tbl.verticalHeader().setDefaultSectionSize(20)
+            for i in range(tbl.rowCount()):
+                tbl.setRowHeight(i, 20)
+            tbl.verticalHeader().setMinimumWidth(48)
+            tbl.horizontalHeader().setStyleSheet("QHeaderView::section{padding:0px;}")
+            f = tbl.font(); f.setPointSizeF(max(f.pointSizeF() * 0.8, 6.0)); tbl.setFont(f)
+            tbl.setMinimumHeight(34 + 6 * 20 + 4)
+            tbl.setMaximumHeight(34 + 6 * 20 + 6)
+        else:
+            # 見出しは2文字ずつ折り返す（幅が狭くても切れない）
+            heads = [(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
+            tbl.setHorizontalHeaderLabels(heads)
+            tbl.horizontalHeader().setMinimumHeight(40)
+            tbl.setMinimumHeight(235)                 # 行見出し（2行）が切れない高さ
         p.picker.changed.connect(self._suffix_changed)
         self._suffix_panels.append(p)
         return p
+
+    def _fit_suffix_panel(self):
+        """表を開いたままで窓の最小の高さが画面に収まらない画面だけ、表を畳む（見出しを押すと開く）。"""
+        if not getattr(self, "_suffix_fit_pending", False):
+            return
+        self._suffix_fit_pending = False
+        try:
+            scr = QtWidgets.QApplication.primaryScreen()
+            if scr is None:
+                return
+            avail = scr.availableGeometry().height()
+            if self.minimumSizeHint().height() > avail:
+                self.suffix_panel.setChecked(False)
+                self.suffix_panel.setTitle("機番の末尾（ここを押すと表が別の窓で開きます）")
+                self.suffix_panel.toggled.connect(self._open_suffix_dialog)     # 開いたままだと窓が画面に収まらないので、別の窓で選ぶ
+        except Exception:
+            pass
+
+    def _open_suffix_dialog(self, on):
+        if not on:
+            return
+        from .serial_suffix_ui import SuffixDialog
+        self.suffix_panel.blockSignals(True)
+        self.suffix_panel.setChecked(False)               # 表は窓の中には広げない
+        self.suffix_panel.blockSignals(False)
+        self.suffix_panel.picker.setVisible(False)
+        dlg = SuffixDialog(self, self.e_machine.text().strip(), self.suffix_sel)
+        dlg.picker.changed.connect(self._suffix_changed)
+        dlg.exec()
+        self._suffix_sync_panels()
 
     def _suffix_sync_panels(self):
         alive = []

@@ -17053,7 +17053,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 fixed += sp.sizeHint().height() + 4
             room = self._screen_room() - fixed
             info_h = self.info_group.sizeHint().height()
-            h = min(h, max(min(need, info_h), room - 240))
+            if self._screen_tight():
+                # 低い画面: 測定条件を全部見せてもグラフに 170 残るなら、全部見せる（28% の頭打ちはしない。
+                # 会社PCの 150% 表示で、バックラッシ補正の行が半分切れて見えた）。残らなければ測定情報の高さまで詰める。
+                h = need if room - need >= 170 else min(need, max(min(need, info_h), room - 170))
+            else:
+                h = min(h, max(min(need, info_h), room - 240))
             plot_min = max(110, min(240, room - max(h, info_h)) - getattr(self, "_plot_min_fix", 0))
             if self.plots_widget.minimumHeight() != plot_min:
                 self.plots_widget.setMinimumHeight(plot_min)
@@ -17082,8 +17087,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plot_min_fix = getattr(self, "_plot_min_fix", 0) + over
             self.plots_widget.setMinimumHeight(max(110, self.plots_widget.minimumHeight() - over))
         scr = self.screen()
+        # 比べるのは窓の中身の高さ（Windows では、最大にした窓の枠は画面より少し外まであるのが普通）
         if (scr is not None and self.isMaximized() and not getattr(self, "_remaximized", False)
-                and self.frameGeometry().height() > scr.availableGeometry().height() + 4):
+                and self.height() > scr.availableGeometry().height() + 2):
             self._remaximized = True        # 最低の高さが大きいうちに広がった窓は自分では縮まないので、1回だけ最大にし直す
             QtCore.QTimer.singleShot(50, self._remaximize)
 

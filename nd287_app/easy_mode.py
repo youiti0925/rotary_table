@@ -1002,6 +1002,12 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 r.setCursor(QtCore.Qt.PointingHandCursor)
                 r.clicked.connect(self._remeasure)
                 self.extra.addWidget(r)
+                g = QtWidgets.QPushButton("どこが外れたかを見る")        # 結果を読む（better_app.py。読むだけ）
+                g.setObjectName("sub")
+                g.setCursor(QtCore.Qt.PointingHandCursor)
+                g.clicked.connect(self._read_result)
+                self.extra.addWidget(g)
+                self._extra_widgets["read"] = g
         elif sid == "measuring":
             pg = QtWidgets.QProgressBar()
             pg.setObjectName("pbar")
@@ -1009,6 +1015,10 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
         self._refresh()
+
+    def _read_result(self):
+        from . import better_app
+        better_app.open_result(self.host)
 
     def _show_button(self, btn):
         try:

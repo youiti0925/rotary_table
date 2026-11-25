@@ -863,6 +863,28 @@ class TestDialog(unittest.TestCase):
         host.saved = True
         dlg.close()
 
+    def test_result_has_a_button_to_read_the_result_only_when_out_of_spec(self):
+        """外れた所があるときだけ「どこが外れたかを見る」（結果を読む。better_app）。"""
+        from nd287_app import better_app
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.ng = 1
+        host.ng_items = [("ホイール CW 単一誤差", "6.9")]
+        dlg._enter(F.INDEX["result"])
+        opened = []
+        orig = better_app.open_result
+        better_app.open_result = lambda h: opened.append(h)
+        try:
+            dlg._extra_widgets["read"].click()
+        finally:
+            better_app.open_result = orig
+        self.assertEqual(opened, [host])
+        host.ng, host.ng_items = 0, []
+        dlg._enter(F.INDEX["result"])
+        self.assertNotIn("read", dlg._extra_widgets)
+        host.saved = True
+        dlg.close()
+
     def test_ng_rows_with_a_long_value_do_not_crush_the_name_column(self):
         from PySide6 import QtWidgets
         dlg, host, poller = self.make(S(aut=0, emergency=0))

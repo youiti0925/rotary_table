@@ -3124,6 +3124,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         if f.pointSizeF() > 0:
             f.setPointSizeF(f.pointSizeF() * 1.25)
             self.lbl_target.setFont(f)
+        self.lbl_target.setMinimumHeight(self.lbl_target.fontMetrics().lineSpacing() * 3 + 24)     # 長い機種名・CNC ID の文で、高さが足りず切れた
         v.addWidget(self.lbl_target)
 
         # ① つなぐ

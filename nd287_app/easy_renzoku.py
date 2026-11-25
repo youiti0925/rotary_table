@@ -215,7 +215,7 @@ class RenzokuMixin:
         model = self.host.e_model.text().strip()
         skip = self.rz.skip_write(model, c.get("rz_prev_model"), machine)
         c.update(rz_planned=True, rz_pos=0, rz_skip_write=skip, handoff=False, skip_machine=False, cycled=False,
-                 cycled_in_wizard=False, powered_on=False, prog="auto", params="auto")
+                 cycled_in_wizard=False, powered_on=False, prog=c.get("prog") or "auto", params=c.get("params") or "auto")
         self._rz_apply_current()
         if skip:
             c["handoff"] = True

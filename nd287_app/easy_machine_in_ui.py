@@ -1468,7 +1468,11 @@ class MachineInPanel(QtWidgets.QWidget):
     def _prog_do_send(self):
         """［送る］。1回だけ。機械に書くのは、ここだけ。"""
         plan, rd = self.prog_plan, self.prog_rd
-        if self._busy or self.prog_sent or rd is None or rd["chk"]["reasons"] or not plan or plan["problems"]:
+        if self._busy or self.prog_sent:
+            return
+        if rd is None or rd["chk"]["reasons"] or not plan or plan["problems"]:       # 黙って何も起きないのをやめる（理由を出す）
+            why = (list(rd["chk"]["reasons"]) if rd is not None else ["機械の中身を、まだ読めていません"]) + (list(plan["problems"]) if plan else [])
+            self._msg("いまは送れません: " + "／".join(why or ["もう一度確かめてください"]), RED)
             return
         ow = sorted(n for n, ck in self._prog_checks.items() if ck.isChecked())
         if ow and not self._confirm_overwrite(ow):

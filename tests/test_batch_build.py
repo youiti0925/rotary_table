@@ -221,6 +221,58 @@ class TestDialogsFitOnSmallScreen(unittest.TestCase):
         from nd287_app import serial_suffix_ui as U
         self.assertEqual(self._check(lambda s: U.SuffixDialog(None, "123456")), [])
 
+    def test_result_guide_dialog(self):
+        """結果を読む（自分のグラフで見る・いつもの値・次にやること）。"""
+        from nd287_app import result_guide_ui as U
+
+        from PySide6 import QtWidgets
+        import tempfile
+
+        class Host(QtWidgets.QWidget):
+            view_kind = "split"
+            show_corrected = False
+
+            def __init__(self, settings):
+                super().__init__()
+                self.settings = settings
+                self.e_model = QtWidgets.QLineEdit("RTV-231")
+                self.e_machine = QtWidgets.QLineEdit("123456")
+                self.e_operator = QtWidgets.QLineEdit("YU")
+
+            def has_view_data(self):
+                return True
+
+            def display_series_devs(self):
+                t = [i * 10.0 for i in range(37)]
+                d = [((i * 7) % 11) - 5.0 for i in range(37)]
+                return {"wheel_cw": (t, d), "wheel_ccw": (t, d[::-1])}
+
+            current_series_devs = display_series_devs
+
+            def current_result_rows(self):
+                return [("総合バックラッシ MIN", '-0.9"　規格 ≧9.9"　NG'), ("総合バックラッシ MAX", '15.1"　規格 ≦49.5"　OK')]
+
+            def _flow_ng_items(self):
+                return [("総合バックラッシ MIN", "-0.9")]
+
+            def _spec_limit(self, grp, kind):
+                return {"single": 5, "adjacent": 10, "slope": 4}.get(kind)
+
+        tmp = tempfile.mkdtemp()
+        orig = U.fix_path
+        U.fix_path = lambda s=None: __import__("pathlib").Path(tmp) / "fix.csv"      # アプリのフォルダを読まない
+        self.addCleanup(lambda: setattr(U, "fix_path", orig))
+        hosts = []
+
+        def make(s):
+            s = dict(s)
+            s["result_tips_csv"] = str(__import__("pathlib").Path(tmp) / "tips.csv")
+            hosts.append(Host(s))
+            d = U.ResultGuideDialog(hosts[-1], fixed_kinds=["ホイール 傾き"], search=lambda *a, **k: [])
+            d.show_page(2)                       # いちばん中身の多い「次にやること」で見る
+            return d
+        self.assertEqual(self._check(make), [])
+
     def test_serial_suffix_panel(self):
         """保存画面に常に置く表（折りたためる）。"""
         from nd287_app import serial_suffix_ui as U

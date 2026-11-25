@@ -13883,6 +13883,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_analysis = QtWidgets.QPushButton("分析")
         self.b_analysis.setToolTip("過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷")
         self.b_analysis.clicked.connect(self.show_analysis)
+        self.b_read = QtWidgets.QPushButton("結果を読む")       # 中身は better_app.py / result_guide_ui.py
+        self.b_read.clicked.connect(lambda: __import__("nd287_app.better_app", fromlist=["x"]).open_result(self))
         self.b_to_machine = QtWidgets.QPushButton("機械に入れる")
         self.b_to_machine.setToolTip("受注伝票番号から、製品に合わせた設定と測定プログラムを機械へ入れます")
         self.b_to_machine.clicked.connect(self.show_param_dialog)
@@ -13901,7 +13903,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tools_menu = QtWidgets.QMenu(self.b_tools)
         # 画面の幅が足りないとき、右のはしのボタンから順に「その他」の中へ移す（_fit_top。無くなるボタンは無い）
         self._top_overflow = []
-        for b in (self.b_analysis, self.b_raw, self.b_alarm, self.b_pdf, self.b_past, self.b_partial, b_load):
+        for b in (self.b_analysis, self.b_raw, self.b_alarm, self.b_pdf, self.b_past, self.b_partial, b_load,
+                  self.b_read):
             act = tools_menu.addAction(b.text() + "…")
             act.triggered.connect(b.click)
             act.setVisible(False)
@@ -13941,7 +13944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for n, (cap, ws) in enumerate((
                 ("測る", (self.b_start, self.b_auto, self.b_partial)),
                 ("結果を残す", (self.b_save, self.b_print, self.b_pdf)),
-                ("データを見る", (b_load, self.b_past, self.b_raw, self.b_analysis)),
+                ("データを見る", (self.b_read, b_load, self.b_past, self.b_raw, self.b_analysis)),
                 ("機械", (self.b_to_machine, self.b_alarm)),
                 ("", (self.b_tools,)))):
             if n:
@@ -14333,6 +14336,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cmd_timer.start(max(interval, 1000))
             self.statusBar().showMessage(
                 f"Webアプリ連動 監視中（ステーション {self.settings.get('webapp_station')}）")
+        from . import better_app
+        better_app.attach(self)         # 結果を読む など（読むだけ。測定・保存・機械には触らない）
 
     # ----- Webアプリ連動（指令の監視と実行） -----
 

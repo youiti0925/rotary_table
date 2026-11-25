@@ -199,7 +199,7 @@ class TestHost(unittest.TestCase):
         w.easy_set_kind("セミ・駆動装置")
         self.assertAlmostEqual(w.e_wheel.value(), 3.0)                  # 10° にも他の値にもしない
         self.assertTrue(w.easy_kind_state()["error"])
-        self.assertIn("決められません", w.statusBar().currentMessage())
+        self.assertIn("決められません", w.statusBar().full_message())
 
     def test_kind_problems_are_visible(self):
         from nd287_app import gui as G

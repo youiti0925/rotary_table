@@ -299,6 +299,44 @@ class TestLowScreen(TestTopRows):
         bs = w.bar_scroll
         self.assertLessEqual(bs.widget().minimumSizeHint().width(), bs.viewport().width())
 
+    def test_counts_keep_all_four_series_when_narrow(self):
+        # 2026-11-25 会社PC 150%: 使える幅 225 で、4つ目の「ウォーム CCW」が消えた。どの幅でも4つ全部を出す（今の点数だけでも）
+        from nd287_app import gui as G
+        w = self._window(1280)
+        full = "データ数:  ホイール CW 15/37　ホイール CCW 15/37　ウォーム CW 37/37　ウォーム CCW 37/37"
+        forms = G._counts_short_forms(full)
+        self.assertEqual(forms[-1], "ホCW15 ホCCW15 ウCW37 ウCCW37")
+        w.counts.setText(full)
+        fm = w.counts.fontMetrics()
+        w.counts.setMinimumWidth(0)
+        w.counts.resize(fm.horizontalAdvance(forms[-1]) + 8, w.counts.height())
+        w.counts._apply()
+        shown = QtCore_text(w.counts)
+        self.assertEqual(shown, forms[-1])
+        self.assertIn("ウCCW37", shown)
+        self.assertEqual(w.counts.toolTip(), full)
+        self.assertEqual(w.counts.text(), full)
+
+    def test_long_status_message_is_elided_and_does_not_reach_the_right_widgets(self):
+        # 2026-11-25 会社PC: 保存先の長い文字（幅 1940）が省かれず、右の「接続先」に重なった
+        w = self._window(1280)
+        sb = w.statusBar()
+        long = "保存しました: " + "C:\\Users\\AA4344\\AppData\\Local\\ND287分割測定\\測定データ\\" * 6 + "T-001.csv"
+        sb.showMessage(long)
+        for _ in range(5):
+            self.app.processEvents()
+        shown = sb.currentMessage()
+        self.assertIn("…", shown)
+        self.assertEqual(sb.toolTip(), long)
+        self.assertLess(sb.fontMetrics().horizontalAdvance(shown), sb.width())
+        left_of_permanent = min(c.geometry().left() for c in sb.children()
+                                if isinstance(c, type(w.b_diag)) and not c.isHidden())
+        self.assertLessEqual(sb.fontMetrics().horizontalAdvance(shown) + 8, left_of_permanent)
+        sb.showMessage("短い知らせ")
+        self.assertEqual(sb.currentMessage(), "短い知らせ")
+        sb.clearMessage()
+        self.assertEqual(sb.toolTip(), "")
+
 
 def QtCore_text(label):
     from PySide6 import QtWidgets

@@ -190,6 +190,7 @@ DEFAULTS = dict(
     focas_backup_dir="機械バックアップ",  # 控えの置き場所（BASIC・製品データのフォルダの中は不可）
     focas_prog_folder="//CNC_MEM/USER/PATH1/",
     focas_allowed_alarms=["SW0100"],       # これだけなら書けるアラーム（SW0100＝PWE が ON）
+    alarm_ignore={},                       # 無視するアラーム {"21": ["DS0307"], "*": []}（号機ごと・"*"は全部の機械）。赤い帯と書込の点検に出さない
     focas_verified_kinds={"31i": ["byte/none"]},   # 同値書込が済んだ型（実機で確かめたもの）
     focas_families={"31": "31i"},          # 機種(cnc_type) → 手順の割り当て
     focas_write_log_csv=r"マスタ/FOCAS書込ログ.csv",

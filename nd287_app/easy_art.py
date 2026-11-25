@@ -616,3 +616,32 @@ def tile_words():
 def measure_demo():
     """ことばの説明用: 36 か所のうち 10 か所まで入った絵。"""
     return measure(10, 36)
+
+
+# ------------------------------------------------------------------ 機械に入れる（専用の画面）
+
+def kinds(items, ok=True):
+    """見つかった製品の絵。items = [(種別 "回転"/"傾斜", 「80A 200V」など)]。2つなら左右に並べる。"""
+    def one(cx, kind, sub):
+        if kind == "傾斜":
+            pic = (f'<rect x="{cx - 70}" y="150" width="140" height="22" rx="4" fill="{PANEL_EDGE}"/>'
+                   f'<g transform="rotate(-24 {cx} 140)"><rect x="{cx - 62}" y="104" width="124" height="22" rx="4" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+                   f'<circle cx="{cx}" cy="95" r="14" fill="{HERE}"/></g>')
+        else:
+            pic = (f'<ellipse cx="{cx}" cy="140" rx="74" ry="26" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+                   f'<ellipse cx="{cx}" cy="132" rx="62" ry="20" fill="#E3E7EB" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+                   f'<path d="M{cx - 40} 96 A44 22 0 0 1 {cx + 44} 98" fill="none" stroke="{HERE}" stroke-width="7" stroke-linecap="round"/>'
+                   f'<path d="M{cx + 44} 98 l-4 -14 m4 14 l-15 -3" fill="none" stroke="{HERE}" stroke-width="7" stroke-linecap="round"/>')
+        return pic + _t(cx, 214, 26, kind, fill=FG, weight=900) + _t(cx, 244, 16, sub, fill="#59636E")
+    items = list(items)[:2] or [("回転", "")]
+    xs = [260] if len(items) == 1 else [140, 380]
+    body = "".join(one(x, k, s) for x, (k, s) in zip(xs, items))
+    if ok:
+        body += (f'<circle cx="480" cy="34" r="22" fill="{GREEN}"/><path d="M470 35 L477 43 L491 26" fill="none" stroke="#fff" '
+                 f'stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>')
+    return _wide(body, "見つかった製品")
+
+
+def plug(done):
+    """つなぐ: PC と機械。つながったら緑の線とチェック。"""
+    return auto(done, "機械とつながりました" if done else "機械を読んでいます")

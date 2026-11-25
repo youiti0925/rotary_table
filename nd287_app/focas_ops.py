@@ -53,7 +53,7 @@ def estop_mode(for_params=True):
 
 
 def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, backup_info=None,
-                   cnc_id=None, for_params=True):
+                   cnc_id=None, for_params=True, pwe_by_alarm=True):
     """いま機械に書けるか。戻り値 {"ok", "reasons", "pwe"}。理由は全部並べる。
 
     - 運転: run==0（リセット）かつ motion==0。非常停止: パラメータは既定で「非常停止がかかっているときだけ」（estop_mode）。
@@ -61,6 +61,8 @@ def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, bac
     - 控え: この回に取った控えが「完全」で、いまつながっている機械（機械ごとの番号 CNC ID）と同じ。
       CNC ID が取れない機械・控えに CNC ID が無いときは書かない（どの機械か確かめられないため）。
     - PWE: パラメータを書くときは SW0100 が出ていること（アプリは PWE を触らない）。
+      pwe_by_alarm=False のときは SW0100 が無くても止めない（実機21: 書込許可が 1 でも、電源を入れ直すまで SW0100 は出なかった）。
+      その場合は書いてみて、機械が断ったら（戻り値 7）そこで止める（WriteResult.protected）。
     モード（MDI・編集など）では止めない（どのモードで書けるかは確かめていないため、
     推測で禁止しない。戻り値 12＝モード違いが出たらそのとき案内する）。
     """
@@ -90,7 +92,7 @@ def writable_state(status, alarms, *, allowed_alarms=DEFAULT_ALLOWED_ALARMS, bac
         reasons.append("許していないアラームが出ています: "
                        + "、".join(f"{a.get('code')} {a.get('text')}" for a in others))
     pwe = PWE_ALARM in codes
-    if for_params and not pwe:
+    if for_params and not pwe and pwe_by_alarm:
         reasons.append("パラメータ書込が許可されていません。機械のセッティング画面で"
                        "『パラメータ書込』を 1 にしてください（アプリは触りません）")
     if backup_info is None:
@@ -326,6 +328,9 @@ def diagnose(client, settings, last_error=None):
 # ---------------------------------------------------------------------------
 
 POWER_ALARM = "PW0000"          # 電源を入れ直す要求。書込の途中は出てよい（設計 §7.7）
+APC_ALARM = "DS0300"            # APC: 原点復帰が要る。原点の設定ビット（N1815）を書いた結果として出る（実機21 2026-11-25）
+OWN_ALARMS = (POWER_ALARM, APC_ALARM)
+RC_PROTECTED = 7                # EW_PROT（機械が書込を断った）
 JOB_NAME = "書込ジョブ.json"
 PLAN_NAME = "書込後の予定.DAT"
 LOG_HEADER = ["日時", "CNC ID", "号機", "製番", "番号", "ラベル", "旧値", "新値",
@@ -361,8 +366,21 @@ def add_verified_kind(settings, family, key):
     return cur
 
 
-def allowed_codes(settings):
-    return tuple((settings or {}).get("focas_allowed_alarms") or DEFAULT_ALLOWED_ALARMS)
+def ignored_codes(settings, unit):
+    """無視するアラーム（settings の alarm_ignore: {"21": ["DS0307"], "*": [...]}）。号機 unit と "*" の分。"""
+    d = (settings or {}).get("alarm_ignore") or {}
+    out = []
+    for k in ("*", str(unit if unit is not None else "")):
+        out += [str(c).strip().upper() for c in (d.get(k) or []) if str(c).strip()]
+    return tuple(dict.fromkeys(out))
+
+
+def allowed_codes(settings, ignore_unit=None):
+    """書込の点検で許すアラーム。ignore_unit を渡したときだけ、無視するアラーム（ignored_codes）も足す（既定は足さない）。"""
+    base = tuple((settings or {}).get("focas_allowed_alarms") or DEFAULT_ALLOWED_ALARMS)
+    if ignore_unit is None:
+        return base
+    return base + tuple(c for c in ignored_codes(settings, ignore_unit) if c not in base)
 
 
 def same_value(kind, a, b):
@@ -472,7 +490,7 @@ def _read_value(client, it):
     return r["value"], r["kind"]
 
 
-def _gate(client, *, cnc_id, backup_info, allowed):
+def _gate(client, *, cnc_id, backup_info, allowed, pwe_by_alarm=True):
     """書く直前の確認（確認ボタンの瞬間と、1件ごとの直前）。戻り値 (理由の並び, アラーム)。
     つながっている機械の機械ごとの番号（CNC ID）が控えのものと同じこと（取れない機械には書かない）・リセット・非常停止なし・アラームは許したものだけ
     （SW0100＝PWE が出ていること）・控えが完全なこと。"""
@@ -487,7 +505,7 @@ def _gate(client, *, cnc_id, backup_info, allowed):
     if not ident.get("supported"):
         reasons.append("この機種はまだ対応していません")
     w = writable_state(st, al, allowed_alarms=allowed, backup_info=backup_info,
-                       cnc_id=ident.get("cnc_id"))
+                       cnc_id=ident.get("cnc_id"), pwe_by_alarm=pwe_by_alarm)
     reasons += [r for r in w["reasons"] if r not in reasons]
     return reasons, al
 
@@ -514,6 +532,8 @@ class WriteResult:
         self.alarms_after = []
         self.new_alarms = []
         self.power_cycle = False
+        self.ref_return = False       # DS0300（原点復帰が要る）が、この書込の結果として出た
+        self.protected = False        # 機械が書込を断った（戻り値 7）。pwe_by_alarm=False のときの案内用
         self.verify = None
         self.folder = None            # この結果（書込ジョブ.json）がある控えのフォルダ
         # 書込ジョブ.json から探して戻した結果のとき（find_pending_job）だけ入る
@@ -598,7 +618,7 @@ def _log_item(log_path, ctx, cnc_id, it, result_text):
 
 
 def _write_one(client, it, value, *, verified, expect_before, allowed, cnc_id, backup_info,
-               base_alarms):
+               base_alarms, own_alarms=False, pwe_by_alarm=True):
     """1件の流れ。戻り値 (結果, 説明, 増えたアラーム)。結果は ok / alarm / stale / failed /
     mismatch / unknown / refused。it に before / after / rc / touched を書き込む。
 
@@ -608,12 +628,19 @@ def _write_one(client, it, value, *, verified, expect_before, allowed, cnc_id, b
       4. 読む   今の値 == value か
       5. アラームを読む  許した以外（と PW0000 以外）が増えたら止める
     """
-    # 書込の途中は PW0000（電源の入れ直しの要求）が出てよい（設計 §7.7）。ほかは許したものだけ
-    reasons, _al = _gate(client, cnc_id=cnc_id, backup_info=backup_info,
-                         allowed=tuple(allowed) + (POWER_ALARM,))
+    # 書込の途中は PW0000（電源の入れ直しの要求）が出てよい（設計 §7.7）。ほかは許したものだけ。
+    # own_alarms=True のときは DS0300（原点復帰が要る）も出てよい。ただし**この書込を始める前からあったもの**は許さない
+    ok_codes = tuple(allowed) + ((POWER_ALARM,) if not own_alarms else OWN_ALARMS)
+    reasons, al_now = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=ok_codes,
+                            pwe_by_alarm=pwe_by_alarm)
+    base = {_alarm_key(a) for a in base_alarms}
+    if own_alarms:
+        old = [a for a in al_now if a.get("code") in OWN_ALARMS and _alarm_key(a) in base
+               and a.get("code") not in tuple(allowed)]
+        if old:
+            reasons.append("書く前からあったアラームです: " + "、".join(f"{a['code']} {a.get('text', '')}" for a in old))
     if reasons:
         return "refused", "書ける状態ではありません: " + " ／ ".join(reasons), []
-    base = {_alarm_key(a) for a in base_alarms}
     cur, kind = _read_value(client, it)
     it["before"] = cur
     if not _same(kind, cur, expect_before):
@@ -653,7 +680,7 @@ def _write_one(client, it, value, *, verified, expect_before, allowed, cnc_id, b
     if not _same(k2, now, value):
         return "mismatch", f"読み戻しが書いた値と違います（書いた {value}・読み戻し {now}）", []
     new = [a for a in client.call("alarms")["alarms"] if _alarm_key(a) not in base]
-    bad = [a for a in new if a.get("code") not in tuple(allowed) + (POWER_ALARM,)]
+    bad = [a for a in new if a.get("code") not in ok_codes]
     if bad:
         return "alarm", ("許していないアラームが増えました: "
                          + "、".join(f"{a['code']}（種類 {a['type']}・番号 {a['no']}）{a['text']}"
@@ -694,7 +721,8 @@ def _finish_alarms(client, res):
 
 def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None, newtext=None,
               types=None, cancel=None, progress=None, on_item=None, log_path=None, job_path=None,
-              full_check=True, expected=None, unwritable=None):
+              full_check=True, expected=None, unwritable=None,
+              allow_own_power_alarms=False, pwe_by_alarm=True, ignore_unit=None):
     """書込の一覧 items（plan_writes の items）を1件ずつ書く。戻り値は WriteResult。
 
     書く前に、確認済みでない型・書けない値・書ける状態でないことがあれば、機械に1度も書かずに
@@ -703,12 +731,18 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
     点検をここでもう一度する（件数がずれていたら、片側にしか無い番号があれば、1件も書かない）。
     全部書けたら、パラメータを丸ごと吸い出して newtext と全行比べる（full_check）。
     PW0000 が出たら power_cycle=True（電源を入れ直してください、と言うのは呼ぶ側。待たない）。
+
+    allow_own_power_alarms=True: この書込の結果として出た PW0000・DS0300 では、残りの件を書き続ける
+      （書く前からあったアラーム・ほかの新しいアラームでは今までどおり止める）。DS0300 は ref_return=True。
+    pwe_by_alarm=False: 書込の許可を SW0100 の有無では判断しない。書いてみて、機械が断ったら（戻り値 7）止めて protected=True。
+    ignore_unit: 渡すと、settings の alarm_ignore（その号機と "*"）のアラームは、許したアラームとして扱う（既定 None＝無視しない）。
+    どれも既定は今までどおり（ほかの呼び出しは変わらない）。
     """
     ctx = dict(ctx or {})
     prog = progress or (lambda d, t, n: None)
     stop = cancel or (lambda: False)
     ver = verified_list(settings, family)
-    allowed = allowed_codes(settings)
+    allowed = allowed_codes(settings, ignore_unit)
     if not items:
         raise WriteRefused(["書くものがありません"])
     bad = []
@@ -726,7 +760,8 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
                        "（先に『同じ値を書く確認』をしてください）")
     if bad:
         raise WriteRefused(bad)
-    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed)
+    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed,
+                         pwe_by_alarm=pwe_by_alarm)
     if reasons:
         raise WriteRefused(reasons)
 
@@ -741,7 +776,8 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
         prog(i, total, f"N{it['no']:05d} {it['label'] or ''}")
         result, note, new = _safe_write_one(
             client, it, it["new"], verified=ver, expect_before=it["old"], allowed=allowed,
-            cnc_id=cnc_id, backup_info=backup_info, base_alarms=res.alarms_before)
+            cnc_id=cnc_id, backup_info=backup_info, base_alarms=res.alarms_before,
+            own_alarms=allow_own_power_alarms, pwe_by_alarm=pwe_by_alarm)
         _add_new(res.new_alarms, new)
         it["status"] = "ok" if result == "alarm" else result
         it["note"] = note
@@ -756,6 +792,8 @@ def run_write(client, items, *, cnc_id, backup_info, settings, family, ctx=None,
         res.state = "done"
     _finish_alarms(client, res)
     res.power_cycle = any(is_power_alarm(a) for a in res.new_alarms)
+    res.ref_return = any(a.get("code") == APC_ALARM for a in res.new_alarms)
+    res.protected = any(it.get("rc") == RC_PROTECTED and it["status"] in ("failed", "refused") for it in res.items)
     if res.state == "done" and full_check and newtext is not None:
         try:
             res.verify = verify_all(client, newtext, types or {}, res.items, progress=progress)
@@ -886,18 +924,20 @@ def run_undo(client, result, *, cnc_id, backup_info, settings, family, ctx=None,
     return out
 
 
-def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, log_path=None):
+def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, log_path=None,
+                pwe_by_alarm=True, ignore_unit=None):
     """同じ値を書く確認。it の番号の今の値を、そのまま書いて、読み戻して、アラームが増えないことを見る。
 
     値は変わらない。ただし書込なので、呼ぶ側は利用者の確認ボタンを通すこと。通ったら
     add_verified_kind で表に足す（ここでは足さない）。戻り値 {"ok","key","note",...}。
     """
     ctx = dict(ctx or {})
-    allowed = allowed_codes(settings)
+    allowed = allowed_codes(settings, ignore_unit)
     key = it.get("key")
     if not key or it.get("problems"):
         raise WriteRefused(["この番号は確かめられません（型が分からない・書けない行です）"])
-    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed)
+    reasons, al0 = _gate(client, cnc_id=cnc_id, backup_info=backup_info, allowed=allowed,
+                         pwe_by_alarm=pwe_by_alarm)
     if reasons:
         raise WriteRefused(reasons)
     cur, kind = _read_value(client, it)
@@ -914,7 +954,8 @@ def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, 
         return dict(base, ok=False, result="stale", note=note)
     result, note, _new = _safe_write_one(
         client, probe, cur, verified=verified_list(settings, family) + [key], expect_before=cur,
-        allowed=allowed, cnc_id=cnc_id, backup_info=backup_info, base_alarms=al0)
+        allowed=allowed, cnc_id=cnc_id, backup_info=backup_info, base_alarms=al0,
+        pwe_by_alarm=pwe_by_alarm)
     ok = result == "ok"
     probe["status"] = "ok" if ok else result
     probe["note"] = note
@@ -923,7 +964,7 @@ def verify_kind(client, it, *, cnc_id, backup_info, settings, family, ctx=None, 
     after = probe.get("after")
     changed = bool(probe["touched"] and after is not None and not _same(kind, after, cur))
     return dict(base, ok=ok, result=result, note=note, touched=probe["touched"], changed=changed,
-                now=after)
+                now=after, rc=probe.get("rc"), protected=(not ok and probe.get("rc") == RC_PROTECTED))
 
 
 def verify_undo_result(out, cnc_id=None):
@@ -1484,3 +1525,13 @@ def describe_program_send(res):
         else:
             out.append(f"{it['name']}: {it['note']}")
     return out
+
+
+def write_trial(client, it, *, cnc_id, backup_info, settings, family, ctx=None, log_path=None, ignore_unit=None):
+    """書き試し: 1件の今の値をそのまま書いて読み戻す（値は変わらない）。SW0100 では判断せず、機械が断るか（戻り値 7）で決める。
+
+    it は plan_writes の1行（型が分かって問題の無いもの）。呼ぶ側は人の確認ボタンを通すこと。
+    戻り値は verify_kind と同じ dict（protected=True なら機械が書込を断った）。
+    """
+    return verify_kind(client, it, cnc_id=cnc_id, backup_info=backup_info, settings=settings, family=family,
+                       ctx=ctx, log_path=log_path, pwe_by_alarm=False, ignore_unit=ignore_unit)

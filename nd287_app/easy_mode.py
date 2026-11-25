@@ -745,6 +745,10 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _update_alarm_button(self):
         """どの手順にも出る「アラーム」。出ているときは赤く件数。読めていないときは、出ているともいないとも言わない。"""
         alarms = (self.st or {}).get("alarms")
+        if alarms:
+            from . import easy_machine_in
+            from . import alarm_watch
+            alarms = easy_machine_in.split_alarms(alarm_watch.normalize(alarms), self._alarm_settings(), self._ignore_unit())[0]
         here = STEPS[self.i]["id"] == "alarm_look"
         self.b_alarm.setVisible(not here)
         if alarms:
@@ -1175,9 +1179,44 @@ class EasyModeDialog(QtWidgets.QDialog):
         from . import focas_ops
         return focas_ops.allowed_codes(self._alarm_settings())
 
-    def _alarm_now(self):
+    def _ignore_unit(self):
+        return str(self.ctx.get("unit") or "")
+
+    def _alarm_all(self):
         from . import alarm_watch
         return alarm_watch.normalize(self.st.get("alarms"))
+
+    def _alarm_now(self):
+        """出すアラーム（無視中のものは除く。無視中は _alarm_hidden）。"""
+        from . import easy_machine_in
+        return easy_machine_in.split_alarms(self._alarm_all(), self._alarm_settings(), self._ignore_unit())[0]
+
+    def _alarm_hidden(self):
+        from . import easy_machine_in
+        return easy_machine_in.split_alarms(self._alarm_all(), self._alarm_settings(), self._ignore_unit())[1]
+
+    def _alarm_ignore(self, code):
+        from . import easy_machine_in
+        easy_machine_in.add_ignore(self._alarm_settings(), self._ignore_unit(), code)
+        self._alarm_save_settings()
+        self._al["key"] = None
+        self._alarm_sync()
+        self._refresh()
+
+    def _alarm_unignore(self, code):
+        from . import easy_machine_in
+        easy_machine_in.remove_ignore(self._alarm_settings(), self._ignore_unit(), code)
+        self._alarm_save_settings()
+        self._al["key"] = None
+        self._alarm_sync()
+        self._refresh()
+
+    def _alarm_save_settings(self):
+        """無視の一覧を設定に残す（試験では差しかえる）。"""
+        try:
+            self.host.easy_save_settings()
+        except Exception:
+            pass
 
     def _alarm_unread(self):
         """つながっているのに、アラームを読めなかった（None）。「アラームなし」とは別。"""
@@ -1218,6 +1257,12 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_alarm = self._al_label()
         self.lbl_alarm.setObjectName("line")
         self.extra.addWidget(self.lbl_alarm)
+        self.b_al_ignore = QtWidgets.QPushButton("この機械では無視する")
+        self.b_al_ignore.setObjectName("sub")
+        self.b_al_ignore.setCursor(QtCore.Qt.PointingHandCursor)
+        self.b_al_ignore.clicked.connect(lambda: self._al["sel"] and self._alarm_ignore(self._al["sel"]["code"]))
+        self.b_al_ignore.setVisible(False)
+        self.extra.addWidget(self.b_al_ignore)
         self.b_al_check = self._act_button("やりました。確かめる ▶", self._alarm_check)
         self.b_al_check.setVisible(False)
         self.lbl_al_result = self._al_label("font-size:15px; font-weight:bold; color:#17212B;")
@@ -1277,7 +1322,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         now = self._alarm_now()
         online = bool(self.st.get("online"))
         unread = self._alarm_unread()
-        key = (online, unread) + tuple((a["code"], a["text"], a["axis"]) for a in now)
+        hidden = self._alarm_hidden()
+        key = (online, unread) + tuple((a["code"], a["text"], a["axis"]) for a in now) + tuple(a["code"] for a in hidden)
         if key == self._al["key"]:
             return
         self._al["key"] = key
@@ -1307,6 +1353,19 @@ class EasyModeDialog(QtWidgets.QDialog):
             leg = self._al_label("color:#5A6876; font-size:12px;")
             leg.setText("▲ 異常　● 異常ではない")
             self.alarm_list.addWidget(leg)
+        for a in (hidden if online else []):                # 無視中: 小さな灰色の1行（消さない。やめられる）
+            row = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            gl = self._al_label("color:#5A6876; font-size:12px;")
+            gl.setText(f"無視中: {a['code']}")
+            hl.addWidget(gl)
+            bu = QtWidgets.QPushButton("無視をやめる")
+            bu.setObjectName("sub")
+            bu.clicked.connect(lambda _=False, c=a["code"]: self._alarm_unignore(c))
+            hl.addWidget(bu)
+            hl.addStretch(1)
+            self.alarm_list.addWidget(row)
         self.alarm_list.addStretch(1)
 
     def _alarm_reread(self):
@@ -1351,6 +1410,8 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_al_big.setVisible(True)
         self.lbl_alarm.setText("\n".join(lines))
         self.b_al_check.setVisible(not normal)
+        self.b_al_ignore.setVisible(not normal)
+        self.b_al_ignore.setText("この機械では無視する" if self._ignore_unit() else "全部の機械で無視する")
         self.e_alarm.blockSignals(True)
         self.e_alarm.setText("")
         self.e_alarm.blockSignals(False)
@@ -1623,6 +1684,10 @@ class EasyModeDialog(QtWidgets.QDialog):
 
     def _update_strip(self):
         w = self._wiz
+        if type(w).__name__ == "MachineInPanel":
+            self.strip.setVisible(False)
+            return
+        self.strip.setVisible(True)
         try:
             b = w.guide_brief()
         except Exception:
@@ -1823,6 +1888,22 @@ class EasyModeDialog(QtWidgets.QDialog):
         c = self._all_ctx()
         if self._wiz is not None or c.get("handoff") or c.get("skip_machine"):
             return
+        env = None
+        try:
+            env = self.host.easy_machine_in_env()
+        except Exception:
+            env = None
+        if env:                                            # 専用の画面（つなぐ→伝票番号→決まったこと→書く）
+            from .easy_machine_in_ui import MachineInPanel
+            panel = MachineInPanel(env, self.embed)
+            self.strip.setVisible(False)
+            self.embed.layout().addWidget(panel, 1)
+            panel.finished.connect(self._wizard_finished)
+            self._wiz = panel
+            if self.poller is not None:
+                self.poller.pause()
+            panel.start()
+            return
         w = self.host.easy_make_wizard(self.embed)
         w.embedded = True                                  # 長い説明は出さない（上の絵と短い言葉が案内する）
         w.setWindowFlags(QtCore.Qt.Widget)
@@ -1848,8 +1929,14 @@ class EasyModeDialog(QtWidgets.QDialog):
         w = self._wiz
         if w is None or self._wiz_closing:
             return
-        res = self.host.easy_wizard_result(w) or {}
+        res = (w.result() if type(w).__name__ == "MachineInPanel" else self.host.easy_wizard_result(w)) or {}
         self._drop_wizard()
+        if res.get("unit"):
+            self.ctx["unit"] = res["unit"]
+        if res.get("program_manual"):                      # 新しい画面は、パラメータだけを入れる。測定プログラムは機械で用意する
+            self.ctx["prog"] = "manual"
+        if res.get("cycled") and res.get("program_manual"):
+            self.ctx["cycled"] = True                      # 電源の入れ直しは、画面の中で済んだ（そのあとの原点復帰は次の手順）
         if res.get("handoff"):
             self.ctx["handoff"] = True
         if res.get("cycled"):

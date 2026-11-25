@@ -15366,6 +15366,19 @@ class MainWindow(QtWidgets.QMainWindow):
         """かんたん作成を作る（はじめてモードが、自分の画面の中に入れる）。"""
         return ParamWizardDialog(parent, self.settings, model=self.e_model.text().strip(), probe_machine=True)
 
+    def easy_machine_in_env(self):
+        """はじめてモードの「機械に入れる」専用画面に渡すもの（easy_machine_in_ui）。"""
+        def set_model(m):
+            if self.e_model.text().strip() != m:
+                self.e_model.setText(m)
+                self.on_model_entered()
+        return {"settings": self.settings, "set_model": set_model, "save_settings": self.easy_save_settings}
+
+    def easy_save_settings(self):
+        """無視するアラーム・確かめた型など、設定に残すものを保存する。"""
+        from . import settings as S
+        S.save_settings(self.settings)
+
     def easy_param_list(self):
         """パラメータを手で打つ人に、番号と値の一覧を見せる（かんたん作成の「全部表示」。設定の表示方法は変えない）。"""
         w = ParamWizardDialog(self, self.settings, model=self.e_model.text().strip())

@@ -645,3 +645,35 @@ def kinds(items, ok=True):
 def plug(done):
     """つなぐ: PC と機械。つながったら緑の線とチェック。"""
     return auto(done, "機械とつながりました" if done else "機械を読んでいます")
+
+
+def _gear(cx, cy, r, teeth=10, fill=KEY, stroke=PANEL_EDGE):
+    """歯車（まるに歯を描く）。"""
+    pts = ""
+    for i in range(teeth * 2):
+        rr = r if i % 2 == 0 else r * 0.78
+        for a in (i * 180 / teeth - 4, i * 180 / teeth + 4):
+            x, y = _pol(cx, cy, rr, a)
+            pts += f"{x:.1f},{y:.1f} "
+    return (f'<polygon points="{pts.strip()}" fill="{fill}" stroke="{stroke}" stroke-width="2.5" stroke-linejoin="round"/>'
+            f'<circle cx="{cx}" cy="{cy}" r="{r * 0.28:.1f}" fill="{PANEL}" stroke="{stroke}" stroke-width="2"/>')
+
+
+def choice_measure_kind(kind):
+    """測定の種類: モーター（モーターと小さな歯車）／駆動装置（歯車がかみ合う箱）／フルクロ（目盛りの円盤と検出器）。"""
+    if kind == "セミ・モーター":
+        body = (f'<rect x="38" y="26" width="64" height="34" rx="6" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+                f'<rect x="102" y="38" width="18" height="10" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="2"/>'
+                + _gear(144, 43, 22, 9) + _t(70, 48, 13, "M", fill=FG))
+    elif kind == "セミ・駆動装置":
+        body = (f'<rect x="40" y="10" width="120" height="66" rx="10" fill="none" stroke="{PANEL_EDGE}" stroke-width="3" stroke-dasharray="6 4"/>'
+                + _gear(80, 44, 22, 9, fill=KEY) + _gear(122, 44, 18, 8, fill=PANEL))
+    else:
+        body = (f'<circle cx="92" cy="43" r="31" fill="{KEY}" stroke="{PANEL_EDGE}" stroke-width="3"/>')
+        for a in range(0, 360, 20):
+            x1, y1 = _pol(92, 43, 31, a)
+            x2, y2 = _pol(92, 43, 24, a)
+            body += f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{INK}" stroke-width="2"/>'
+        body += (f'<rect x="132" y="30" width="30" height="26" rx="5" fill="{PANEL}" stroke="{HERE}" stroke-width="3"/>'
+                 f'<line x1="132" y1="43" x2="118" y2="43" stroke="{HERE}" stroke-width="3"/>')
+    return _svg(200, 86, body, "測定の種類")

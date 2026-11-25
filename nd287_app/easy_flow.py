@@ -245,7 +245,7 @@ def done_now(step_id, st, ctx, track=None):
     if step_id == "choose":
         return bool(ctx.get("params")) and bool(ctx.get("prog"))
     if step_id == "cond_check":
-        return not ctx.get("cond_missing")
+        return not ctx.get("cond_missing") and not ctx.get("kind_missing")
     if step_id == "cond_kind":
         return bool(ctx.get("cond_kind")) and ctx.get("cond_tilt") is not None and not ctx.get("cond_missing")
     if step_id in ("cond_div", "cond_rep"):

@@ -142,12 +142,36 @@ def handoff(masters, model, plan):
     return {"model": master_model(masters, model, tilt), "steps": steps}
 
 
-def repeat_conditions(masters, model, tilt):
+def _kind_rec(kind_table, model, tilt, kind, scale):
+    """種類（モーター／駆動装置／フルクロ）で引くとき: (使う: bool, 行, 種類名)。
+    kind が空・表が無い・この型式に種類の登録が無いときは、使わない（今までどおり）。"""
+    from . import kind_conditions as K
+    if not kind or not kind_table or not K.kinds_of(kind_table, str(model or "").strip(), bool(tilt)):
+        return False, None, ""
+    name = K.normalize_kind(kind) or kind
+    rec = K.find(kind_table, str(model).strip(), bool(tilt), kind, scale or "")
+    if rec is not None and rec.get("測定の種類") != name:   # 種類の行が無くて「種類なし」の行が返った: 別の登録を黙って使わない
+        rec = None
+    return True, rec, name
+
+
+def repeat_conditions(masters, model, tilt, kind="", scale="", kind_table=None):
     """型式の再現性の条件。{"blocks":[角度…], "repeats":回数, "source":説明} か None。
 
     ユーザー登録CSV（回転は user_rotary_repeat・傾斜は user_tilt_repeat。別ファイル）。
-    測定条件のエントリ自体が blocks と repeats を持っていれば、それも使う。"""
+    測定条件のエントリ自体が blocks と repeats を持っていれば、それも使う。
+    kind（種類）があり、その型式に種類の登録があるときは、種類別の表の再現性だけを使う
+    （その種類に再現性が無ければ None。ほかの種類・今までの登録の値は使わない）。"""
     masters = masters or {}
+    use, krec, kname = _kind_rec(kind_table, model, tilt, kind, scale)
+    if use:
+        from . import kind_conditions as K
+        r = K.repeat(krec) if krec else None
+        if not r:
+            return None
+        blocks = tilt_blocks(r["start"], r["end"], r["blocks_n"])
+        return {"blocks": blocks, "repeats": r["repeats"],
+                "source": f"種類別の登録（{kname}）の再現性（{r['blocks_n']}箇所×{r['repeats']}回）"}
     key = "user_tilt_repeat" if tilt else "user_rotary_repeat"
     rec = _find(masters.get(key), model)
     if rec:
@@ -165,12 +189,32 @@ def repeat_conditions(masters, model, tilt):
     return None
 
 
-def division_conditions(masters, model, tilt):
+def division_conditions(masters, model, tilt, kind="", scale="", kind_table=None):
     """型式の分割の条件。{"params":{…}, "cond":測定条件1件か None, "source":説明} か None。
 
     回転: ユーザー登録の回転条件 → 無ければ 測定条件.csv（アプリの測定画面と同じ順）。
-    傾斜: ユーザー登録の傾斜条件だけ（回転の条件は傾斜に使わない）。"""
+    傾斜: ユーザー登録の傾斜条件だけ（回転の条件は傾斜に使わない）。
+    kind（種類）があり、その型式に種類の登録があるときは、種類別の表の値だけを使う。
+    刻みが決まらないとき（_ok が False）は、10° などへ黙って落とさず、
+    {"params": None, "cond": None, "source": "", "error": 理由} を返す（プログラムは作らない）。"""
     masters = masters or {}
+    use, krec, kname = _kind_rec(kind_table, model, tilt, kind, scale)
+    if use:
+        from . import kind_conditions as K
+        if krec is None:
+            return {"params": None, "cond": None, "source": "",
+                    "error": f"{kname}の測り方が登録されていません"}
+        p = K.params(krec, bool(tilt))
+        if not p.get("_ok"):
+            return {"params": None, "cond": None, "source": "",
+                    "error": f"{kname}の刻みが決まりません（登録の「{'刻み' if tilt else 'ホイール刻み'}」"
+                             "が空で、歯数からも決められません）"}
+        if not tilt:
+            p.update(wheel_start=0.0, wheel_end=360.0)
+        src = f"種類別の登録（{kname}）"
+        if p.get("_note"):
+            src += "：" + p["_note"]
+        return {"params": p, "cond": None, "source": src}
     if tilt:
         rec = _find(masters.get("user_tilt"), model)
         if not rec:
@@ -347,7 +391,8 @@ def build_programs(choice, slots, *, settings, div, rep, model, tilt, eob=None):
     return out
 
 
-def make_plan(settings, masters, model, kinds, *, tilt=None, choice=None, numbers=None, eob=None):
+def make_plan(settings, masters, model, kinds, *, tilt=None, choice=None, numbers=None, eob=None,
+              kind="", scale="", kind_table=None):
     """段④の中身を全部決める。画面は、この結果を出すだけ。
 
     tilt    … None なら製品の種別（kinds）から自動。True/False は人が選び直したとき。
@@ -360,8 +405,13 @@ def make_plan(settings, masters, model, kinds, *, tilt=None, choice=None, number
     auto_tilt, kind_note, ambiguous = decide_kind(kinds)
     if tilt is None:
         tilt = auto_tilt
-    div = division_conditions(masters, model, tilt)
-    rep = repeat_conditions(masters, model, tilt)
+    div = division_conditions(masters, model, tilt, kind, scale, kind_table)
+    rep = repeat_conditions(masters, model, tilt, kind, scale, kind_table)
+    if div and div.get("error"):                          # 種類の条件が決まらない: 作らない・理由を出す（10° に落とさない）
+        return dict(tilt=tilt, kind_note=kind_note, ambiguous=ambiguous, has_division=False,
+                    has_repeat=rep is not None, allowed=[], choice="", why=div["error"], slots=[],
+                    programs=[], problems=[div["error"]], notes=[], div_source="",
+                    rep_source=(rep or {}).get("source", ""))
     allowed, auto_choice, why = default_choice(
         div is not None, rep is not None, str(settings.get("wizard_prog_choice", "") or ""))
     if choice in allowed:

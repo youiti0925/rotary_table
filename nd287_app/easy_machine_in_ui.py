@@ -1315,6 +1315,15 @@ class MachineInPanel(QtWidgets.QWidget):
                 m = ""
         return m
 
+    def _kind_args(self):
+        """測り方の段で選んだ測定の種類（モーター／駆動装置／フルクロ）と、種類別の表。選んでいなければ ("", "", None)。"""
+        try:
+            kind, scale = self.env["kind_fn"]() if self.env.get("kind_fn") else ("", "")
+            table = self.env["kind_table_fn"]() if (kind and self.env.get("kind_table_fn")) else None
+        except Exception:
+            return "", "", None
+        return (kind or ""), (scale or ""), (table if kind else None)
+
     def _skip_params(self):
         """［パラメータは書かない］: 書き込みも電源の入れ直しもしないで、測定プログラムだけ送る。"""
         if self._busy:
@@ -1331,8 +1340,10 @@ class MachineInPanel(QtWidgets.QWidget):
 
     def _prog_make_plan(self):
         try:
+            kind, scale, table = self._kind_args()
             self.prog_plan = M.prog_plan(self.settings, self._model(), [p["kind"] for p in self.products],
-                                         tilt=self._prog_tilt, choice=self._prog_choice, masters_dict=self._masters())
+                                         tilt=self._prog_tilt, choice=self._prog_choice, masters_dict=self._masters(),
+                                         kind=kind, scale=scale, kind_table=table)
         except Exception as e:
             self.prog_plan = {"problems": [f"測定プログラムを作れませんでした: {e}"], "programs": [], "slots": [], "allowed": [],
                               "choice": "", "ambiguous": False, "tilt": False}

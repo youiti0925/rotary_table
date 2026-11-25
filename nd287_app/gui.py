@@ -124,6 +124,9 @@ from . import focas_backup, focas_client, focas_ops, focas_find
 from . import wizard_steps as W
 from . import flow_guide
 from . import wizard_programs as WP
+from . import kind_runtime as KR
+from . import serial_suffix as SS
+from .serial_suffix_ui import SuffixPanel
 from . import controllers
 from . import wizard_probe
 from . import machine_decide
@@ -6130,9 +6133,11 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
     _semi_ref_done = QtCore.Signal(int, object)      # 同じ型式のセミクロ実物の探索が終わった（世代, 結果）
 
-    def __init__(self, parent, settings, *, model="", probe_machine=False):
+    def __init__(self, parent, settings, *, model="", probe_machine=False, kind="", kind_table=None):
         super().__init__(parent)
         self.settings = settings
+        self._kind = kind or ""                      # 測定の種類（モーター／駆動装置／フルクロ。""=今までどおり）
+        self._kind_table = kind_table                # 種類別の表（None なら、使うときに設定の場所から読む）
         self._semi_gen = 0                          # セミクロ実物の探索の世代（古い結果は捨てる）
         self._semi_refs = {}                        # {ファイルの番号: 実物の探索結果}
         self._semi_info = {}
@@ -8825,6 +8830,17 @@ class ParamWizardDialog(QtWidgets.QDialog):
         p = str(self.settings.get("prog_log_csv") or "")
         return Path(p) if p else app_dir() / WP.LOG_NAME
 
+    def _p_kind_table(self):
+        """種類を選んでいるときだけ、種類別の表を返す（選んでいなければ None＝今までどおり）。"""
+        if not self._kind:
+            return None
+        if self._kind_table is None:
+            try:
+                self._kind_table = KR.load_table(self.settings, self._p_masters or None)
+            except Exception:
+                self._kind_table = {"rotary": [], "tilt": [], "plan": [], "problems": []}
+        return self._kind_table
+
     def _p_model(self):
         model = self.e_model.text().strip()
         if not model:
@@ -8914,7 +8930,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         try:
             kinds = [f["kind"] for f in self._selected_files()]
             plan = WP.make_plan(self.settings, self._p_masters or {}, self._p_model(), kinds,
-                                tilt=self._p_tilt, choice=self._p_choice, numbers=self._p_numbers())
+                                tilt=self._p_tilt, choice=self._p_choice, numbers=self._p_numbers(),
+                                kind=self._kind, kind_table=self._p_kind_table())
             self._p_plan = plan
             self.lbl_p_kind.setText(plan["kind_note"])
             self.cmb_p_kind.setVisible(plan["ambiguous"])
@@ -13280,6 +13297,22 @@ class MainWindow(QtWidgets.QMainWindow):
         info_grid.addWidget(self.e_operator, 3, 1)
         info_grid.addWidget(QtWidgets.QLabel("温度℃"), 4, 0)
         info_grid.addWidget(self.e_temp, 4, 1)
+        # 測定の種類（モーター／駆動装置／フルクロ）。型式に種類の登録があるときだけ出す
+        self.l_kind = QtWidgets.QLabel("測定の種類")
+        self.cmb_kind = QtWidgets.QComboBox()
+        self.cmb_kind.setToolTip("この型式には、種類別（モーター／駆動装置／フルクロ）の測り方が登録されています。")
+        self.cmb_kind.currentIndexChanged.connect(self._on_kind_combo)
+        info_grid.addWidget(self.l_kind, 5, 0)
+        info_grid.addWidget(self.cmb_kind, 5, 1)
+        self.l_kind.setVisible(False)
+        self.cmb_kind.setVisible(False)
+        self.suffix_sel = SS.Selection()          # 機番の末尾（社内の表）で選んだもの。画面の表（複数）で共有する
+        self._suffix_panels = []
+        self.suffix_semi = False                  # かんたん作成で「セミクロにする」を選んだ
+        self.suffix_motor = ""                    # モーターの種類: ""=自動（正規）／driver／temp／normal
+        self.measure_kind = ""        # 選んだ測定の種類（kind_conditions の種類名。""=選ばない）
+        self.measure_scale = ""
+        self.kind_table = {"rotary": [], "tilt": [], "plan": [], "problems": []}
         info_grid.setColumnStretch(2, 1)  # 右に余白を作って左へ寄せる
 
         # ===== 測定条件グループ =====
@@ -13881,6 +13914,14 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
         lv.addLayout(top_left, 0)
+        # 機番の末尾（社内の表）。保存する名前を、いつも見える所で選べる（機番の欄の下）
+        self.lbl_save_name = QtWidgets.QLabel("")
+        self.lbl_save_name.setStyleSheet("font-weight:bold;")
+        lv.addWidget(self.lbl_save_name, 0)
+        self.suffix_panel = self.make_suffix_panel(left_col)
+        lv.addWidget(self.suffix_panel, 0)
+        self.e_machine.textChanged.connect(lambda *_: self.refresh_save_name())
+        self.apply_auto_suffix()
         lv.addWidget(self.bar_scroll, 0)
         lv.addWidget(plots_widget, 1)       # グラフは左下で縦に大きく
 
@@ -13982,6 +14023,11 @@ class MainWindow(QtWidgets.QMainWindow):
             msg = f"型式マスタの読み込みに失敗: {ex}"
             self.masters = None
             QtCore.QTimer.singleShot(0, lambda: self.statusBar().showMessage(msg))
+        self.lbl_kind_problem = QtWidgets.QLabel("")
+        self.lbl_kind_problem.setStyleSheet("color:#B02A20; font-weight:bold;")
+        self.lbl_kind_problem.setVisible(False)
+        self.statusBar().addPermanentWidget(self.lbl_kind_problem)
+        self.reload_kind_table()
         # 設定ファイルが壊れていて既定値で起動した場合は必ず知らせる。
         # 黙っていると、次に設定を保存した時点で本番の設定が消える。
         err = self.settings.get("_load_error")
@@ -14170,8 +14216,187 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"マスタ再読込に失敗: {e}")
             return
+        self.reload_kind_table()
         if warn:
             self.warn_missing_masters()
+
+    # ----- 測定の種類（モーター／駆動装置／フルクロ） -----
+
+    def reload_kind_table(self):
+        """種類別の表を読み直す。無ければ、今までの登録を写して1回だけ作る（ある表は上書きしない）。
+        読めない行・重なりは、状態欄に赤字で出す（黙らない）。"""
+        try:
+            self.kind_table = KR.load_table(self.settings, getattr(self, "masters", None))
+        except Exception as e:
+            self.kind_table = {"rotary": [], "tilt": [], "plan": [], "problems": [f"種類別の表を読めません: {e}"]}
+        text = KR.problems_text(self.kind_table)
+        lb = getattr(self, "lbl_kind_problem", None)
+        if lb is not None:
+            lb.setText(text)
+            lb.setToolTip("\n".join(self.kind_table.get("problems") or []))
+            lb.setVisible(bool(text))
+        if text:
+            self.statusBar().showMessage(text, 20000)
+        self.refresh_kind_choices()
+        self.apply_auto_suffix()
+
+    # ----- 機番の末尾（社内の表 serial_suffix）。セミ・フルどちらの保存にも付く -----
+
+    def suffix_auto_args(self):
+        """画面の状態から決まる記号。モーター=駆動装置（種類）／仮（かんたん作成で選んだ）／正規、
+        クランプ=設定（クランプ分割）、測る種類=フルクロ→クローズ（C）だけ・セミクロ→なし。単品・完組は人が押したときだけ。"""
+        kind = self.active_kind()
+        semi = KR.is_semi(kind) or bool(getattr(self, "suffix_semi", False))      # かんたん作成でセミクロにした製品も
+        if kind == "セミ・駆動装置":
+            motor = "driver"
+        else:
+            motor = self.suffix_motor if self.suffix_motor in ("driver", "temp", "normal") else "normal"
+        clamp = bool(self.settings.get("fanuc_clamp_enabled", False))
+        kinds = [] if semi else ["close"]            # 単品（傾斜T・回転R）・完組は自動では選ばない。人が表で押したときだけ
+        return dict(motor=motor, clamp=clamp, kinds=kinds, multi_axis=1, ng=0)
+
+    def apply_auto_suffix(self):
+        """自動で決まる記号を選んだ状態にする（人が表で選び直したものは、型式・モード・種類が変わるまで残る）。"""
+        try:
+            a = self.suffix_auto_args()
+            SS.suffix(**a)
+        except Exception:
+            a = dict(motor="normal", clamp=False, kinds=[], multi_axis=1, ng=0)
+        self.suffix_sel.__init__(**a)
+        self._suffix_sync_panels()
+
+    def make_suffix_panel(self, parent=None):
+        """機番末尾の表（SuffixPanel）。画面ごとに作るが、選んだ状態は1つを共有する。"""
+        p = SuffixPanel(parent, selection=self.suffix_sel, compact=True)
+        # 見出しは2文字ずつ折り返す（幅が狭くても切れない）
+        from .serial_suffix_ui import COLUMNS
+        heads = [(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
+        p.picker.tbl.setHorizontalHeaderLabels(heads)
+        p.picker.tbl.horizontalHeader().setMinimumHeight(40)
+        p.picker.tbl.setMinimumHeight(235)                 # 行見出し（2行）が切れない高さ
+        p.picker.changed.connect(self._suffix_changed)
+        self._suffix_panels.append(p)
+        return p
+
+    def _suffix_sync_panels(self):
+        alive = []
+        for p in self._suffix_panels:
+            try:
+                p.picker.sel = self.suffix_sel
+                p.picker.spin_ng.blockSignals(True)
+                p.picker.spin_ng.setValue(self.suffix_sel.ng)
+                p.picker.spin_ng.blockSignals(False)
+                p.picker._refresh()
+                alive.append(p)
+            except RuntimeError:                  # 閉じた画面の表
+                pass
+        self._suffix_panels = alive
+        self.refresh_save_name()
+
+    def _suffix_changed(self, *_):
+        self._suffix_sync_panels()
+
+    def save_file_no(self):
+        """保存に使う名前（機番＋末尾）。斜線の組み合わせなどで作れないときは ValueError。"""
+        return str(self.e_machine.text().strip()) + self.suffix_sel.suffix()
+
+    def refresh_save_name(self):
+        lb = getattr(self, "lbl_save_name", None)
+        if lb is None:
+            return
+        try:
+            name = self.save_file_no()
+            text = f"保存する名前: {name}（機番 {self.e_machine.text().strip() or '未入力'} ＋ 末尾 {self.suffix_sel.suffix() or 'なし'}）"
+        except ValueError as e:
+            text = f"保存する名前を作れません: {e}"
+        full = text + "　" + KR.NAME_NOTE
+        lb.setText(full)
+        alive = []
+        for x in getattr(self, "_save_name_labels", []):          # ほかの画面（はじめてモード）の名前の表示も同じ文にそろえる
+            try:
+                x.setText(full)
+                alive.append(x)
+            except RuntimeError:
+                pass
+        self._save_name_labels = alive
+
+    def register_save_name_label(self, label):
+        """保存する名前を出すラベルを登録する（末尾が変わるたびに、ここで一斉に更新する）。"""
+        self._save_name_labels = getattr(self, "_save_name_labels", []) + [label]
+        self.refresh_save_name()
+
+    def active_kind(self):
+        """いま使う測定の種類。型式に種類の登録が無ければ ""（今までどおり）。"""
+        k = getattr(self, "measure_kind", "")
+        if k and k in KR.kinds_for(getattr(self, "kind_table", None), self.e_model.text().strip(), self.is_tilt()):
+            return k
+        return ""
+
+    def refresh_kind_choices(self):
+        """画面の型式・モードに合わせて、種類の選び方を作り直す（種類の登録が無ければ隠す）。"""
+        if not hasattr(self, "cmb_kind"):
+            return
+        kinds = KR.kinds_for(self.kind_table, self.e_model.text().strip(), self.is_tilt())
+        if self.measure_kind not in kinds:
+            self.measure_kind = ""
+        self.cmb_kind.blockSignals(True)
+        self.cmb_kind.clear()
+        if kinds:
+            self.cmb_kind.addItem("（選ばない・今までの登録）", "")
+            for k in kinds:
+                self.cmb_kind.addItem(KR.label(k), k)
+            self.cmb_kind.setCurrentIndex(max(0, self.cmb_kind.findData(self.measure_kind)))
+        self.cmb_kind.blockSignals(False)
+        self.l_kind.setVisible(bool(kinds))
+        self.cmb_kind.setVisible(bool(kinds))
+
+    def _on_kind_combo(self, _i):
+        self.measure_kind = self.cmb_kind.currentData() or ""
+        self.on_model_entered()
+
+    def set_measure_kind(self, kind):
+        """はじめてモードなどから、測定の種類を入れる。"""
+        self.measure_kind = kind or ""
+        self.refresh_kind_choices()
+        self.apply_auto_suffix()
+        self.on_model_entered()
+
+    def _apply_kind_conditions(self, text):
+        """種類を選んでいるとき、その種類の測り方を画面へ入れる。使ったら True（今までの登録は使わない）。
+        刻みが決まらないときは、何も入れず理由を出す（黙って 10° などにしない）。"""
+        kind = self.active_kind()
+        if not kind:
+            return False
+        tilt = self.is_tilt()
+        rec, p, err = KR.resolve(self.kind_table, text, tilt, kind, self.measure_scale)
+        if rec is None or err:
+            self.statusBar().showMessage(f"{text} {KR.label(kind)}: {err or '測り方が登録されていません'}", 20000)
+            return True
+        self.master_cond = None
+        self.master_judge = find_entry(self.masters["judgement"], text) if (self.masters and not tilt) else None
+        msgs = [f"{KR.label(kind)}の測り方を適用"]
+        if not self.is_repeat():
+            if tilt:
+                self.e_wstart.setValue(p["wheel_start"])
+                self.e_wend.setValue(p["wheel_end"])
+            self.e_wheel.setValue(p["wheel_pitch"])
+            self.e_worm.setValue(p["worm_pitch"])
+            self.e_range.setValue(p["worm_range"])
+            self.e_start.setValue(p["worm_start"])
+            self._populate_order_list()
+            msgs.append(f"ホイール{p['wheel_pitch']:g}°刻み" + (f"（{p['_note']}）" if p.get("_note") else ""))
+        if self.is_repeat() or self.is_combined():
+            r = KR.K.repeat(rec)
+            if r:
+                self.e_blocks.setValue(r["blocks_n"])
+                self.e_repeats.setValue(r["repeats"])
+                self.e_rstart.setValue(r["start"])
+                self.e_rend.setValue(r["end"])
+                msgs.append(f"再現性 {r['blocks_n']}箇所×{r['repeats']}回")
+            else:
+                msgs.append("この種類の再現性は登録されていません")
+        self.statusBar().showMessage(f"{text} " + "・".join(msgs), 15000)
+        return True
 
     def warn_missing_masters(self):
         """型式マスタ（測定条件/合否判定）が指定の場所に無ければ、はっきり警告する。"""
@@ -14192,6 +14417,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if model is None or isinstance(model, bool):
             model = self.e_model.text().strip() if hasattr(self, "e_model") else ""
         KindConditionDialog(self, self.settings, model=model or "").exec()
+        self.reload_kind_table()          # 登録し直したあとの表を読み直す（問題があれば状態欄に出る）
+        if self.active_kind():
+            self.on_model_entered()
+
+    def easy_kind_state(self):
+        """はじめてモードの「測り方」の段へ渡す、測定の種類の状態。
+        {"model","kinds":[{"kind","label","hint","semi"}…],"kind":選んだ種類 or "","error":決まらない理由 or "","problems":表の問題の文}"""
+        model = self.e_model.text().strip()
+        tilt = self.is_tilt()
+        kinds = KR.kinds_for(self.kind_table, model, tilt)
+        cur = self.active_kind()
+        err = ""
+        if cur:
+            _rec, _p, err = KR.resolve(self.kind_table, model, tilt, cur, self.measure_scale)
+        return dict(model=model, kind=cur, error=err, problems=KR.problems_text(self.kind_table),
+                    kinds=[dict(kind=k, label=KR.label(k), hint=KR.HINT.get(k, ""), semi=KR.is_semi(k)) for k in kinds])
+
+    def easy_set_kind(self, kind):
+        self.set_measure_kind(kind)
 
     def easy_open_kind_conditions(self, model=""):
         """はじめてモードの「測り方」の段から、同じ登録画面を開く。"""
@@ -14304,6 +14548,10 @@ class MainWindow(QtWidgets.QMainWindow):
         回転・傾斜で別マスタから別々に適用する（条件の誤用を防ぐ）。
         """
         text = self.e_model.text().strip()
+        self.refresh_kind_choices()
+        self.apply_auto_suffix()                   # 型式・種類から、機番の末尾の自動の記号を選び直す
+        if text and self._apply_kind_conditions(text):
+            return
         if not self.masters or not text:
             return
         key = text.upper()
@@ -14434,6 +14682,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return "+再現" in self.current_mode()
 
     def on_mode_changed(self, mode):
+        if hasattr(self, "suffix_sel"):
+            self.apply_auto_suffix()                # 回転／傾斜が変わると、末尾の自動の記号も変わる
         is_tilt, is_repeat, is_combined = self.is_tilt(), self.is_repeat(), self.is_combined()
         show_division = not is_repeat   # 分割系（単独 or 合体）で分割入力を出す
         show_repeat = is_repeat or is_combined
@@ -15377,7 +15627,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def easy_make_wizard(self, parent):
         """かんたん作成を作る（はじめてモードが、自分の画面の中に入れる）。"""
-        return ParamWizardDialog(parent, self.settings, model=self.e_model.text().strip(), probe_machine=True)
+        return ParamWizardDialog(parent, self.settings, model=self.e_model.text().strip(), probe_machine=True,
+                                 kind=self.active_kind(), kind_table=self.kind_table)
 
     def easy_machine_in_env(self):
         """はじめてモードの「機械に入れる」専用画面に渡すもの（easy_machine_in_ui）。"""
@@ -15386,7 +15637,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.e_model.setText(m)
                 self.on_model_entered()
         return {"settings": self.settings, "set_model": set_model, "save_settings": self.easy_save_settings,
-                "model_fn": lambda: self.e_model.text().strip()}
+                "model_fn": lambda: self.e_model.text().strip(),
+                "kind_fn": lambda: (self.active_kind(), self.measure_scale),
+                "kind_table_fn": lambda: self.kind_table}
 
     def easy_apply_handoff(self, h):
         """専用画面で測定プログラムを送り終えた: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""
@@ -15411,8 +15664,22 @@ class MainWindow(QtWidgets.QMainWindow):
         """中のかんたん作成が終わった。測定の画面に型式と測り方を入れて、結果を返す。
         {"handoff": 機械に入れ終えた, "cycled": 電源の入れ直しが要った}"""
         h = getattr(dlg, "handoff", None)
+        self._take_wizard_motor(dlg)
         self._apply_wizard_handoff(h)
         return {"handoff": bool(h and h.get("steps")), "cycled": bool(getattr(dlg, "power_cycled", False))}
+
+    def _take_wizard_motor(self, dlg):
+        """かんたん作成で「社内の仮モーター」を選んでいたら、機番の末尾の自動の記号を「仮」にする。"""
+        try:
+            temp = (dlg.cmb_motor.currentData() == "temp") or ("temp" in set((getattr(dlg, "_motor_kind", {}) or {}).values()))
+        except Exception:
+            return
+        self.suffix_motor = "temp" if temp else ""
+        try:
+            self.suffix_semi = dlg.cmb_semi.currentData() == "semi"
+        except Exception:
+            self.suffix_semi = False
+        self.apply_auto_suffix()
 
     def _apply_wizard_handoff(self, h):
         """かんたん作成で機械に入れ終えたあと: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""
@@ -16450,7 +16717,33 @@ class MainWindow(QtWidgets.QMainWindow):
             if answer == QtWidgets.QMessageBox.Yes:
                 self.apply_correction()
         root = resolve_save_root(self.settings)
-        path = build_save_path(root, self.e_model.text(), machine_no)
+        kind = self.active_kind()
+        # セミクロの結果も、フルクロと同じく検査表(.BS/.KS/.RS/.RSK)・Webに出す。
+        # 名前は 機番＋末尾（社内の表。画面の表で選ぶ）。セミとフルは末尾が違うので、フルの結果を上書きしない。
+        try:
+            file_no = self.save_file_no()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "セーブ", f"機番の末尾が作れません: {e}")
+            return
+        path = build_save_path(root, self.e_model.text(), file_no)
+        if path.exists() and self.suffix_sel.ng == 0:
+            # 同じ名前がある: 精度NGの測り直しとして、-X の数字を +1 して提案する（表の数字で直せる）
+            n = 1
+            while build_save_path(root, self.e_model.text(), machine_no + self.suffix_sel.suffix() + f"-X{n}").exists() and n < 99:
+                n += 1
+            self.suffix_sel.ng = n
+            self._suffix_sync_panels()
+            file_no = self.save_file_no()
+            new_path = build_save_path(root, self.e_model.text(), file_no)
+            answer = QtWidgets.QMessageBox.question(
+                self, "セーブ",
+                f"{path.name} が既にあります。精度NGの測り直しとして「{new_path.name}」で保存しますか？\n"
+                "（-X の数字は、画面の表の「精度NG」で直せます。0 にすると上書きの確認になります）",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.Yes)
+            if answer != QtWidgets.QMessageBox.Yes:
+                self.statusBar().showMessage(f"セーブを中止しました（精度NGの数字を -X{n} にしてあります。直して、もう一度セーブしてください）")
+                return
+            path = new_path
         if path.exists():
             answer = QtWidgets.QMessageBox.question(
                 self, "セーブ",
@@ -16462,6 +16755,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("セーブを中止しました（上書きせず）")
                 return
         meta = self.build_meta()
+        if kind:
+            meta["測定の種類"] = KR.label(kind)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if self.view_kind == "repeat":
@@ -16482,14 +16777,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.view_kind in ("indexing", "combined"):
             if self.is_tilt():
-                self.save_ks_file(machine_no)
+                self.save_ks_file(file_no)
             else:
-                self.save_bs_file(machine_no, summary)
+                self.save_bs_file(file_no, summary)
         # 再現性は旧形式 .RS（回転）/ .RSK（傾斜）でも保存する
         if self.view_kind == "repeat" or (
                 self.view_kind == "combined" and self.has_repeat_data()):
-            self.save_rs_file(machine_no)
-        self.sync_to_webapp(machine_no, saved_files=[str(path)])
+            self.save_rs_file(file_no)
+        self.sync_to_webapp(file_no, saved_files=[str(path)])            # Web の名前も、末尾つき
+        self.suffix_sel.ng = 0                                           # 次の測定は、-X なしから
+        self._suffix_sync_panels()
 
     def sync_to_webapp(self, machine_no, saved_files=None):
         """product-inspection（Firestore）へ測定結果を送信する（セーブ時）"""
@@ -16947,8 +17244,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_param_dialog(self):
         """受注番号から かんたん作成（ガイド付き）。詳細は中の「詳細設定…」から。"""
         dlg = ParamWizardDialog(self, self.settings,
-                                model=self.e_model.text().strip(), probe_machine=True)
+                                model=self.e_model.text().strip(), probe_machine=True,
+                                kind=self.active_kind(), kind_table=self.kind_table)
         dlg.exec()
+        self._take_wizard_motor(dlg)
         if hasattr(self, "flow_bar"):
             self._apply_wizard_handoff(getattr(dlg, "handoff", None))
 

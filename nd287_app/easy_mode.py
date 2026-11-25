@@ -13,6 +13,7 @@
 from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
 from . import easy_art, easy_flow, easy_photo, easy_words, flow_guide
+from . import kind_runtime as KR
 from .easy_flow import STEPS, INDEX, CHAPTERS
 
 # 機械の「状態の数値」→ 絵のつまみの位置（easy_art.MODES の番号）
@@ -594,6 +595,11 @@ class EasyModeDialog(QtWidgets.QDialog):
             c["cond_missing"] = not self.host.e_model.text().strip()
         except Exception:
             c["cond_missing"] = False
+        try:                                                    # 型式に種類の登録があるのに、まだ選んでいない・決まらない
+            ks = self.host.easy_kind_state()
+            c["kind_missing"] = bool(ks.get("kinds")) and (not ks.get("kind") or bool(ks.get("error")))
+        except Exception:
+            c["kind_missing"] = False
         return c
 
     def _first(self):
@@ -938,6 +944,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         elif sid == "alarm_look":
             self._build_alarm()
         elif sid == "result":
+            self._build_suffix()
             b = self._act_button("保存する", self._save)
             self._extra_widgets["act"] = b
             if c.get("ng"):
@@ -1018,6 +1025,14 @@ class EasyModeDialog(QtWidgets.QDialog):
     def _build_cond_check(self):
         """「測る」の流れの中で、測り方がもう登録されているか見せる。無ければ、その場で決めて登録できる。"""
         self._model_edit()
+        self._kind_box = QtWidgets.QWidget()                # 測定の種類（モーター／駆動装置／フルクロ）の選び方。型式に登録があるときだけ中身が出る
+        self._kind_lay = QtWidgets.QVBoxLayout(self._kind_box)
+        self._kind_lay.setContentsMargins(0, 0, 0, 0)
+        self._kind_lay.setSpacing(8)
+        self.extra.addWidget(self._kind_box)
+        for e in getattr(self, "_edits", []):
+            e.editingFinished.connect(self._fill_kind_box)
+        self._fill_kind_box()
         try:
             st = self.host.easy_cond_state()
         except Exception:
@@ -1041,6 +1056,99 @@ class EasyModeDialog(QtWidgets.QDialog):
             k.setCursor(QtCore.Qt.PointingHandCursor)
             k.clicked.connect(lambda: self.host.easy_open_kind_conditions(st.get("model") or ""))
             self.extra.addWidget(k)
+
+    def _build_suffix(self):
+        """保存する名前（機番＋末尾）と、末尾の表。自動の記号は選んである。違うときだけ表を押して選び直す。"""
+        h = self.host
+        if not hasattr(h, "make_suffix_panel"):
+            return
+        try:
+            h.refresh_save_name()
+            lb = QtWidgets.QLabel("")
+            lb.setWordWrap(True)
+            lb.setObjectName("save_name")
+            lb.setStyleSheet("color:#17212B; font-size:14px; font-weight:700;")
+            self.extra.addWidget(lb)
+            panel = h.make_suffix_panel(self)
+            self.extra.addWidget(panel)
+            self._save_name_lbl, self._suffix_panel = lb, panel
+
+            h.register_save_name_label(lb)         # 末尾・機番が変わるたび、ホストが一斉に更新する（表の選択と必ず一致）
+        except Exception as e:
+            self._notice = f"機番の末尾の表を出せませんでした: {e}"
+
+    def _kind_state(self):
+        try:
+            return self.host.easy_kind_state() or {}
+        except Exception:
+            return {}
+
+    def _fill_kind_box(self):
+        """「測り方を確かめる」の中の、測定の種類の帯と選び方。種類別の表の問題は、種類の有無にかかわらず赤い帯で出す。"""
+        lay = getattr(self, "_kind_lay", None)
+        if lay is None:
+            return
+        try:
+            lay.count()
+        except RuntimeError:
+            return
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        try:
+            self.host.refresh_kind_choices()
+        except Exception:
+            pass
+        st = self._kind_state()
+        if st.get("problems"):
+            band = QtWidgets.QLabel(st["problems"])
+            band.setObjectName("kind_problem")
+            band.setWordWrap(True)
+            band.setStyleSheet("background:#FBE9E7; color:#B02A20; border:2px solid #D43A2F; border-radius:10px;"
+                               " padding:8px 12px; font-size:14px; font-weight:700;")
+            lay.addWidget(band)
+        kinds = st.get("kinds") or []
+        if not kinds:
+            return
+        head = QtWidgets.QLabel("何を測りますか？（この型式は、測り方が3通りまで登録されています）")
+        head.setWordWrap(True)
+        head.setStyleSheet("color:#17212B; font-size:15px; font-weight:700;")
+        lay.addWidget(head)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(10)
+        self._kind_btns = {}
+        for k in kinds:
+            b = ChoiceButton(k["label"], easy_art.choice_measure_kind(k["kind"]))
+            b.setChecked(st.get("kind") == k["kind"])
+            b.setToolTip(k.get("hint", ""))
+            b.clicked.connect(lambda _c=False, kk=k["kind"]: self._choose_kind(kk))
+            row.addWidget(b)
+            self._kind_btns[k["kind"]] = b
+        lay.addLayout(row)
+        cur = next((k for k in kinds if k["kind"] == st.get("kind")), None)
+        if cur is None:
+            msg, col = "どれで測るか、選んでください。選ぶと「次へ」が押せます。", "#8A6A00"
+        elif st.get("error"):
+            msg, col = st["error"] + "\nこのままでは測定プログラムを作りません。登録を直してください。", "#B02A20"
+        else:
+            msg, col = cur.get("hint", ""), "#16864C"
+            if cur.get("semi"):
+                msg += "\nセミクロの結果も、フルクロと同じく検査表とWebに出します。保存のとき、機番の末尾（社内の表）でフルと名前を分けます。"
+        lb = QtWidgets.QLabel(msg)
+        lb.setWordWrap(True)
+        lb.setStyleSheet(f"font-size:14px; font-weight:700; color:{col};")
+        lay.addWidget(lb)
+
+    def _choose_kind(self, kind):
+        try:
+            self.host.easy_set_kind(kind)
+        except Exception as e:
+            self._notice = f"種類を入れられませんでした: {e}"
+        self._fill_kind_box()
+        self._refresh()
 
     def _cond_from_check(self):
         """測るの流れの途中から、測り方の流れへ。終わったら、ここにもどる。"""
@@ -1704,7 +1812,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._update_alarm_button()
         inside = sid == "machine_in" and self._wiz is not None
         self.right_w.setVisible(not inside)
-        self.art_wrap.setVisible(not inside)
+        self.art_wrap.setVisible(not inside and sid != "result")      # 結果の段は、機番の末尾の表を広く見せるため、左の絵を外す
         self.embed.setVisible(inside)
         self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff") and self.flow == "measure")
         self.b_next.setVisible(not inside)

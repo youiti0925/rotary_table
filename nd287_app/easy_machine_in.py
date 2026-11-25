@@ -592,10 +592,12 @@ def check_step(settings, client_factory, job):
 #   同じ番号で中身が違うときは、人が「入れ替える」を選んだ番号だけ入れ替える（選ばなければ書かずに飛ばす）。
 #   1本ずつ書いて読み戻して比べる（run_program_send）。機械に書くのは、prog_send を呼んだときだけ。
 
-def prog_plan(settings, model, kinds, *, tilt=None, choice=None, numbers=None, masters_dict=None):
+def prog_plan(settings, model, kinds, *, tilt=None, choice=None, numbers=None, masters_dict=None,
+              kind="", scale="", kind_table=None):
     """送るプログラムを決める（機械には触らない）。製品の種別 kinds が無ければ、回転か傾斜かを人が選べる（plan["ambiguous"]）。"""
     m = masters_dict if masters_dict is not None else masters.load_masters(settings)
-    return WP.make_plan(settings, m, model, list(kinds or []), tilt=tilt, choice=choice, numbers=numbers)
+    return WP.make_plan(settings, m, model, list(kinds or []), tilt=tilt, choice=choice, numbers=numbers,
+                        kind=kind, scale=scale, kind_table=kind_table)
 
 
 def prog_nc(plan):

@@ -13959,7 +13959,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bar_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.bar_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.bar_scroll.setMinimumWidth(240)
-        plots_widget.setMinimumHeight(240)
+        self.plots_widget = plots_widget
+        plots_widget.setMinimumHeight(240)      # 低い画面では _fit_cond_box が下げる（窓が画面からはみ出さないように）
         plots_widget.setMinimumWidth(240)
 
         # 左カラム: 測定情報/条件 → 操作バー(データ数を含む) → グラフ。
@@ -13991,6 +13992,11 @@ class MainWindow(QtWidgets.QMainWindow):
         rv = QtWidgets.QVBoxLayout(right_col)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(2)  # 3表を近づけて精度結果をコンパクトに
+        self.lbl_no_result = QtWidgets.QLabel("測り終わると、ここに精度の表が出ます。")
+        self.lbl_no_result.setObjectName("noResult")
+        self.lbl_no_result.setWordWrap(True)
+        self.lbl_no_result.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        rv.addWidget(self.lbl_no_result, 0)  # まだ結果が無いとき（空の表の枠は出さない）
         rv.addWidget(self.table_series, 0)   # 精度PP・傾き
         rv.addWidget(self.table_series2, 0)  # 単一・隣接
         rv.addWidget(self.table_misc, 0)     # バックラッシ
@@ -14749,6 +14755,8 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setFont(bf)
         if hasattr(self, "top_scroll"):
             self._fit_top()
+        if hasattr(self, "cond_scroll"):
+            self._fit_cond_box()        # 窓を出す前に、低い画面むけの最低の高さにしておく（出したあとでは窓が縮まない）
         for label in (self.live, self.counts):
             lf = label.font()
             lf.setPointSize(max(base - 1, 8))
@@ -15567,8 +15575,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_flow.setTextFormat(QtCore.Qt.PlainText)
         self.lbl_flow.setMinimumWidth(200)
         self.lbl_flow.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.lbl_flow.setFixedHeight(self.lbl_flow.fontMetrics().lineSpacing() * 2)   # 最初は2行ぶん（_fit_flow_text が合わせ直す）
         row.addWidget(self.lbl_flow, 1)
-        acts = QtWidgets.QVBoxLayout()
+        acts = self._flow_acts = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.TopToBottom)
         acts.setContentsMargins(0, 0, 0, 0)
         acts.setSpacing(0)
         self.b_flow = QtWidgets.QPushButton("")
@@ -15583,7 +15592,7 @@ class MainWindow(QtWidgets.QMainWindow):
         acts.addWidget(self.b_flow_skip, 0, QtCore.Qt.AlignHCenter)
         row.addLayout(acts)
         row.addWidget(main_top.separator())
-        chips = QtWidgets.QVBoxLayout()
+        chips = self._flow_chips = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.TopToBottom)
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(2)
         self.chip_machine = main_top.Chip()
@@ -15637,15 +15646,38 @@ class MainWindow(QtWidgets.QMainWindow):
             em = self.lbl_flow.fontMetrics().horizontalAdvance("あ")
             room = (self.flow_bar.width() - self.flow_steps.full_width() - self.b_flow.sizeHint().width()
                     - self.chip_machine.sizeHint().width() - 70)
-            self.flow_steps.set_compact(room < em * 26)
+            # 低い画面（150%表示など）では2段目を1行ぶんに詰める: 順番の名前は今の所だけ・表示は横に並べる
+            tight = self._screen_tight()
+            if tight != getattr(self, "_flow_tight", None):
+                self._flow_tight = tight        # 文の場所を空ける: ボタンと表示の字を短くする（全部の字はマウスを乗せると出る）
+                self.b_flow_skip.setText("飛ばす" if tight else "もう入っている（飛ばす）")
+                self._flow_key = None
+                QtCore.QTimer.singleShot(0, self._refresh_flow)
+            side = QtWidgets.QBoxLayout.LeftToRight if tight else QtWidgets.QBoxLayout.TopToBottom
+            for lay in (self._flow_acts, self._flow_chips):
+                if lay.direction() != side:
+                    lay.setDirection(side)
+                    lay.setSpacing(6 if tight else (0 if lay is self._flow_acts else 2))
+            self.flow_steps.set_compact(tight or room < em * 26)
             QtCore.QTimer.singleShot(0, self._fit_flow_text)
+
+    def _screen_room(self):
+        """最大にした窓の中身に使える高さ（画面の使える高さ − 窓の枠・題名の帯）。"""
+        scr = self.screen() or QtWidgets.QApplication.primaryScreen()
+        avail = scr.availableGeometry().height() if scr else 768
+        frame = self.frameGeometry().height() - self.geometry().height() if self.isVisible() else 0
+        return avail - max(frame, 32)
+
+    def _screen_tight(self):
+        """低い画面か（字の高さの 62 行ぶんに足りない。1920×1080 を 150% 表示にした会社PCがこれ）。"""
+        return self._screen_room() < self.fontMetrics().height() * 62
 
     def _fit_flow_text(self, again=2):
         """文の行数ぶんの高さを取る（文が切れないように）。幅が決まり直すことがあるので、少しあとにもう一度見る。"""
         w = self.lbl_flow.width()
         h = self.lbl_flow.heightForWidth(w) if w > 0 else 0
-        if h > 0 and h != self.lbl_flow.minimumHeight():
-            self.lbl_flow.setMinimumHeight(h)
+        if h > 0 and h != self.lbl_flow.maximumHeight():
+            self.lbl_flow.setFixedHeight(h)     # 高さを決め打つ（決めないと、幅 200 のときの行数ぶんの高さを帯が取ってしまう）
         if again > 0:
             QtCore.QTimer.singleShot(40, lambda: self._fit_flow_text(again - 1))
 
@@ -15658,12 +15690,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_chips(self):
         host = getattr(self, "_focas_watch_host", "") or ""
         # 号機は出さない（IP から号機は決めない。号機は「機械に入れる」で機械を読んで確かめる）
-        self.chip_machine.set_state("機械 見えています" if host else "機械 まだつないでいません", bool(host))
+        short = bool(getattr(self, "_flow_tight", False))
+        self.chip_machine.set_state("機械 見えています" if host else "機械 まだつないでいません", bool(host), short=short)
         if getattr(self.dev, "dummy", False):
-            self.chip_nd.set_state("表示器 ダミー（実機なし）", True)
+            self.chip_nd.set_state("表示器 ダミー（実機なし）", True, short=short)
         else:
             self.chip_nd.set_state("表示器 つながっています" if self._nd_ok else "表示器 つながっていません",
-                                   self._nd_ok, bad=not self._nd_ok)
+                                   self._nd_ok, bad=not self._nd_ok, short=short)
 
     def _flow_toggled(self, on):
         self.flow_bar.setVisible(bool(on))
@@ -15765,11 +15798,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_flow.setText(head + g.get("short", g["text"]))     # 短い文。全部の文はマウスを乗せると出る
         self.lbl_flow.setToolTip(g["text"])
         self.lbl_flow.setStyleSheet("font-weight:bold;" + self.FLOW_STYLE[g["kind"]])
-        self.lbl_flow.setMinimumHeight(0)
+        self._fit_flow_text(0)
         QtCore.QTimer.singleShot(0, self._fit_flow_text)
         self._flow_now_buttons(g["action"])
         self.b_flow.setVisible(bool(g["button"]))
-        self.b_flow.setText(g["button"])
+        label = g["button"]
+        if getattr(self, "_flow_tight", False) and "（" in label:      # 低い画面では（）の中を省く
+            label = label.split("（", 1)[0] + label.rsplit("）", 1)[-1]
+        self.b_flow.setText(label)
         self.b_flow_skip.setVisible(bool(g["skip"]))
 
     def _flow_skip(self):
@@ -16953,6 +16989,12 @@ class MainWindow(QtWidgets.QMainWindow):
         フォント（実機の游ゴシック等）で行が測定時より高く描画されても、描画高＝
         計算高となり、縦スクロールバー無しの表でも最終行が切れない。
         """
+        if hasattr(self, "lbl_no_result"):
+            self.lbl_no_result.setVisible(not any(
+                t.rowCount() for t in (self.table_series, self.table_series2, self.table_misc)))
+        if table.rowCount() == 0:
+            table.setFixedHeight(0)          # 空の表は見出しだけの枠を出さない（右上に小さい空き欄が並んで見えた）
+            return
         table.resizeRowsToContents()
         # 縦ヘッダの最小セクションを小さくして、明示した行高がスタイルに押し上げ
         # られない（＝描画高＞計算高で末尾が切れる）ようにしておく
@@ -16991,6 +17033,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # あふれた分はスクロールで読む。
         cap = max(130, int(self.height() * 0.28))
         h = min(need, cap)
+        # 低い画面（2026-11-25 会社PC: 150%表示で使える高さ 672、窓の最低の高さが 924 で下がはみ出した）:
+        # 画面に入る分から、上の2段・下の帯・操作の帯を引いた残りを「測定条件」と「グラフ」で分ける。
+        # グラフの最低の高さは 240 を目安にし、足りなければ測定条件を測定情報の高さまで詰め、
+        # それでも足りなければグラフの最低の高さを下げる（窓が画面からはみ出すよりよい）。
+        if getattr(self, "_suffix_fit_pending", False):
+            # 機番の末尾の表を畳むかどうか（_fit_suffix_panel）は、詰める前の最低の高さで決める。
+            # 先に詰めると「開いたままで入る」ことになり、表がグラフの場所を取ってしまう。決まってから詰める。
+            QtCore.QTimer.singleShot(30, self._fit_cond_box)
+        elif hasattr(self, "plots_widget"):
+            fixed = sum(t.sizeHint().height() for t in self.findChildren(QtWidgets.QToolBar)
+                        if not t.isHidden())
+            fixed += self.statusBar().sizeHint().height() + 26        # 26 = 上下のあき・すき間
+            bsw = getattr(self, "bar_scroll", None)
+            if bsw is not None:
+                fixed += bsw.widget().sizeHint().height() + 2
+            sp = getattr(self, "suffix_panel", None)
+            if sp is not None and not sp.isHidden():
+                fixed += sp.sizeHint().height() + 4
+            room = self._screen_room() - fixed
+            info_h = self.info_group.sizeHint().height()
+            h = min(h, max(min(need, info_h), room - 240))
+            plot_min = max(110, min(240, room - max(h, info_h)) - getattr(self, "_plot_min_fix", 0))
+            if self.plots_widget.minimumHeight() != plot_min:
+                self.plots_widget.setMinimumHeight(plot_min)
+            QtCore.QTimer.singleShot(0, self._fit_window_height)
         # 最小・最大を同じ値にする。maximumHeight は「上限」であってウィジェットを
         # 伸ばす力が無く、左カラムの余りは stretch のグラフが全部持っていくため、
         # 最小を上げないと QScrollArea は sizeHint（Qtが内部で頭打ちする値）で止まり、
@@ -17004,6 +17071,26 @@ class MainWindow(QtWidgets.QMainWindow):
             if bs.horizontalScrollBar().isVisible():
                 bh += bs.horizontalScrollBar().sizeHint().height()
             bs.setFixedHeight(bh + 2)
+
+    def _fit_window_height(self):
+        """上の見積もりで足りなかった分（ほかの作業が足した帯など）を、実際の窓の最低の高さで測って、
+        グラフの最低の高さから引く。窓の最低の高さが、画面に入る高さを超えないようにする。"""
+        if not self.isVisible():
+            return
+        over = self.minimumSizeHint().height() - self._screen_room()
+        if over > 0 and self.plots_widget.minimumHeight() > 110:
+            self._plot_min_fix = getattr(self, "_plot_min_fix", 0) + over
+            self.plots_widget.setMinimumHeight(max(110, self.plots_widget.minimumHeight() - over))
+        scr = self.screen()
+        if (scr is not None and self.isMaximized() and not getattr(self, "_remaximized", False)
+                and self.frameGeometry().height() > scr.availableGeometry().height() + 4):
+            self._remaximized = True        # 最低の高さが大きいうちに広がった窓は自分では縮まないので、1回だけ最大にし直す
+            QtCore.QTimer.singleShot(50, self._remaximize)
+
+    def _remaximize(self):
+        if self.minimumSizeHint().height() <= self._screen_room() + 32:
+            self.showNormal()
+            self.showMaximized()
 
     def resizeEvent(self, event):
         if hasattr(self, "top_scroll") and hasattr(self, "chip_machine"):
@@ -17027,6 +17114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in (self.table_series, self.table_series2):
             if not t.isVisible():
                 continue
+            t.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
             t.resizeColumnsToContents()  # 全列を中身ぶんに確定させてから合計
             s = 2 * t.frameWidth() + 10
             for c in range(t.columnCount()):
@@ -17038,6 +17126,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # 画面幅の一定割合で頭打ちにする。大きいフォント・狭い画面で右カラムが
             # 画面外へはみ出して「結果が見えない」状態になるのを防ぐ。
             sc.setFixedWidth(min(want, max(240, int(self.width() * 0.34))))
+        # 幅を決めたあと、左の「系列」の列だけ残りの幅まで伸ばす（表の右に白い空き欄を作らない。数値の列は中身ぶんのまま）
+        for t in (self.table_series, self.table_series2):
+            if t.isVisible():
+                t.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
 
     def fill_misc_table(self, rows):
         # バックラッシ表は「項目＋値」を1行まるごと（全列結合）で表示する。

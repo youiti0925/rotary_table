@@ -76,7 +76,14 @@ class Chip(QtWidgets.QPushButton):
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self._state = None
 
-    def set_state(self, text, ok, bad=False):
+    def set_state(self, text, ok, bad=False, short=False):
+        """short=True（低い画面）: 「機械」「表示器」の名前と丸だけ。全部の字はマウスを乗せると出る。"""
+        full = text
+        if short:
+            text = text.split(" ", 1)[0]
+        if not hasattr(self, "_tip0"):
+            self._tip0 = self.toolTip()
+        self.setToolTip(full + "\n" + self._tip0 if self._tip0 else full)
         state = (text, bool(ok), bool(bad))
         if state == self._state:
             return

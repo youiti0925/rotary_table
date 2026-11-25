@@ -162,3 +162,64 @@ class TestTopRows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLowScreen(TestTopRows):
+    """会社PC（1920×1080 を 150% 表示。使える画面 1280×672）で、窓の最低の高さが 924 になり下がはみ出した
+    （2026-11-25 実機の画面写真で分かった）。低い画面では、上の2段目を1行ぶんに詰め、測定条件とグラフの
+    最低の高さを下げて、窓の最低の高さを画面に入る高さまでにする。"""
+
+    def _low(self, room=640):
+        w = self._window(1280)
+        w._suffix_fit_pending = False
+        if w.suffix_panel.isChecked():
+            w.suffix_panel.setChecked(False)      # 低い画面では _fit_suffix_panel が畳む
+        w._screen_room = lambda: room
+        w._fit_top()
+        w._fit_cond_box()
+        for _ in range(8):
+            self.app.processEvents()
+        w._fit_cond_box()
+        w._fit_window_height()
+        for _ in range(8):
+            self.app.processEvents()
+        return w
+
+    def test_groups_are_in_work_order(self):
+        pass                                       # 親の試験は繰り返さない
+
+    test_right_three_stay_inside_the_window = test_buttons_that_do_not_fit_move_into_the_menu = \
+        test_menu_keeps_what_left_the_bar = test_now_button_follows_the_guide = \
+        test_chips_do_not_name_a_unit_from_the_ip = test_groups_are_in_work_order
+
+    def test_minimum_height_fits_a_low_screen(self):
+        w = self._low(640)
+        self.assertLessEqual(w.minimumSizeHint().height(), 640)
+        self.assertLess(w.plots_widget.minimumHeight(), 241)
+        self.assertGreaterEqual(w.plots_widget.minimumHeight(), 110)
+
+    def test_second_row_is_one_line_high_on_a_low_screen(self):
+        w = self._low(640)
+        self.assertTrue(w._flow_tight)
+        self.assertEqual(w.chip_machine.text(), "機械")
+        self.assertIn("つない", w.chip_machine.toolTip())          # 全部の字はマウスを乗せると出る
+        self.assertEqual(w.b_flow_skip.text(), "飛ばす")
+        w._refresh_flow()
+        self.assertNotIn("（", w.b_flow.text())
+        self.assertLessEqual(w.flow_bar.sizeHint().height(), w.b_flow.sizeHint().height() * 3)
+
+    def test_tall_screen_keeps_the_usual_sizes(self):
+        w = self._low(1000)
+        self.assertFalse(w._flow_tight)
+        self.assertEqual(w.plots_widget.minimumHeight(), 240)
+        self.assertIn("まだつないでいません", w.chip_machine.text())
+
+    def test_empty_result_tables_do_not_leave_small_boxes(self):
+        w = self._low(1000)
+        w._shrink_result_tables()
+        self.assertEqual(w.table_series.rowCount(), 0)
+        self.assertEqual(w.table_series.height(), 0)
+        self.assertTrue(w.lbl_no_result.isVisibleTo(w))
+        w.fill_misc_table([("総合バックラッシ MIN", '-0.9"')])
+        self.assertFalse(w.lbl_no_result.isVisibleTo(w))
+        self.assertGreater(w.table_misc.height(), 0)

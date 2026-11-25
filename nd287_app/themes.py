@@ -123,6 +123,7 @@ QToolBar#topBar QPushButton[now="true"] {{ background: #ffd95a; border-color: #f
     color: #1b2550; font-weight: bold; }}
 QToolBar#topBar QPushButton[now="true"]:disabled {{ background: transparent; color: {tb_off};
     border-color: {tb_off}; }}
+QLabel#noResult {{ color: {muted}; padding: 6px 4px; }}
 QToolBar#flowBar {{ background: {panel}; border: none; border-bottom: 1px solid {border};
     padding: 2px 4px; }}
 QToolBar#flowBar QWidget {{ background: transparent; color: {text}; }}

@@ -1050,7 +1050,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         sc.setWidget(box)
         box.setMinimumWidth(10)
         h = box.sizeHint().height() + 4
-        sc.setFixedHeight(max(40, min(h, 150)))
+        sc.setFixedHeight(max(40, min(h, 240)))
         self.extra.addWidget(sc)
         self._extra_widgets["ng"] = sc
 
@@ -1127,6 +1127,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             lb.setStyleSheet("color:#17212B; font-size:14px; font-weight:700;")
             self.extra.addWidget(lb)
             panel = h.make_suffix_panel(self)
+            panel.as_dialog = True
             panel.blockSignals(True)
             panel.setChecked(False)                 # 表はこの狭い札の中には広げない（押すと別の窓で大きく開く）
             panel.blockSignals(False)

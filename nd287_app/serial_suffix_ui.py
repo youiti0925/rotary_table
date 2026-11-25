@@ -152,7 +152,12 @@ class SuffixPanel(QtWidgets.QGroupBox):
             self.picker.tbl.setMinimumHeight(190)
             self.picker.tbl.verticalHeader().setMinimumWidth(80)
         lay.addWidget(self.picker)
-        self.toggled.connect(self.picker.setVisible)
+        self.as_dialog = False                     # True: 押しても表をここには広げない（別の窓で開く。窓の最低の高さが一瞬上がって窓が伸びるのを防ぐ）
+        self.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, on):
+        if not self.as_dialog:
+            self.picker.setVisible(on)
 
     def suffix(self):
         return self.picker.suffix()

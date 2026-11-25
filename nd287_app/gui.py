@@ -13291,6 +13291,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_model.setMaximumWidth(120)
         self.e_machine.setMaximumWidth(120)
         self.e_date.setMaximumWidth(120)
+        self.e_date.setMinimumWidth(self.e_date.fontMetrics().horizontalAdvance("2026-11-25") + 40)     # 150% の画面で「2026-11-2」と切れた
         self.e_operator.setMaximumWidth(96)
         self.e_temp.setMaximumWidth(58)
 
@@ -13321,8 +13322,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_kind.setVisible(False)
         # 型式の横に、その型式で登録済みの種類をボタンで並べる（押し直せる）。選ぶ本体は cmb_kind と同じ値
         self.kind_btn_box = QtWidgets.QWidget()
-        self._kind_btn_lay = QtWidgets.QHBoxLayout(self.kind_btn_box)
+        self._kind_btn_lay = QtWidgets.QGridLayout(self.kind_btn_box)
         self._kind_btn_lay.setContentsMargins(0, 0, 0, 0)
+        self._kind_btn_lay.setSpacing(4)
         self._kind_btns = {}
         info_grid.addWidget(self.kind_btn_box, 6, 0, 1, 2)
         self.kind_btn_box.setVisible(False)
@@ -13377,6 +13379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_range.setValue(worm_range)
         self.e_range.setSuffix(" °")
         self.box_range, self.l_range = field_box("ウォーム範囲", self.e_range)
+        for _sp, _sample in ((self.e_wheel, "000.000 °/pt"), (self.e_worm, "00.0000 °/pt"), (self.e_range, "000.0000 °")):
+            _sp.setMinimumWidth(_sp.fontMetrics().horizontalAdvance(_sample) + 30)     # 値と単位と上下ボタンが切れない幅
         self.e_start = QtWidgets.QDoubleSpinBox()
         self.e_start.setDecimals(4)
         self.e_start.setRange(0.0, 360.0)
@@ -13974,6 +13978,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bar_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.bar_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.bar_scroll.setMinimumWidth(240)
+        # 横の動かし棒が出ても、ボタンの枠の下が切れない高さ（150% の画面で「取込中の操作」の枠の下が切れた）
+        self.bar_scroll.setMinimumHeight(bar_widget.sizeHint().height() + self.bar_scroll.horizontalScrollBar().sizeHint().height() + 4)
         self.plots_widget = plots_widget
         plots_widget.setMinimumHeight(240)      # 低い画面では _fit_cond_box が下げる（窓が画面からはみ出さないように）
         plots_widget.setMinimumWidth(240)
@@ -14423,6 +14429,7 @@ class MainWindow(QtWidgets.QMainWindow):
             avail = scr.availableGeometry().height()
             if self.minimumSizeHint().height() > avail:
                 self.suffix_panel.setChecked(False)
+                self.suffix_panel.as_dialog = True               # これ以後は、押しても表をここには広げない
                 self.suffix_panel.setTitle("機番の末尾（ここを押すと表が別の窓で開きます）")
                 self.suffix_panel.toggled.connect(self._open_suffix_dialog)     # 開いたままだと窓が画面に収まらないので、別の窓で選ぶ
         except Exception:
@@ -14568,19 +14575,21 @@ class MainWindow(QtWidgets.QMainWindow):
             b = QtWidgets.QPushButton(text)
             b.setCheckable(True)
             b.setStyleSheet("padding:2px 4px;")
-            b.setMinimumWidth(0)
+            b.setMinimumWidth(b.fontMetrics().horizontalAdvance(text) + 16)     # 文字が切れない幅（狭い枠では2段に並ぶ）
             b.setChecked(key == self.measure_kind)
             b.setToolTip("測定の種類: " + (KR.HINT.get(key) or "種類を選ばず、今までの登録で測ります。"))
             b.clicked.connect(lambda _c=False, k=key: self._on_kind_button(k))
             self._kind_btns[key] = b
-            lay.addWidget(b)
+            n = len(self._kind_btns) - 1
+            lay.addWidget(b, n // 2, n % 2)                 # 2つずつ並べる
         self.b_kind_register = QtWidgets.QPushButton("登録する")
         self.b_kind_register.setStyleSheet("padding:2px 4px;")
         self.b_kind_register.setToolTip("この型式の測定条件を、種類別に登録する画面を開きます")
         self.b_kind_register.clicked.connect(lambda _c=False: self.show_kind_conditions())
         self.b_kind_register.setVisible(False)
-        lay.addWidget(self.b_kind_register)
-        lay.addStretch(1)
+        n = len(self._kind_btns)
+        lay.addWidget(self.b_kind_register, n // 2, n % 2)
+        lay.setColumnStretch(2, 1)
 
     def _show_register_button(self, on):
         b = getattr(self, "b_kind_register", None)

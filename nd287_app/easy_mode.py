@@ -1001,12 +1001,19 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 r.setObjectName("sub")
                 r.setCursor(QtCore.Qt.PointingHandCursor)
                 r.clicked.connect(self._remeasure)
-                self.extra.addWidget(r)
                 g = QtWidgets.QPushButton("どこが外れたかを見る")        # 結果を読む（better_app.py。読むだけ）
                 g.setObjectName("sub")
                 g.setCursor(QtCore.Qt.PointingHandCursor)
                 g.clicked.connect(self._read_result)
-                self.extra.addWidget(g)
+                both = QtWidgets.QWidget()                              # 2つを横に並べる（縦に足すと、下が切れた。会社PC 150%）
+                both.setStyleSheet("background:transparent;")
+                bh = QtWidgets.QHBoxLayout(both)
+                bh.setContentsMargins(0, 0, 0, 0)
+                bh.setSpacing(18)
+                bh.addWidget(r)
+                bh.addWidget(g)
+                bh.addStretch(1)
+                self.extra.addWidget(both)
                 self._extra_widgets["read"] = g
         elif sid == "measuring":
             pg = QtWidgets.QProgressBar()

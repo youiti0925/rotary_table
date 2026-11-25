@@ -81,6 +81,11 @@ class GrowthDialog(QtWidgets.QDialog):
 
     def __init__(self, host, parent=None, *, search=None, threaded=True):
         super().__init__(parent or host)
+        from .result_guide_ui import base_pt
+        self._pt = base_pt()                  # 文字 7pt の PC でも読める大きさにする（結果を読む と同じ下限）
+        _f = self.font()
+        _f.setPointSize(self._pt)
+        self.setFont(_f)
         self.host = host
         self.search = search
         self.setWindowTitle("登録の育ち具合")
@@ -94,7 +99,7 @@ class GrowthDialog(QtWidgets.QDialog):
         head.setWordWrap(True)
         f = head.font()
         f.setBold(True)
-        f.setPointSize(f.pointSize() + 1)
+        f.setPointSize(self._pt + 1)
         head.setFont(f)
         root.addWidget(head)
         self.scroll = QtWidgets.QScrollArea()
@@ -147,7 +152,7 @@ class GrowthDialog(QtWidgets.QDialog):
             lb.setMinimumWidth(10)
         f = lb.font()
         f.setBold(bold)
-        f.setPointSize(f.pointSize() + delta)
+        f.setPointSize(self._pt + delta)
         lb.setFont(f)
         if color:
             lb.setStyleSheet(f"color:{color};")
@@ -200,8 +205,7 @@ class GrowthDialog(QtWidgets.QDialog):
         for j, t in enumerate(("登録", "いま", "これで自動になること", "増やし方")):
             grid.addWidget(self._label(t, color=GREY), 0, j)
         for i, it in enumerate(GR.items(s["counts"]), start=1):
-            name = self._label(it["name"], bold=True)
-            name.setMinimumWidth(self.fontMetrics().horizontalAdvance("あ") * 10)
+            name = self._label(it["name"], bold=True, wrap=False)      # 名前は途中で折らない（短い名前にしてある）
             grid.addWidget(name, i, 0, QtCore.Qt.AlignTop)
             n = self._label(GR.count_text(it), bold=True, color=GREY if not it["count"] else GREEN, wrap=False)
             grid.addWidget(n, i, 1, QtCore.Qt.AlignTop)
@@ -210,6 +214,8 @@ class GrowthDialog(QtWidgets.QDialog):
         v.addLayout(grid)
         self.lay.addWidget(card)
         self.lay.addStretch(1)
+        from .result_guide_ui import lift_fonts
+        lift_fonts(self)
 
 
 def open_growth(host):

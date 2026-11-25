@@ -48,9 +48,30 @@ def host_limits(host):
     return out
 
 
+MIN_PT = 10       # この窓の字の下限。会社PC（文字 7pt）では小さすぎて読めなかった（2026-11-26 会社PCで確認）
+
+
+def base_pt():
+    """この窓の基準の字の大きさ: アプリの文字サイズ。ただし MIN_PT より小さくしない（窓に空きがあるため）。"""
+    app = QtWidgets.QApplication.instance()
+    pt = app.font().pointSize() if app else MIN_PT
+    return max(MIN_PT, pt if pt > 0 else MIN_PT)
+
+
+def lift_fonts(root):
+    """root の中で、字が基準（base_pt）より小さい部品を基準まで上げる。
+    アプリの見た目（スタイルシート）があると、窓に付けた字の大きさが中の部品へ伝わらないため、1つずつ付ける。"""
+    pt = base_pt()
+    for w in [root] + root.findChildren(QtWidgets.QWidget):
+        f = w.font()
+        if 0 < f.pointSize() < pt:
+            f.setPointSize(pt)
+            w.setFont(f)
+
+
 def _bigger(widget, delta, bold=False):
     f = widget.font()
-    f.setPointSize(max(6, f.pointSize() + delta))
+    f.setPointSize(max(6, base_pt() + delta))
     f.setBold(bold)
     widget.setFont(f)
     return widget
@@ -121,6 +142,9 @@ class ResultGuideDialog(QtWidgets.QDialog):
 
     def __init__(self, host, parent=None, *, fixed_kinds=(), search=None):
         super().__init__(parent or host)
+        _f = self.font()
+        _f.setPointSize(base_pt())
+        self.setFont(_f)                     # 中の部品（ボタン・説明の文）も、この大きさになる
         self.host = host
         self.search = search or report.search_inspection
         self.setWindowTitle("結果を読む")
@@ -302,6 +326,7 @@ class ResultGuideDialog(QtWidgets.QDialog):
         self.show_page(0)
         self.show_lesson(0)
         self._start_past()
+        lift_fonts(self)
 
     def _fill_head(self):
         model = self.host.e_model.text().strip()
@@ -472,6 +497,7 @@ class ResultGuideDialog(QtWidgets.QDialog):
             for j, w in enumerate((name, val, word, bar, rng)):
                 self.usual_grid.addWidget(w, i, j)
         self.usual_grid.setRowStretch(len(rows), 1)
+        lift_fonts(self)
 
     # ------------------------------------------------------------ 次にやること
     def _fill_next(self):
@@ -492,6 +518,7 @@ class ResultGuideDialog(QtWidgets.QDialog):
             for step in RG.next_steps(self._kinds, fixes, tips, self._lessons):
                 self.next_lay.addWidget(self._step_card(step))
         self.next_lay.addStretch(1)
+        lift_fonts(self)
 
     def _step_card(self, step):
         card = QtWidgets.QFrame()

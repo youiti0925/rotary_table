@@ -46,6 +46,16 @@ class T(unittest.TestCase):
         self.assertEqual(len(t["problems"]), 2)
         self.assertEqual(K.repeat(K.find(t, "RTV-231", False, "セミ・モーター"))["repeats"], 7)
 
+    def test_repeat_differs_per_kind(self):
+        p = make([{"型式": "RTV-231", "測定の種類": "セミ・モーター", "歯数": 72, "ブロック数": 4, "回数": 7},
+                  {"型式": "RTV-231", "測定の種類": "セミ・駆動装置", "ホイール刻み": 1, "ブロック数": 2, "回数": 3},
+                  {"型式": "RTV-231", "測定の種類": "フル・スケール付き", "スケール名": "A", "ホイール刻み": 5}])
+        t = K.load(p)
+        r = lambda k: K.repeat(K.find(t, "RTV-231", False, k, "A" if k.startswith("フル") else ""))
+        self.assertEqual((r("セミ・モーター")["blocks_n"], r("セミ・モーター")["repeats"]), (4, 7))
+        self.assertEqual((r("セミ・駆動装置")["blocks_n"], r("セミ・駆動装置")["repeats"]), (2, 3))
+        self.assertIsNone(r("フル・スケール付き"))            # 再現性の欄が空 → 再現性は作らない（他の種類の値を使わない）
+
     def test_missing_file_is_empty_and_no_overwrite(self):
         self.assertEqual(K.load("/nonexistent/x.xlsx")["rotary"], [])
         p = make([])

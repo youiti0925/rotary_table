@@ -11,6 +11,8 @@
 色は themes.py の QSS（#topBar / #flowBar）で決める。
 """
 
+import time
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 GOOD = "#16a34a"      # 済んだ・つながっている
@@ -265,3 +267,58 @@ class ElidedLabel(QtWidgets.QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply()
+
+class ElidedStatusBar(QtWidgets.QStatusBar):
+    """下の帯。長い知らせ（保存先の長い道・問題の文など）は右の「接続先…再接続」に重ならないよう、
+    入る長さで「…」に省く。全文はマウスを乗せると出る。
+
+    2026-11-25 会社PC（150%表示）: 保存先の長い文字（幅 1940）が省かれず、右の「接続先」(x=921) に重なった。
+    Qt の下の帯は知らせの文を省かずに描く。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self._until = None
+
+    def showMessage(self, text, timeout=0):
+        self._full = str(text or "")
+        self._until = (time.monotonic() + timeout / 1000.0) if timeout else None
+        self.setToolTip(self._full if self._full else "")
+        super().showMessage(self._elide(self._full), timeout)
+
+    def full_message(self):
+        """省く前の全文（今の知らせ）。試験・吹き出し用。"""
+        return self._full if self.currentMessage() else ""
+
+    def clearMessage(self):
+        self._full = ""
+        self.setToolTip("")
+        super().clearMessage()
+
+    def _room(self):
+        used = 0
+        for w in self.children():
+            if isinstance(w, QtWidgets.QWidget) and not w.isHidden() and not isinstance(w, QtWidgets.QSizeGrip):
+                used += w.sizeHint().width() + 4
+        return max(80, self.width() - used - 24)
+
+    def _elide(self, text):
+        if not text:
+            return text
+        text = text.replace("\n", " ")
+        return self.fontMetrics().elidedText(text, QtCore.Qt.ElideMiddle, self._room())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._full and self.currentMessage():
+            QtCore.QTimer.singleShot(0, self._reelide)
+
+    def _reelide(self):
+        cur = self.currentMessage()
+        if self._full and cur and cur != self._elide(self._full):
+            left = 0
+            if self._until is not None:
+                left = int((self._until - time.monotonic()) * 1000)
+                if left <= 0:
+                    return
+            QtWidgets.QStatusBar.showMessage(self, self._elide(self._full), left)

@@ -317,6 +317,26 @@ class TestLowScreen(TestTopRows):
         self.assertEqual(w.counts.toolTip(), full)
         self.assertEqual(w.counts.text(), full)
 
+    def test_long_status_message_is_elided_and_does_not_reach_the_right_widgets(self):
+        # 2026-11-25 会社PC: 保存先の長い文字（幅 1940）が省かれず、右の「接続先」に重なった
+        w = self._window(1280)
+        sb = w.statusBar()
+        long = "保存しました: " + "C:\\Users\\AA4344\\AppData\\Local\\ND287分割測定\\測定データ\\" * 6 + "T-001.csv"
+        sb.showMessage(long)
+        for _ in range(5):
+            self.app.processEvents()
+        shown = sb.currentMessage()
+        self.assertIn("…", shown)
+        self.assertEqual(sb.toolTip(), long)
+        self.assertLess(sb.fontMetrics().horizontalAdvance(shown), sb.width())
+        left_of_permanent = min(c.geometry().left() for c in sb.children()
+                                if isinstance(c, type(w.b_diag)) and not c.isHidden())
+        self.assertLessEqual(sb.fontMetrics().horizontalAdvance(shown) + 8, left_of_permanent)
+        sb.showMessage("短い知らせ")
+        self.assertEqual(sb.currentMessage(), "短い知らせ")
+        sb.clearMessage()
+        self.assertEqual(sb.toolTip(), "")
+
 
 def QtCore_text(label):
     from PySide6 import QtWidgets

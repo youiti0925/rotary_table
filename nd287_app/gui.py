@@ -13352,6 +13352,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("ND287 分割測定")
         fit_to_screen(self, 1200, 800)
+        self.setStatusBar(main_top.ElidedStatusBar())     # 長い知らせは「…」に省く（右の接続先に重ならない）
         # この窓には大きさの上限を付けない（fit_to_screen は上限を「画面の使える所」にする。ダイアログ用）。
         # 上限があると Windows は「最大」の窓の中身をその大きさ（画面の使える所と同じ高さ）にするので、題名の帯の
         # ぶん（会社PCの 150% 表示で 23）下へはみ出し、一番下の帯が画面の外へ出た（2026-11-25 会社PCで測った:

@@ -73,7 +73,7 @@ class TestKindButtons(unittest.TestCase):
             row["歯数"] = ""; row["_bad"] = {"歯数": "abc"}
             w.on_model_entered()
             self.assertFalse(w.b_kind_register.isHidden())
-            self.assertIn("数字として読めません", w.statusBar().currentMessage())
+            self.assertIn("数字として読めません", w.statusBar().full_message())
             w._kind_btns[""].click()                                  # 「今までの登録」を押し直す → 勝手に戻さない
             self.assertEqual(w.measure_kind, "")
             w.on_model_entered()

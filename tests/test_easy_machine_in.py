@@ -837,6 +837,26 @@ class TestPanelPrograms(PanelBase):
         p._prog_do_send()
         self.assertTrue(self.written())
 
+    def test_model_without_conditions_offers_registration_and_remakes_the_plan(self):
+        """測定条件が無い型式: 行き止まりにせず、その場で登録する道を出す。登録したら作り直す（2026-11-25 流れの確認）。"""
+        called = []
+        self.m.status["emergency"] = 0
+        p = self.panel(model_fn=lambda: "NOCOND-1", register_cond=lambda: called.append("cond"),
+                       register_kind=lambda: called.append("kind"))
+        self.connected(p)
+        p._skip_params()
+        self.assertEqual(p.page, "prog")
+        p.env["model"] = "NOCOND-1"
+        p._prog_make_plan()
+        p._render()
+        self.assertTrue(p.prog_plan["problems"])
+        texts = " ".join(self.labels(p))
+        self.assertIn("測り方を種類別に登録する", texts)
+        self.assertIn("測り方を手で入れる", texts)
+        p._prog_register("register_cond")
+        self.assertEqual(called, ["cond"])
+        self.assertEqual(p.page, "prog")
+
     def test_stage_names_include_programs(self):
         p = self.panel()
         self.connected(p)

@@ -1369,6 +1369,16 @@ class MachineInPanel(QtWidgets.QWidget):
             self.prog_plan = {"problems": [f"測定プログラムを作れませんでした: {e}"], "programs": [], "slots": [], "allowed": [],
                               "choice": "", "ambiguous": False, "tilt": False}
 
+    def _prog_register(self, key):
+        """測り方の登録画面を開き、閉じたら送るプログラムを作り直す（登録できていれば、そのまま先へ進める）。"""
+        try:
+            self.env[key]()
+        except Exception as e:
+            self._prog_error = f"登録の画面を開けませんでした: {e}"
+        self._prog_reset()
+        self._prog_make_plan()
+        self._render()
+
     def _prog_reset(self):
         self.prog_rd, self.prog_results, self.prog_sent, self._prog_error = None, {}, False, ""
 
@@ -1534,7 +1544,14 @@ class MachineInPanel(QtWidgets.QWidget):
             self.lbl_text.setText("送るプログラムを作れません。")
             for t in plan["problems"]:
                 self._lab(t, RED)
-            self._lab("型式が入っていないときは、通常の画面で型式を入れてから、もう一度来てください。", GREY)
+            if self._model() and (self.env.get("register_kind") or self.env.get("register_cond")):
+                self._lab("この型式の測り方が登録されていないときは、ここで登録すると、そのまま先へ進めます。", GREY)
+                if self.env.get("register_kind"):
+                    self._btn("測り方を種類別に登録する…", lambda: self._prog_register("register_kind"), "back")
+                if self.env.get("register_cond"):
+                    self._btn("測り方を手で入れる（今までの登録画面）…", lambda: self._prog_register("register_cond"), "back")
+            else:
+                self._lab("型式が入っていないときは、通常の画面で型式を入れてから、もう一度来てください。", GREY)
             self._btn("プログラムは機械で用意する（送らない）", self._prog_skip, "fallback")
             return
         self.lbl_text.setText("送るのは " + "・".join(f"O{n:04d}" for n in nums) + "（型式 " + (self._model() or "-") + "）。"

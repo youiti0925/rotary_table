@@ -14393,7 +14393,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for i, (_m, _c, full) in enumerate(ROWS):
                 tbl.verticalHeaderItem(i).setToolTip(full.replace("\n", " "))
             abbr = {"傾斜完組\n慣らし後": "傾完\n慣後", "回転完組\n慣らし後": "回完\n慣後"}
-            heads = [abbr.get(h) or (h if ("\n" in h or len(h) <= 2 or h.isascii()) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
+            heads = [abbr.get(h) or (h if ("\n" in h or len(h) <= 2 or h.isascii() or h == "クローズ") else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
             tbl.setHorizontalHeaderLabels(heads)
             for i, (_k, _a, h) in enumerate(COLUMNS):
                 tbl.horizontalHeaderItem(i).setToolTip(h.replace("\n", ""))
@@ -14410,7 +14410,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tbl.setMaximumHeight(34 + 6 * 20 + 6)
         else:
             # 見出しは2文字ずつ折り返す（幅が狭くても切れない）
-            heads = [(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
+            heads = [(h if ("\n" in h or len(h) <= 3 or h == "クローズ") else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS]
             tbl.setHorizontalHeaderLabels(heads)
             tbl.horizontalHeader().setMinimumHeight(40)
             tbl.setMinimumHeight(235)                 # 行見出し（2行）が切れない高さ
@@ -14447,7 +14447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = SuffixDialog(self, self.e_machine.text().strip(), self.suffix_sel)
         from .serial_suffix_ui import COLUMNS
         tbl = dlg.picker.tbl                              # 別の窓の表は大きく見せる（見出しは2文字ずつ折り返す）
-        tbl.setHorizontalHeaderLabels([(h if ("\n" in h or len(h) <= 3) else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS])
+        tbl.setHorizontalHeaderLabels([(h if ("\n" in h or len(h) <= 3 or h == "クローズ") else h[:2] + "\n" + h[2:]) for _k, _a, h in COLUMNS])
         tbl.horizontalHeader().setMinimumHeight(56)
         tbl.setMinimumHeight(300)
         scr = QtWidgets.QApplication.primaryScreen()
@@ -16112,7 +16112,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "client_factory": getattr(self, "_rz_client_factory", None), "port_open": getattr(self, "_rz_port_open", None),
                 "model_fn": lambda: self.e_model.text().strip(),
                 "kind_fn": lambda tilt=None: (self.active_kind(tilt), self.measure_scale),
-                "kind_table_fn": lambda: self.kind_table}
+                "kind_table_fn": lambda: self.kind_table,
+                "register_kind": lambda: self.show_kind_conditions(self.e_model.text().strip()),     # 測定条件が無い型式は、その場で登録して先へ進む
+                "register_cond": self.show_condition_editor}
 
     def easy_apply_handoff(self, h):
         """専用画面で測定プログラムを送り終えた: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""

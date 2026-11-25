@@ -17289,7 +17289,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # られない（＝描画高＞計算高で末尾が切れる）ようにしておく
         table.verticalHeader().setMinimumSectionSize(1)
         fm = table.fontMetrics()
-        floor = fm.height() + 6  # 文字が収まる最低限＋わずかな余白（詰めすぎない）
+        floor = fm.height() + 4  # 文字が収まる最低限＋わずかな余白（会社PC150%で右下の表の最終行が下で切れた → 6→4）
         header_h = 0 if table.horizontalHeader().isHidden() else max(table.horizontalHeader().sizeHint().height(), floor)
         height = header_h + 2 * table.frameWidth() + 4
         for r in range(table.rowCount()):

@@ -71,7 +71,7 @@ class TestApi(unittest.TestCase):
             "cnc_allclibhndl3", "cnc_freelibhndl", "cnc_sysinfo", "cnc_rdcncid", "cnc_rdaxisname",
             "cnc_statinfo", "cnc_rdalmmsg", "cnc_rdproginfo", "cnc_rdpdf_subdir",
             "cnc_rdpdf_alldir", "cnc_upstart4", "cnc_upload4", "cnc_upend4", "cnc_rdparainfo",
-            "cnc_rdparam"}
+            "cnc_rdparam", "cnc_rdsyssoft3"}
         # 許可一覧に足してよい書込系は cnc_wrparam と、測定プログラム書込（2026-11-22 実機確認済みの手順）だけ
         # （増やすなら、この試験を直す前に利用者へ聞く）
         self.assertEqual(set(H.ALLOWED_FUNCS) - read_funcs,
@@ -225,6 +225,26 @@ class TestCommands(unittest.TestCase):
         self.assertTrue(r["supported"])
         self.assertEqual(r["family"], "31i")
         self.assertEqual(lib.host, "127.0.0.1")
+
+    def test_identify_reads_servo_version(self):
+        # 23号機から読んだ生のバイトで: サーボは 90E0/0016（制御装置マスタの SERVO と同じ書き方）
+        lib, hp, run = connected()
+        r = run.ok("identify")
+        self.assertEqual(r["servo"], "90E0/0016")
+        self.assertEqual(r["soft_rc"], 0)
+        self.assertEqual(len(r["soft"]), 14)
+        self.assertEqual(r["soft"][0], {"kind": 1, "group": 1, "series": "G103", "version": "18.0"})
+
+    def test_identify_without_servo_read_still_works(self):
+        lib, hp, run = connected({"syssoft_rc": 1})          # 読めない機械（EW_FUNC）でも止めない
+        r = run.ok("identify")
+        self.assertEqual((r["servo"], r["soft"], r["soft_rc"]), ("", [], 1))
+        self.assertEqual(r["cnc_id"], "3C7B5D01-49C1F435-5E28C389-6592C486")
+
+    def test_servo_text_from_soft_list(self):
+        self.assertEqual(H.servo_text([{"group": 1, "series": "G103", "version": "18.0"},
+                                       {"group": 3, "series": "90J0", "version": "28.0"}]), "90J0/28.0")
+        self.assertEqual(H.servo_text([]), "")
 
     def test_status_returns_names_and_raw(self):
         lib, hp, run = connected({"status": {"aut": 0, "run": 0, "alarm": 1}})

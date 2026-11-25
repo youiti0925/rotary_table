@@ -69,6 +69,15 @@ def split_param_text(text):
     return out
 
 
+# cnc_rdsyssoft3 の生のバイト（2026-11-25 23号機から読んだもの、そのまま。14件×12バイト）
+SYSSOFT_23 = bytes.fromhex(
+    "0101473130330031382e30000201473130330031382e30000301473130330031382e3000"
+    "1101473130330031382e30001201473130330031382e30002301473130330031382e3000"
+    "2401473130330031382e30005101363057320030303032000102343041300031392e3000"
+    "1102312e3030002020303100010339304530003030313600010636305638003030323100"
+    "010936353646003030313400110936353645003030313100")
+
+
 class FakeMachine:
     def __init__(self, scenario=None):
         sc = dict(scenario or {})
@@ -87,6 +96,7 @@ class FakeMachine:
         self.series, self.version, self.axes_txt = b"G103", b"18.0", b"6 "
         self.max_axis = 6
         self.axis_names = [b"X", b"Y", b"Z", b"A", b"B", b"C"]
+        self.syssoft = sc.get("syssoft", SYSSOFT_23)
         self.cnc_id = sc.get("cnc_id") or [0x3C7B5D01, 0x49C1F435, 0x5E28C389, 0x6592C486]
         self.status = {"hdck": 0, "tmmode": 0, "aut": 0, "run": 0, "motion": 0,
                        "mstb": 0, "emergency": 0, "alarm": 0, "edit": 0}
@@ -183,6 +193,7 @@ class _Fn:
 class FakeFwlib:
     FUNCS = ("cnc_allclibhndl3", "cnc_freelibhndl", "cnc_sysinfo", "cnc_rdcncid",
              "cnc_rdaxisname", "cnc_statinfo", "cnc_rdalmmsg", "cnc_rdproginfo",
+             "cnc_rdsyssoft3",
              "cnc_rdpdf_subdir", "cnc_rdpdf_alldir", "cnc_upstart4", "cnc_upload4",
              "cnc_upend4", "cnc_rdparainfo", "cnc_rdparam",
              "cnc_wrparam",     # 書く関数はこれだけ（ヘルパーが呼べる）
@@ -278,6 +289,16 @@ class FakeFwlib:
         names = self.m.axis_names
         _put(buf, b"".join(nm + b"\0" for nm in names))
         _target(n).value = len(names)
+        return 0
+
+    def _cnc_rdsyssoft3(self, h, path, num, start, buf):
+        rc = self.sc.get("syssoft_rc", 0)
+        if rc:
+            return rc
+        raw = self.m.syssoft
+        n = min(_val(num), len(raw) // 12)
+        _put(buf, raw[:n * 12])
+        _target(num).value = n
         return 0
 
     def _cnc_statinfo(self, h, arr):

@@ -38,6 +38,8 @@ ALLOWED_FUNCS = (
     "cnc_allclibhndl3", "cnc_freelibhndl",
     "cnc_sysinfo", "cnc_rdcncid", "cnc_rdaxisname",
     "cnc_statinfo", "cnc_rdalmmsg",
+    # ソフトの系列・版数（サーボソフトの版数を読む。読むだけ。2026-11-25 23号機で確認）
+    "cnc_rdsyssoft3",
     "cnc_rdproginfo", "cnc_rdpdf_subdir", "cnc_rdpdf_alldir",
     "cnc_upstart4", "cnc_upload4", "cnc_upend4",
     "cnc_rdparainfo", "cnc_rdparam",
@@ -150,6 +152,36 @@ class Api:
 
 def _txt(b):
     return bytes(b).split(b"\0")[0].decode("ascii", "replace").strip()
+
+
+# cnc_rdsyssoft3（ソフトの系列・版数の一覧）。2026-11-25 23号機（31i-MA）で読んで確かめた形:
+#   呼び方 cnc_rdsyssoft3(h, path=0, *件数(入:読みたい数/出:読めた数), *開始番号(1から), buf)
+#   1件 12 バイト = [0]種類 [1]区分 [2:7]系列(4文字+NUL) [7:12]版数(4文字+NUL)。
+#   区分 1=CNC本体（G103 18.0）、3=サーボ（90E0 0016。制御装置マスタの SERVO 90E0/0016 と一致）。
+#   ほかの区分（2=PMC など）は名前を確かめていないので、生のまま返すだけ。
+SYSSOFT_ITEM = 12
+SYSSOFT_MAX = 32          # 64 を頼むと 23号機は -6 を返した（32 までは 14 件が返る）
+SYSSOFT_SERVO = 3
+
+
+def parse_syssoft3(b, n):
+    """cnc_rdsyssoft3 の結果を [{"kind","group","series","version"}] に。"""
+    b = bytes(b)
+    out = []
+    for i in range(max(0, min(int(n), SYSSOFT_MAX))):
+        e = b[i * SYSSOFT_ITEM:(i + 1) * SYSSOFT_ITEM]
+        if len(e) < SYSSOFT_ITEM:
+            break
+        out.append({"kind": e[0], "group": e[1], "series": _txt(e[2:7]), "version": _txt(e[7:12])})
+    return out
+
+
+def servo_text(soft):
+    """サーボソフトの「系列/版数」（例 90E0/0016。制御装置マスタの SERVO 欄と同じ書き方）。無ければ ""。"""
+    for e in soft or ():
+        if e.get("group") == SYSSOFT_SERVO and e.get("series"):
+            return f"{e['series']}/{e['version']}"
+    return ""
 
 
 def parse_sysinfo(b):
@@ -802,9 +834,30 @@ class Helper:
                 names.append(nm + (chr(s) if 32 < s < 127 else ""))
         out["axis_names"] = names
         out["axis_names_rc"] = rc
+        out["soft"], out["servo"], out["soft_rc"] = self._syssoft()
         out["family"] = self.family
         out["supported"] = bool(self.family and FAMILY_CLASSES[self.family].implemented)
         return out
+
+    def _syssoft(self):
+        """(ソフトの一覧, サーボの「系列/版数」, 戻り値)。読めない機械・DLL では ([], "", 戻り値) で、止めない。"""
+        try:
+            fn_ok = hasattr(self.api, "cnc_rdsyssoft3")
+        except Exception:
+            fn_ok = False
+        if not fn_ok:
+            return [], "", None
+        num = ctypes.c_short(SYSSOFT_MAX)
+        start = ctypes.c_short(1)
+        buf = ctypes.create_string_buffer(SYSSOFT_ITEM * SYSSOFT_MAX + 64)
+        rc = self.read_rc("cnc_rdsyssoft3", self.h, ctypes.c_short(0), ctypes.byref(num),
+                          ctypes.byref(start), buf)
+        if rc in RC_LOST:
+            raise _fail("cnc_rdsyssoft3", rc)
+        if rc != 0:
+            return [], "", rc
+        soft = parse_syssoft3(buf.raw, num.value)
+        return soft, servo_text(soft), rc
 
     def cmd_status(self, a, emit):
         self.need_handle()

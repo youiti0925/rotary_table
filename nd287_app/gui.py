@@ -17141,15 +17141,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 bh += bs.horizontalScrollBar().sizeHint().height()
             bs.setFixedHeight(bh + 2)
 
-    def _fit_window_height(self):
+    def fit_before_show(self):
+        """窓を出す前に、最低の高さを画面に入る高さまで下げておく（最大にする前に呼ぶ）。
+
+        2026-11-25 会社PC（150%表示・使える所 1280×672）で測った: 出す前の最低の高さが 834 で、そのまま最大にすると
+        Windows が窓を 1200×870 で出す（画面より大きい窓は、ちゃんと最大にならない）。0.4秒後に詰めてから最大に
+        し直すと、中身が 1280×672（題名の帯のぶん 23 下にずれる）になり、一番下の帯が画面の外へ出た。
+        先に詰めておけば、最初の「最大にする」がふつうに効く。ここでは最低の高さを下げるだけ（上げない）。"""
+        try:
+            scr = QtWidgets.QApplication.primaryScreen()
+            if scr is None or self.isVisible():
+                return
+            avail = scr.availableGeometry()
+            for _ in range(4):
+                self.resize(avail.width(), max(200, avail.height() - 32))
+                self.layout().activate()
+                self._fit_suffix_panel()
+                self._fit_top()
+                self._fit_flow_text(0)
+                self._fit_cond_box()
+                self._fit_window_height(before_show=True)
+                QtWidgets.QApplication.processEvents()
+                for w in self.findChildren(QtWidgets.QWidget):       # 出す前の窓は、最低の高さを数え直してくれない
+                    w.updateGeometry()
+                for lay in self.findChildren(QtWidgets.QLayout):
+                    lay.invalidate()
+                self.layout().invalidate()
+                self.layout().activate()
+            self.resize(avail.width(), max(200, avail.height() - 32))
+        except Exception:
+            pass                            # 詰められなくても、今までどおり出す
+
+    def _fit_window_height(self, before_show=False):
         """上の見積もりで足りなかった分（ほかの作業が足した帯など）を、実際の窓の最低の高さで測って、
         グラフの最低の高さから引く。窓の最低の高さが、画面に入る高さを超えないようにする。"""
-        if not self.isVisible():
+        if not self.isVisible() and not before_show:
             return
         over = self.minimumSizeHint().height() - self._screen_room()
         if over > 0 and self.plots_widget.minimumHeight() > 110:
             self._plot_min_fix = getattr(self, "_plot_min_fix", 0) + over
             self.plots_widget.setMinimumHeight(max(110, self.plots_widget.minimumHeight() - over))
+        if before_show:
+            return
         scr = self.screen()
         # 比べるのは窓の中身の高さ（Windows では、最大にした窓の枠は画面より少し外まであるのが普通）
         if (scr is not None and self.isMaximized() and not getattr(self, "_remaximized", False)
@@ -18126,5 +18159,6 @@ def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     apply_font(app, settings.get("ui_font_pt", DEFAULT_FONT_PT))
     apply_theme(app, settings.get("ui_theme", DEFAULT_THEME))
     win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)
+    win.fit_before_show()  # 低い画面では、最大にする前に最低の高さを画面に入る高さまで下げる
     win.showMaximized()  # 画面いっぱいで開く（グラフに十分な高さを確保）
     sys.exit(app.exec())

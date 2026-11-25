@@ -223,3 +223,35 @@ class TestLowScreen(TestTopRows):
         w.fill_misc_table([("総合バックラッシ MIN", '-0.9"')])
         self.assertFalse(w.lbl_no_result.isVisibleTo(w))
         self.assertGreater(w.table_misc.height(), 0)
+
+    def test_minimum_height_is_lowered_before_the_window_is_shown(self):
+        # 2026-11-25 会社PCで測った: 出す前の最低の高さ 834 のまま最大にすると、Windows が窓を 1200×870 で出し、
+        # あとで最大にし直しても中身が画面と同じ高さ（題名の帯のぶん下へずれる）になって、一番下の帯が画面の外へ出た。
+        # 出す前に、最低の高さを画面に入る高さまで下げておく（run() が showMaximized の前に呼ぶ）。
+        import inspect
+        from PySide6 import QtWidgets
+        from nd287_app import gui as G
+        from nd287_app import themes
+        from nd287_app.nd287 import DummyDevice
+        from nd287_app.settings import DEFAULTS
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self._font = self.app.font()
+        self._qss = self.app.styleSheet()
+        themes.apply_font(self.app, themes.DEFAULT_FONT_PT)
+        themes.apply_theme(self.app, themes.DEFAULT_THEME)
+        st = copy.deepcopy(DEFAULTS)
+        st.update(focas_auto_find=False, save_root=str(Path(self._tmp) / "save"), bs_save_root="",
+                  webapp_sync_enabled=False)
+        w = G.MainWindow(DummyDevice(), 10.0, 0.5, 5.0, 0.0, st)
+        w.flow_timer.stop()
+        self.addCleanup(self._close, w)
+        w._screen_room = lambda: 640
+        before = w.minimumSizeHint().height()
+        self.assertGreater(before, 640)
+        w.fit_before_show()
+        self.assertFalse(w.isVisible())
+        self.assertLessEqual(w.minimumSizeHint().height(), 640)
+        self.assertLessEqual(w.minimumHeight(), 640)
+        self.assertFalse(w.suffix_panel.isChecked())
+        src = inspect.getsource(G.run)
+        self.assertLess(src.index("fit_before_show()"), src.index("showMaximized()"))

@@ -1,44 +1,157 @@
 # -*- coding: utf-8 -*-
-"""機番末尾のつけ方（社内の表。docs/機番末尾のつけ方_社内表.md）。Qt なし。
+"""機番末尾のつけ方（社内の表「分割精度測定 機番末尾のつけ方」。docs/機番末尾のつけ方_社内表.md・写真つき）。Qt なし。
 
-機番 ＋ モーター（駆動装置 K／正規 なし／仮 I）＋ クランプ（G）＋ 測る種類（表の列の順）＋ 精度NG（-X番号）。
-フルクロ（クローズ）は末尾 C、セミクロは文字なし。記号の表はここ1か所（違えば直す）。
+表の**セルをそのまま**対応表として持つ（規則から組み立てない。写真を拡大して1つずつ確かめた）。
+行 = (モーター, クランプ): 駆動装置 driver=K／正規 normal=なし／仮 temp=I × クランプ G。
+列 = 測る種類。None は表で斜線（該当なし）。多軸は [1軸目(M), 2, 3, 4軸目] の4つ。
+**正規モータ・アンクランプの傾斜単品・回転単品は「TT」「RR」**（写真で確認。T／R ではない）。
+複数の条件は「左から順に」付ける。表の例は 回転単品クローズ=KRC・多軸1軸目の対向（固定）=KMF。
+正規モータの複数条件（RR＋C など）の付け方は表に例が無く**未確認**（ここでは「最初のセルの文字＋あとの条件の列の記号」）。
+精度NGは機番の一番後ろに -X1、-X2…（測定回数に応じて）。
 """
 
-MOTOR = {"driver": "K", "normal": "", "temp": "I"}            # 駆動装置 / 正規モータ / 仮モータ
-# 測る種類（表の列の順。複数あるときはこの順に並べる）
 KIND_ORDER = ("tilt", "rotary", "multi", "fixed", "move", "repair_in", "repair_out", "close",
               "tilt_set", "rotary_set", "tilt_set_after", "rotary_set_after")
-KIND_CODE = {"tilt": "T", "rotary": "R", "multi": "M", "fixed": "F", "move": "S", "repair_in": "U",
-             "repair_out": "E", "close": "C", "tilt_set": "TY", "rotary_set": "RY",
-             "tilt_set_after": "DTY", "rotary_set_after": "DRY"}
 KIND_LABEL = {"semi": "セミクロ", "tilt": "傾斜単品", "rotary": "回転単品", "multi": "多軸", "fixed": "対向（固定）",
               "move": "対向（移動）", "repair_in": "修理受入", "repair_out": "修理後", "close": "クローズ（フルクロ）",
               "tilt_set": "傾斜完組", "rotary_set": "回転完組", "tilt_set_after": "傾斜完組・慣らし後",
               "rotary_set_after": "回転完組・慣らし後"}
+# 列の記号（表の見出しの［ ］）。複数条件で、2つ目以降に足す文字
+COLUMN_MARK = {"tilt": "T", "rotary": "R", "fixed": "F", "move": "S", "repair_in": "U", "repair_out": "E",
+               "close": "C", "tilt_set": "TY", "rotary_set": "RY", "tilt_set_after": "DTY", "rotary_set_after": "DRY"}
+ROW_PREFIX = {("driver", False): "K", ("driver", True): "KG", ("normal", False): "", ("normal", True): "G",
+              ("temp", False): "I", ("temp", True): "IG"}
+
+TABLE = {
+    ("driver", False): {
+        "semi": "K",
+        "tilt": "KT",
+        "rotary": "KR",
+        "multi": ["KM", "K2", "K3", "K4"],
+        "fixed": "KF",
+        "move": "KS",
+        "repair_in": "KU",
+        "repair_out": "KE",
+        "close": "KC",
+        "tilt_set": "KTY",
+        "rotary_set": "KRY",
+        "tilt_set_after": "KDTY",
+        "rotary_set_after": "KDRY",
+    },
+    ("driver", True): {
+        "semi": "KG",
+        "tilt": "KGT",
+        "rotary": "KGR",
+        "multi": ["KGM", "KG2", "KG3", "KG4"],
+        "fixed": "KGF",
+        "move": "KGS",
+        "repair_in": "KGU",
+        "repair_out": "KGE",
+        "close": "KGC",
+        "tilt_set": None,
+        "rotary_set": None,
+        "tilt_set_after": None,
+        "rotary_set_after": None,
+    },
+    ("normal", False): {
+        "semi": "",
+        "tilt": "TT",
+        "rotary": "RR",
+        "multi": ["M", "2", "3", "4"],
+        "fixed": "F",
+        "move": "S",
+        "repair_in": "U",
+        "repair_out": "E",
+        "close": "C",
+        "tilt_set": "TY",
+        "rotary_set": "RY",
+        "tilt_set_after": "DTY",
+        "rotary_set_after": "DRY",
+    },
+    ("normal", True): {
+        "semi": "G",
+        "tilt": "GT",
+        "rotary": "GR",
+        "multi": ["GM", "G2", "G3", "G4"],
+        "fixed": "GF",
+        "move": "GS",
+        "repair_in": "GU",
+        "repair_out": "GE",
+        "close": "GC",
+        "tilt_set": "GTY",
+        "rotary_set": "GRY",
+        "tilt_set_after": "GDTY",
+        "rotary_set_after": "GDRY",
+    },
+    ("temp", False): {
+        "semi": "I",
+        "tilt": "IT",
+        "rotary": "IR",
+        "multi": ["IM", "I2", "I3", "I4"],
+        "fixed": "IF",
+        "move": "IS",
+        "repair_in": "IU",
+        "repair_out": "IE",
+        "close": "IC",
+        "tilt_set": "ITY",
+        "rotary_set": "IRY",
+        "tilt_set_after": "IDTY",
+        "rotary_set_after": "IDRY",
+    },
+    ("temp", True): {
+        "semi": "IG",
+        "tilt": "IGT",
+        "rotary": "IGR",
+        "multi": ["IGM", "IG2", "IG3", "IG4"],
+        "fixed": "IGF",
+        "move": "IGS",
+        "repair_in": "IGU",
+        "repair_out": "IGE",
+        "close": "IGC",
+        "tilt_set": "IGTY",
+        "rotary_set": "IGRY",
+        "tilt_set_after": "IGDTY",
+        "rotary_set_after": "IGDRY",
+    },
+}
+
+
+def cell(motor, clamp, kind, multi_axis=1):
+    """表のセル1つ。表で斜線（該当なし）のときは ValueError（理由つき）。"""
+    row = TABLE.get((motor, bool(clamp)))
+    if row is None:
+        raise ValueError(f"モーターの種類が分かりません: {motor}")
+    if kind not in row:
+        raise ValueError(f"測る種類が分かりません: {kind}")
+    v = row[kind]
+    if v is None:
+        raise ValueError(f"{KIND_LABEL[kind]}は、この行（{motor}・{'クランプ' if clamp else 'アンクランプ'}）では表で斜線（該当なし）です")
+    if kind == "multi":
+        n = int(multi_axis)
+        if not 1 <= n <= 4:
+            raise ValueError("多軸は1〜4軸目です")
+        return v[n - 1]
+    return v
 
 
 def suffix(motor="normal", clamp=False, kinds=(), multi_axis=1, ng=0):
-    """末尾の文字列を返す。
-
-    motor: driver / normal / temp。clamp: クランプか。kinds: 測る種類（複数可。何も無い＝セミクロ＝文字なし）。
-    multi_axis: 多軸のとき何軸目か（1=M、2〜4=数字）。ng: 精度NGの回数（0=付けない、1=-X1、2=-X2…）。
-    """
-    if motor not in MOTOR:
-        raise ValueError(f"モーターの種類が分かりません: {motor}")
+    """末尾の文字列。kinds が空 or ["semi"] のときはセミクロのセル（駆動装置=K・正規=なし…）。複数は列の順に並べる。"""
     ks = [k for k in KIND_ORDER if k in set(kinds)]
-    unknown = set(kinds) - set(KIND_ORDER) - {"semi"}
-    if unknown:
-        raise ValueError(f"測る種類が分かりません: {sorted(unknown)}")
-    out = MOTOR[motor] + ("G" if clamp else "")
-    for k in ks:
-        if k == "multi":
-            n = int(multi_axis)
-            if not 1 <= n <= 4:
-                raise ValueError("多軸は1〜4軸目です")
-            out += "M" if n == 1 else str(n)
-        else:
-            out += KIND_CODE[k]
+    bad = set(kinds) - set(KIND_ORDER) - {"semi"}
+    if bad:
+        raise ValueError(f"測る種類が分かりません: {sorted(bad)}")
+    if not ks:
+        out = cell(motor, clamp, "semi")
+    else:
+        out = cell(motor, clamp, ks[0], multi_axis)
+        prefix = ROW_PREFIX[(motor, bool(clamp))]
+        for k in ks[1:]:
+            if k == "multi":
+                full = cell(motor, clamp, "multi", multi_axis)
+                out += full[len(prefix):]
+            else:
+                cell(motor, clamp, k)                      # 斜線のセルなら、ここで理由つきで止める
+                out += COLUMN_MARK[k]
     if ng:
         out += f"-X{int(ng)}"
     return out

@@ -13869,6 +13869,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         self.guide.setStyleSheet("padding:1px 0px;")
+        self.guide.setMaximumHeight(34)          # margin は上下にも付くので、帯の高さを押し広げない
         self.guide.setMargin(10)               # 左右の余白は margin で（省く幅の計算に入る。padding だと「…」がはみ出して隠れた）
         # ===== 1段目: 仕事の順のかたまり（測る／結果を残す／データを見る／機械）。見本は案A（main_top.py） =====
         toolbar = QtWidgets.QToolBar("操作")

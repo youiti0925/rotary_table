@@ -13209,6 +13209,10 @@ class _NoWheelFilter(QtCore.QObject):
         return True   # スクロール先が無くても値は変えない
 
 
+class _NoSerial(Exception):
+    """機番が空のときの表示用（保存する名前の欄）。"""
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -14415,7 +14419,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             name = self.save_file_no()
+            if not self.e_machine.text().strip():
+                text = f"保存する名前: （機番を入れてください。末尾は {self.suffix_sel.suffix() or 'なし'}）"
+                raise _NoSerial(text)
             text = f"保存する名前: {name}（機番 {self.e_machine.text().strip() or '未入力'} ＋ 末尾 {self.suffix_sel.suffix() or 'なし'}）"
+        except _NoSerial as e:
+            text = str(e)
         except ValueError as e:
             text = f"保存する名前を作れません: {e}"
         full = text + "　" + KR.NAME_NOTE

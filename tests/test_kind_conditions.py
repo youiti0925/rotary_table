@@ -146,6 +146,13 @@ class TestPickKind(unittest.TestCase):
         self.assertEqual(KR.pick_kind([]), "")
 
 
+class TestRowsFromExisting(unittest.TestCase):
+    def test_same_model_twice_gives_one_row(self):
+        m = {"user_rotary": {"a": {"型式": "RB-250", "ホイール刻み": 10}, "b": {"型式": "rb-250", "ホイール刻み": 5}}}
+        rot, _ = K.rows_from_existing(m)
+        self.assertEqual(len(rot), 1)
+
+
 class TestDialog(unittest.TestCase):
     def test_dialog_save_and_reload(self):
         import os

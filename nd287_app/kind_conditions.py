@@ -199,7 +199,12 @@ def build_template(path, rotary_rows=(), tilt_rows=()):
 def rows_from_existing(masters):
     """今までの登録（ユーザー条件・測定条件.csv）を、種類を空にして写す行。masters は masters.load_all 相当の辞書。"""
     rot, tilt = [], []
+    seen_r = set()
     for key, rec in (masters.get("user_rotary") or {}).items():
+        mr = str(rec.get("型式", key)).upper()
+        if mr in seen_r:
+            continue
+        seen_r.add(mr)
         rot.append({"型式": rec.get("型式", key), "測定の種類": "", "ホイール刻み": rec.get("ホイール刻み", ""),
                     "ウォーム刻み": rec.get("ウォーム刻み", ""), "ウォーム範囲": rec.get("ウォーム範囲", ""),
                     "ウォーム開始": rec.get("ウォーム開始", ""), "メモ": "今までの登録（ユーザー回転条件）"})
@@ -211,10 +216,16 @@ def rows_from_existing(masters):
             continue
         p = condition_params(cond)
         if p.get("wheel_pitch"):
+            have.add(model.upper())                      # 同じ型式の条件が複数あっても1行だけ（重なりの警告を作らない）
             rot.append({"型式": model, "測定の種類": "", "ホイール刻み": round(p["wheel_pitch"], 6),
                         "ウォーム刻み": round(p.get("worm_pitch", 0) or 0, 6), "ウォーム範囲": round(p.get("worm_range", 0) or 0, 6),
                         "ウォーム開始": 0, "メモ": "今までの登録（測定条件.csv）"})
+    seen_t = set()
     for key, rec in (masters.get("user_tilt") or {}).items():
+        mt = str(rec.get("型式", key)).upper()
+        if mt in seen_t:
+            continue
+        seen_t.add(mt)
         tilt.append({"型式": rec.get("型式", key), "測定の種類": "", "開始角度": rec.get("開始角度", ""),
                      "終了角度": rec.get("終了角度", ""), "刻み": rec.get("刻み", ""), "ウォーム刻み": rec.get("ウォーム刻み", ""),
                      "ウォーム範囲": rec.get("ウォーム範囲", ""), "ウォーム開始": rec.get("ウォーム開始", ""),

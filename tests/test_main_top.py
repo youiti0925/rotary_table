@@ -74,7 +74,6 @@ class TestTopRows(unittest.TestCase):
                   webapp_sync_enabled=False)
         w = G.MainWindow(DummyDevice(), 10.0, 0.5, 5.0, 0.0, st)
         w.flow_timer.stop()
-        w.setMaximumSize(5000, 5000)        # 試験の画面は小さい（800）ので、窓の上限を外してから幅を決める
         w.resize(width, 700)
         w.show()
         for _ in range(5):
@@ -255,3 +254,9 @@ class TestLowScreen(TestTopRows):
         self.assertFalse(w.suffix_panel.isChecked())
         src = inspect.getsource(G.run)
         self.assertLess(src.index("fit_before_show()"), src.index("showMaximized()"))
+
+    def test_main_window_has_no_maximum_size(self):
+        # 上限が「画面の使える所」だと、Windows の最大の窓が題名の帯のぶん下へはみ出す（会社PCで 23）
+        w = self._window(1280)
+        self.assertEqual(w.maximumHeight(), 16777215)
+        self.assertEqual(w.maximumWidth(), 16777215)

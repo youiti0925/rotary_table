@@ -27,7 +27,7 @@ def _o(numbers):
     return "・".join(f"O{int(n):04d}" for n in numbers or [])
 
 
-def main_flow(*, nd_ok=False, nd_dummy=False, machine_host="", machine_unit="",
+def _main_flow_full(*, nd_ok=False, nd_dummy=False, machine_host="", machine_unit="",
               machine_done=False, missing=(), capturing=False, count=(0, 0),
               finished=False, ng=0, has_spec=False, saved=False, saved_path="",
               programs=(), next_mode="", mode="", model_unknown=False):
@@ -86,6 +86,45 @@ def main_flow(*, nd_ok=False, nd_dummy=False, machine_host="", machine_unit="",
         note + f"準備できました（測り方: {mode}）。『取込開始』を押してから、機械の前で"
         + (f" {prog} を選んで" if prog else "、測定プログラムを選んで")
         + "起動（サイクルスタート）を押してください。"))
+
+
+def main_flow(**kw):
+    """測定の画面の帯。_main_flow_full と同じ戻り値に、帯に出す短い文 "short" を足す
+    （2026-11-25 上の2段の作り直し。長い文 "text" は今までどおり残し、マウスを乗せると出る）。"""
+    g = _main_flow_full(**kw)
+    g["short"] = _short(g, kw)
+    return g
+
+
+def _short(g, kw):
+    prog = _o(kw.get("programs", ()))
+    what = f" {prog} を" if prog else "測定プログラムを"
+    act = g["action"]
+    if kw.get("capturing"):
+        cur, total = kw.get("count", (0, 0))
+        return f"測っています（{cur}／{total} 点）。機械の前で{what}起動してください。機械が止まるたびに値が1つ入ります。"
+    if act == "next_mode":
+        return f"保存しました。続けて「{kw.get('next_mode', '')}」を測ります。"
+    if act == "new":
+        return "保存しました。この製品の測定は終わりです。"
+    if act == "save":
+        if kw.get("ng"):
+            return (f"測り終わりました。規格から外れた所が {kw['ng']} か所あります（右の表の赤い字）。"
+                    "残すなら『セーブ』、測り直すなら『取込開始』か『部分再測定』。")
+        if kw.get("has_spec"):
+            return "測り終わりました。外れ（赤い字）はありません。『セーブ』を押して保存してください。"
+        return "測り終わりました。規格が画面に出ていません。右の表の値を確かめてから『セーブ』を押してください。"
+    if act == "open_wizard":
+        if kw.get("machine_host"):
+            return "機械が見えています。『機械に入れる』を押して、受注伝票番号を入れます。"
+        return "機械の電源を入れ、PC と LAN ケーブルでつなぎます。つないだら『機械に入れる』を押します。"
+    if act == "reconnect":
+        return "角度を読む表示器が PC につながっていません。電源とケーブルを確かめて『表示器につなぎ直す』を押してください。"
+    if act == "focus":
+        return "左上の「測定情報」に入れてください: " + "・".join(kw.get("missing", ())) + "。"
+    if act == "start":
+        return f"準備できました（測り方: {kw.get('mode', '')}）。『取込開始』を押してから、機械の前で{what}起動します。"
+    return g["text"]
 
 
 # ------------------------------------------------------------------ かんたん作成 段③

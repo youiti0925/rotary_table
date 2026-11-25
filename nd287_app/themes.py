@@ -26,6 +26,13 @@ DEFAULT_THEME = "ネイビー・コーポレート"
 DEFAULT_FONT_PT = 7
 
 
+def _mix(a, b, t):
+    """色 a に色 b を t（0〜1）だけ混ぜる（"#rrggbb"）。上の段の枠・見出しの色をテーマから作る。"""
+    pa = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    pb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(pa, pb))
+
+
 def _light(accent, accent_hover, accent_press, bg, panel, border,
            header_bg, header_fg, text, muted, primary_fg="#ffffff",
            pad="2px 8px", btn_pad="4px 11px"):
@@ -36,6 +43,9 @@ def _light(accent, accent_hover, accent_press, bg, panel, border,
     無駄に食ってグラフが小さくなる（実機で指摘あり）。
     """
     sel_fg = "#ffffff"
+    tb_line = _mix(header_bg, header_fg, 0.32)     # 上の段のボタンの枠・区切り
+    tb_cap = _mix(header_bg, header_fg, 0.68)      # かたまりの見出し（小さい字）
+    tb_off = _mix(header_bg, header_fg, 0.38)      # 押せないボタンの字
     return f"""
 QMainWindow, QDialog, QWidget {{ background: {bg}; color: {text}; }}
 QLabel, QCheckBox, QRadioButton {{ background: transparent; color: {text}; }}
@@ -91,6 +101,43 @@ QToolBar QPushButton:hover {{ background: {accent_hover}; border-color: {accent}
 QToolBar QPushButton:pressed {{ background: {accent_press}; }}
 QToolBar QLabel {{ color: {header_fg}; }}
 QToolBar QComboBox {{ color: {text}; }}
+
+/* 測定の画面の上の2段（main_top.py。見本は案A）。1段目 #topBar ＝仕事の順のかたまり、2段目 #flowBar ＝案内 */
+QToolBar#topBar {{ padding: 3px 4px 5px 4px; spacing: 0px; }}
+QToolBar#topBar QWidget {{ background: transparent; }}
+QToolBar#topBar QLabel#topCap {{ color: {tb_cap}; font-weight: bold; padding: 0px 1px; }}
+QToolBar#topBar QFrame#topSep {{ background: {tb_line}; margin: 3px 0px; }}
+QToolBar#topBar QPushButton, QToolBar#topBar QToolButton {{ background: transparent;
+    border: 1px solid {tb_line}; border-radius: 5px; padding: 3px 7px; color: {header_fg}; }}
+QToolBar#topBar QPushButton:hover, QToolBar#topBar QToolButton:hover {{ background: {accent_hover};
+    border-color: {accent}; color: {text}; }}
+QToolBar#topBar QPushButton:disabled {{ color: {tb_off}; border-color: {tb_off}; background: transparent; }}
+QToolBar#topBar QToolButton::menu-indicator {{ image: none; }}
+QToolBar#topBar QPushButton#topMain {{ background: {header_fg}; color: {header_bg};
+    border-color: {header_fg}; font-weight: bold; padding: 3px 12px; }}
+QToolBar#topBar QPushButton#topMain:hover {{ background: {accent_hover}; color: {text}; }}
+QToolBar#topBar QPushButton#topMain:disabled {{ background: transparent; color: {tb_off};
+    border-color: {tb_off}; }}
+QToolBar#topBar QPushButton#topMode {{ border-radius: 11px; padding: 3px 12px; }}
+QToolBar#topBar QPushButton[now="true"] {{ background: #ffd95a; border-color: #ffd95a;
+    color: #1b2550; font-weight: bold; }}
+QToolBar#topBar QPushButton[now="true"]:disabled {{ background: transparent; color: {tb_off};
+    border-color: {tb_off}; }}
+QToolBar#flowBar {{ background: {panel}; border: none; border-bottom: 1px solid {border};
+    padding: 2px 4px; }}
+QToolBar#flowBar QWidget {{ background: transparent; color: {text}; }}
+QToolBar#flowBar QLabel {{ color: {text}; }}
+QToolBar#flowBar StepStrip {{ qproperty-accent: "{accent}"; qproperty-onAccent: "{primary_fg}"; }}
+QToolBar#flowBar QFrame#topSep {{ background: {border}; margin: 2px 0px; }}
+QToolBar#flowBar QPushButton#primary {{ background: {accent}; color: {primary_fg}; border: none;
+    border-radius: 6px; padding: 5px 14px; font-weight: bold; }}
+QToolBar#flowBar QPushButton#primary:hover {{ background: {accent_press}; color: {primary_fg}; }}
+QToolBar#flowBar QPushButton#flowSkip {{ background: transparent; border: none; color: {accent};
+    text-decoration: underline; padding: 1px 4px; }}
+QToolBar#flowBar QPushButton#flowSkip:hover {{ color: {accent_press}; }}
+QToolBar#flowBar QPushButton#chip {{ background: {bg}; border: 1px solid {border};
+    border-radius: 9px; padding: 1px 9px; color: {text}; text-align: left; }}
+QToolBar#flowBar QPushButton#chip:hover {{ border-color: {accent}; }}
 
 QTabWidget::pane {{ border: 1px solid {border}; border-radius: 8px; top: -1px;
     background: {panel}; }}

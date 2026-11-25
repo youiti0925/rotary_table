@@ -123,6 +123,7 @@ from . import ftpserver
 from . import focas_backup, focas_client, focas_ops, focas_find
 from . import wizard_steps as W
 from . import flow_guide
+from . import main_top
 from . import wizard_programs as WP
 from . import kind_runtime as KR
 from . import serial_suffix as SS
@@ -13679,46 +13680,61 @@ class MainWindow(QtWidgets.QMainWindow):
         b_settings.clicked.connect(self.open_settings)
         b_help.clicked.connect(self.show_help)
         # ロード名・取込手順は最上部ツールバーの「アラーム」の右に出す（場所を取らない）
-        self.guide = QtWidgets.QLabel("―")
+        self.guide = QtWidgets.QLabel("")
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         self.guide.setStyleSheet("padding:1px 10px;")
+        # ===== 1段目: 仕事の順のかたまり（測る／結果を残す／データを見る／機械）。見本は案A（main_top.py） =====
         toolbar = QtWidgets.QToolBar("操作")
+        toolbar.setObjectName("topBar")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
-        # 取込開始・自動測定を左上（セーブの横）に置く
-        toolbar.addWidget(self.b_start)
-        toolbar.addWidget(self.b_auto)
-        toolbar.addWidget(self.b_partial)
-        toolbar.addSeparator()
-        for b in (self.b_save, self.b_print, self.b_pdf, b_load):
-            toolbar.addWidget(b)
-        toolbar.addSeparator()
-        for b in (self.b_raw, self.b_past):
-            toolbar.addWidget(b)
-        toolbar.addSeparator()
-        # 分析・プログラム作成・パラメータ・アラームは1つのメニューボタンにまとめる
-        # （ツールバーを短くして、測定条件とグラフに場所を回す）
+        self.b_start.setObjectName("topMain")       # 取込開始は今までどおり左上。いちばん目立たせる
+        self.b_auto.setObjectName("")
+        self.b_load = b_load
+        self.b_analysis = QtWidgets.QPushButton("分析")
+        self.b_analysis.setToolTip("過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷")
+        self.b_analysis.clicked.connect(self.show_analysis)
+        self.b_to_machine = QtWidgets.QPushButton("機械に入れる")
+        self.b_to_machine.setToolTip("受注伝票番号から、製品に合わせた設定と測定プログラムを機械へ入れます")
+        self.b_to_machine.clicked.connect(self.show_param_dialog)
+        self.b_alarm = QtWidgets.QPushButton("アラーム")
+        self.b_alarm.setToolTip("FANUCのアラーム番号・メッセージから意味と対処の目安を調べる")
+        self.b_alarm.clicked.connect(self.show_alarm_help)
+        self.b_easy = QtWidgets.QPushButton("はじめてモード")
+        self.b_easy.setObjectName("topMode")
+        self.b_easy.setToolTip("絵で1つずつ案内する、初心者用の画面を開きます（今の画面はそのまま残ります）")
+        self.b_easy.clicked.connect(self.show_easy_mode)
+        # よく使わないものは「その他 ▾」へまとめる（無くしたボタンは無い）
         self.b_tools = QtWidgets.QToolButton()
-        self.b_tools.setText("ツール ▾")
-        self.b_tools.setToolTip("分析／プログラム作成／パラメータ／アラーム")
+        self.b_tools.setText("その他 ▾")
+        self.b_tools.setToolTip("測定条件の登録／ピッチエラー補正／測定プログラムを作る など")
         self.b_tools.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         tools_menu = QtWidgets.QMenu(self.b_tools)
+        # 画面の幅が足りないとき、右のはしのボタンから順に「その他」の中へ移す（_fit_top。無くなるボタンは無い）
+        self._top_overflow = []
+        for b in (self.b_analysis, self.b_raw, self.b_alarm, self.b_pdf, self.b_past, self.b_partial, b_load):
+            act = tools_menu.addAction(b.text() + "…")
+            act.triggered.connect(b.click)
+            act.setVisible(False)
+            self._top_overflow.append((b, act))
+        tools_menu.aboutToShow.connect(
+            lambda: [a.setEnabled(b.isEnabled()) for b, a in self._top_overflow])
+        self._top_overflow_sep = tools_menu.addSeparator()
+        self._top_overflow_sep.setVisible(False)
         for text, slot, tip in (
-            ("分析…", self.show_analysis,
-             "過去データの横断比較・1件詳細をグラフ/表で見てCSV・Excel・印刷"),
-            ("測定プログラムを作る（ファイル・細かい設定）…", self.show_program_dialog,
-             "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
-            ("機械に入れる（設定と測定プログラム）…", self.show_param_dialog,
-             "受注番号から かんたん作成（詳細設定・パラメータDBも中から）"),
+            ("測定条件の登録…", self.show_condition_editor,
+             "型式ごとの測り方（刻みなど）を登録する"),
             ("測定条件を種類別に登録…", self.show_kind_conditions,
              "1つの型式に、モーター・駆動装置・フルクロの測定条件をまとめて登録（専用の Excel にも保存）"),
+            ("ピッチエラー補正…", self.show_pitch_correction,
+             "提出用のピッチエラー補正表＋補正後グラフを表示・CSV保存・印刷"),
+            ("測定プログラムを作る（ファイル・細かい設定）…", self.show_program_dialog,
+             "現在の測定条件からFANUC測定プログラム(Gコード)を作成"),
             ("型式ごとに一括作成…", self.show_batch_dialog,
              "測定条件マスタの型式ぶんの測定プログラムをまとめて作る"
              "（フォルダ分け／カード向けの平置きを選べる）"),
-            ("アラーム…", self.show_alarm_help,
-             "FANUCのアラーム番号・メッセージから意味と対処の目安を調べる"),
             ("FTPサーバー…", self.show_ftp_server,
              "このPCをFTPサーバーにして、カード無しで制御装置にファイルを取りに来させる"),
             ("機械と直接つなぐ（FOCAS）…", self.show_focas,
@@ -13731,17 +13747,41 @@ class MainWindow(QtWidgets.QMainWindow):
             act.setToolTip(tip)
             act.triggered.connect(slot)
         self.b_tools.setMenu(tools_menu)
-        toolbar.addWidget(self.b_tools)
-        for b in (self.b_cond, self.b_pcorr):
-            toolbar.addWidget(b)
-        toolbar.addSeparator()
-        toolbar.addWidget(self.guide)        # ロード名・取込手順（アラームの右）
-        spacer = QtWidgets.QWidget()
-        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
-                             QtWidgets.QSizePolicy.Preferred)
-        toolbar.addWidget(spacer)
-        toolbar.addWidget(b_settings)
-        toolbar.addWidget(b_help)
+        left = QtWidgets.QWidget()
+        lh = QtWidgets.QHBoxLayout(left)
+        lh.setContentsMargins(0, 0, 0, 0)
+        lh.setSpacing(0)
+        for n, (cap, ws) in enumerate((
+                ("測る", (self.b_start, self.b_auto, self.b_partial)),
+                ("結果を残す", (self.b_save, self.b_print, self.b_pdf)),
+                ("データを見る", (b_load, self.b_past, self.b_raw, self.b_analysis)),
+                ("機械", (self.b_to_machine, self.b_alarm)),
+                ("", (self.b_tools,)))):
+            if n:
+                lh.addWidget(main_top.separator())
+            lh.addWidget(main_top.group(cap, ws))
+        self.guide.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        lh.addWidget(self.guide, 100)           # ロード名・取込手順（幅が足りないときは、ここから縮む）
+        lh.addStretch(1)                        # ロード名を出さないときも、かたまりは左に寄せたまま
+        # かたまりは横に長いので、入りきらない幅のときは右のはしを切る（右上の3つは必ず見える）
+        self.top_left = left
+        self.top_scroll = QtWidgets.QScrollArea()
+        self.top_scroll.setWidget(left)
+        self.top_scroll.setWidgetResizable(True)
+        self.top_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.top_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.top_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.top_scroll.setMinimumWidth(200)
+        self.top_cap_h = left.findChild(QtWidgets.QLabel, "topCap").sizeHint().height()
+        self.top_scroll.setFixedHeight(left.sizeHint().height())
+        top = QtWidgets.QWidget()
+        top.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        th = QtWidgets.QHBoxLayout(top)
+        th.setContentsMargins(0, 0, 0, 0)
+        th.setSpacing(0)
+        th.addWidget(self.top_scroll, 1)
+        th.addWidget(main_top.group("", (self.b_easy, b_settings, b_help)))
+        toolbar.addWidget(top)
         self._build_flow_bar(tools_menu)
 
         # ===== 受信値・データ数 =====
@@ -14535,11 +14575,13 @@ class MainWindow(QtWidgets.QMainWindow):
         guide_font.setPointSize(base + 2)
         guide_font.setBold(True)
         self.guide.setFont(guide_font)
-        for button in (self.b_start, self.b_auto):
+        for button in (self.b_start,):               # 目立たせるのは取込開始だけ（上の段の作り直し 2026-11-25）
             bf = button.font()
-            bf.setPointSize(base + 3)
+            bf.setPointSize(base + 2)
             bf.setBold(True)
             button.setFont(bf)
+        if hasattr(self, "top_scroll"):
+            self._fit_top()
         for label in (self.live, self.counts):
             lf = label.font()
             lf.setPointSize(max(base - 1, 8))
@@ -14816,7 +14858,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.b_save.setEnabled(False)
         self.b_print.setEnabled(False)
         self.b_corr.setEnabled(False)
-        self.guide.setText("―")
+        self.guide.setText("")
         self.live.setText("")
         self.counts.setText("")
         self.update_web_snapshot(with_png=True)
@@ -15321,15 +15363,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- 作業の案内（いま何をすればよいかを、1つだけ出す帯。flow_guide.main_flow）-----
 
+    # 2段目の「次にやること」の字の色（青い箱・赤い箱はやめて、字の色と丸だけで知らせる）
     FLOW_STYLE = {
-        "do": "background:#eff6ff; color:#1d4ed8;",
-        "wait": "background:#f1f5f9; color:#334155;",
-        "stop": "background:#fef2f2; color:#b91c1c;",
-        "done": "background:#dcfce7; color:#166534;",
+        "do": "",
+        "wait": "",
+        "stop": "color:#dc2626;",
+        "done": "color:#16a34a;",
     }
 
     def _build_flow_bar(self, tools_menu):
-        """上のツールバーのすぐ下に、作業の順番と「次にやること」を出す（別の画面は作らない）。"""
+        """1段目のすぐ下に「いまどこ・次にやること・ボタン1つ・つながっている相手」を出す（別の画面は作らない）。"""
         self._flow_machine_done = False     # 機械の準備（パラメータ・測定プログラム）が済んだ／飛ばした
         self._flow_saved = False            # いま画面にある結果を保存した
         self._flow_saved_path = ""
@@ -15338,46 +15381,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self._nd_ok = False                 # 表示器（ND287）につながった
         self.addToolBarBreak(QtCore.Qt.TopToolBarArea)
         bar = QtWidgets.QToolBar("作業の案内")
+        bar.setObjectName("flowBar")
         bar.setMovable(False)
         bar.setFloatable(False)
         self.flow_bar = bar
         box = QtWidgets.QWidget()
         box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        lay = QtWidgets.QVBoxLayout(box)
-        lay.setContentsMargins(6, 2, 6, 2)
-        lay.setSpacing(2)
-        self.lbl_flow_steps = QtWidgets.QLabel("")
-        self.lbl_flow_steps.setTextFormat(QtCore.Qt.RichText)
-        row = QtWidgets.QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self.lbl_flow_steps, 1)
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(12)
+        self.flow_steps = main_top.StepStrip(flow_guide.STAGES)
+        row.addWidget(self.flow_steps, 0, QtCore.Qt.AlignVCenter)
         self.lbl_flow = QtWidgets.QLabel("")
+        self.lbl_flow.setObjectName("flowText")
         self.lbl_flow.setWordWrap(True)
         self.lbl_flow.setTextFormat(QtCore.Qt.PlainText)
         self.lbl_flow.setMinimumWidth(200)
         self.lbl_flow.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        row.addWidget(self.lbl_flow, 1)
+        acts = QtWidgets.QVBoxLayout()
+        acts.setContentsMargins(0, 0, 0, 0)
+        acts.setSpacing(0)
         self.b_flow = QtWidgets.QPushButton("")
         self.b_flow.setObjectName("primary")
         self.b_flow.clicked.connect(self._flow_do)
-        row.addWidget(self.b_flow)
-        self.b_flow_skip = QtWidgets.QPushButton("もう機械に入っている（飛ばす）")
+        acts.addWidget(self.b_flow)
+        self.b_flow_skip = QtWidgets.QPushButton("もう入っている（飛ばす）")
+        self.b_flow_skip.setObjectName("flowSkip")
+        self.b_flow_skip.setCursor(QtCore.Qt.PointingHandCursor)
         self.b_flow_skip.setToolTip("パラメータと測定プログラムが、もう機械に入っているとき。測定の準備へ進みます")
         self.b_flow_skip.clicked.connect(self._flow_skip)
-        row.addWidget(self.b_flow_skip)
-        self.b_easy = QtWidgets.QPushButton("はじめてモード（初心者用）")
-        self.b_easy.setStyleSheet("QPushButton{background:#1560D4; color:#fff; font-weight:bold; padding:6px 14px; border-radius:6px;}"
-                                  "QPushButton:hover{background:#0F4CB0;}")
-        self.b_easy.setToolTip("絵で1つずつ案内する、初心者用の画面を開きます（今の画面はそのまま残ります）")
-        self.b_easy.clicked.connect(self.show_easy_mode)
-        row.addWidget(self.b_easy)
-        b_proc = QtWidgets.QPushButton("手順を見る")
-        b_proc.setToolTip("最初から最後までの手順（1枚）を開きます")
-        b_proc.clicked.connect(lambda: HelpDialog(self, start_title="はじめての手順").exec())
-        row.addWidget(b_proc)
-        lay.addLayout(row)
-        lay.addWidget(self.lbl_flow)        # 文は横いっぱい（狭い画面でも縦に伸びすぎない）
+        acts.addWidget(self.b_flow_skip, 0, QtCore.Qt.AlignHCenter)
+        row.addLayout(acts)
+        row.addWidget(main_top.separator())
+        chips = QtWidgets.QVBoxLayout()
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(2)
+        self.chip_machine = main_top.Chip()
+        self.chip_machine.setToolTip("機械（制御装置）が LAN で見えているか。押すと「機械と直接つなぐ」を開きます")
+        self.chip_machine.clicked.connect(self.show_focas)
+        self.chip_nd = main_top.Chip()
+        self.chip_nd.setToolTip("角度を読む表示器（ND287）が PC につながっているか。押すとつなぎ直します")
+        self.chip_nd.clicked.connect(self.connect_device)
+        chips.addWidget(self.chip_machine)
+        chips.addWidget(self.chip_nd)
+        row.addLayout(chips)
         bar.addWidget(box)
         self.addToolBar(QtCore.Qt.TopToolBarArea, bar)
+        tools_menu.addSeparator()
+        tools_menu.addAction("はじめての手順を見る…",
+                             lambda: HelpDialog(self, start_title="はじめての手順").exec())
         tools_menu.addAction("はじめてモード（初心者用）…", self.show_easy_mode)
         self.act_flow = tools_menu.addAction("作業の案内を出す（上の帯）")
         self.act_flow.setCheckable(True)
@@ -15389,8 +15442,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flow_timer.timeout.connect(self._refresh_flow)
         self.flow_timer.start()
 
+    def _fit_top(self):
+        """上の2段を今の窓の幅に合わせる。1段目: 入りきらないボタンを右から「その他」の中へ。
+        2段目: 文の場所が足りなければ、順番の名前を今の所だけにする・文の行数ぶん高さを取る。"""
+        avail = self.top_scroll.width() if self.isVisible() else 10 ** 6     # 窓が出る前は幅が決まっていない
+        # 全部出したときの幅から、しまうボタンの幅を引いて数える（隠した直後は、入れ物の幅がまだ古いため）
+        need = sum(b.sizeHint().width() + 4 for b, _a in self._top_overflow)
+        need += sum(w.sizeHint().width() + 4 for w in (self.b_start, self.b_auto, self.b_save, self.b_print,
+                                                       self.b_to_machine, self.b_tools))
+        need += 5 * 13 + 8                  # かたまりの左右のあき・区切りの線
+        moved = False
+        for b, act in self._top_overflow:
+            hide = need > avail
+            b.setVisible(not hide)
+            act.setVisible(hide)
+            if hide:
+                need -= b.sizeHint().width() + 4
+                moved = True
+        self._top_overflow_sep.setVisible(moved)
+        em = self.fontMetrics().horizontalAdvance("あ")
+        self.guide.setVisible(avail - need > em * 10)      # ロード名などは、出す場所が十分あるときだけ
+        self.top_scroll.setFixedHeight(max(b.sizeHint().height() for b in (self.b_start, self.b_tools))
+                                       + self.top_cap_h + 1)
+        if hasattr(self, "flow_steps"):
+            em = self.lbl_flow.fontMetrics().horizontalAdvance("あ")
+            room = (self.flow_bar.width() - self.flow_steps.full_width() - self.b_flow.sizeHint().width()
+                    - self.chip_machine.sizeHint().width() - 70)
+            self.flow_steps.set_compact(room < em * 26)
+            QtCore.QTimer.singleShot(0, self._fit_flow_text)
+
+    def _fit_flow_text(self, again=2):
+        """文の行数ぶんの高さを取る（文が切れないように）。幅が決まり直すことがあるので、少しあとにもう一度見る。"""
+        w = self.lbl_flow.width()
+        h = self.lbl_flow.heightForWidth(w) if w > 0 else 0
+        if h > 0 and h != self.lbl_flow.minimumHeight():
+            self.lbl_flow.setMinimumHeight(h)
+        if again > 0:
+            QtCore.QTimer.singleShot(40, lambda: self._fit_flow_text(again - 1))
+
+    def _flow_now_buttons(self, action=""):
+        """1段目の「今やる所」のボタンだけ色を変える（帯を隠したら、どれも変えない）。"""
+        target = {"open_wizard": self.b_to_machine, "start": self.b_start, "save": self.b_save}.get(action)
+        for b in (self.b_to_machine, self.b_start, self.b_save):
+            main_top.set_now(b, b is target)
+
+    def _refresh_chips(self):
+        host = getattr(self, "_focas_watch_host", "") or ""
+        # 号機は出さない（IP から号機は決めない。号機は「機械に入れる」で機械を読んで確かめる）
+        self.chip_machine.set_state("機械 見えています" if host else "機械 まだつないでいません", bool(host))
+        if getattr(self.dev, "dummy", False):
+            self.chip_nd.set_state("表示器 ダミー（実機なし）", True)
+        else:
+            self.chip_nd.set_state("表示器 つながっています" if self._nd_ok else "表示器 つながっていません",
+                                   self._nd_ok, bad=not self._nd_ok)
+
     def _flow_toggled(self, on):
         self.flow_bar.setVisible(bool(on))
+        if not on:
+            self._flow_now_buttons("")
+        else:
+            self._flow_key = None
+            self._refresh_flow()
         self.settings["show_flow_guide"] = bool(on)
         try:
             save_settings(self.settings)
@@ -15466,6 +15578,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_flow(self):
         if not self.flow_bar.isVisible():
             return
+        self._refresh_chips()
+        if self.isVisible() and not getattr(self, "_flow_polished", False):
+            self._flow_polished = True      # 窓が出る前に付けた「今やる所」の色は効かないので、出たあと1回付け直す
+            self._flow_key = None
         try:
             g = flow_guide.main_flow(**self._flow_inputs())
         except Exception:
@@ -15475,19 +15591,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._flow_key = key
         self._flow_action = g["action"]
-        names = []
-        for n, t in enumerate(flow_guide.STAGES):
-            if n < g["stage"]:
-                names.append(f"<span style='color:#166534;'>✓ {t}</span>")
-            elif n == g["stage"]:
-                names.append(f"<b style='color:#1d4ed8;'>▶ {t}</b>")
-            else:
-                names.append(f"<span style='color:#94a3b8;'>{t}</span>")
-        self.lbl_flow_steps.setText("　─　".join(names))
+        self.flow_steps.set_stage(g["stage"])
         head = {"do": "次にやること: ", "wait": "", "stop": "", "done": "✓ "}[g["kind"]]
-        self.lbl_flow.setText(head + g["text"])
-        self.lbl_flow.setStyleSheet("padding:4px 8px; border-radius:4px; font-weight:bold;"
-                                    + self.FLOW_STYLE[g["kind"]])
+        self.lbl_flow.setText(head + g.get("short", g["text"]))     # 短い文。全部の文はマウスを乗せると出る
+        self.lbl_flow.setToolTip(g["text"])
+        self.lbl_flow.setStyleSheet("font-weight:bold;" + self.FLOW_STYLE[g["kind"]])
+        self.lbl_flow.setMinimumHeight(0)
+        QtCore.QTimer.singleShot(0, self._fit_flow_text)
+        self._flow_now_buttons(g["action"])
         self.b_flow.setVisible(bool(g["button"]))
         self.b_flow.setText(g["button"])
         self.b_flow_skip.setVisible(bool(g["skip"]))
@@ -16725,6 +16836,8 @@ class MainWindow(QtWidgets.QMainWindow):
             bs.setFixedHeight(bh + 2)
 
     def resizeEvent(self, event):
+        if hasattr(self, "top_scroll") and hasattr(self, "chip_machine"):
+            QtCore.QTimer.singleShot(0, self._fit_top)
         super().resizeEvent(event)
         # 窓の大きさが変わったら測定条件の頭打ち高さ・右カラムの頭打ち幅を合わせ直す
         self._fit_cond_box()

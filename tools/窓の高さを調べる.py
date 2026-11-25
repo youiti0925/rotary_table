@@ -40,6 +40,16 @@ def snap(tag):
         f"グラフ最低={win.plots_widget.minimumHeight()} 測定条件={win.cond_scroll.height()}"
         f"/{win.cond_group.sizeHint().height()} 末尾の表={'開' if win.suffix_panel.isChecked() else '畳'} "
         f"上限(設定)={win.maximumWidth()}x{win.maximumHeight()} {win32(win) if win.isVisible() else ''}")
+    # 幅（左の列・測定条件・操作の帯・右の列。「右で切れる」を調べる）
+    cs, bs, rs = win.cond_scroll, win.bar_scroll, win.right_scroll
+    fnt = win.font()
+    lines.append(
+        f"  幅: 窓の中身={g.width()} 左の列(グラフ)={win.plots_widget.width()} "
+        f"測定条件の見える幅={cs.viewport().width()} 必要={win.cond_group.sizeHint().width()} 最低={win.cond_group.minimumSizeHint().width()} "
+        f"横バー={'出' if cs.horizontalScrollBar().isVisible() else '無'}(最大{cs.horizontalScrollBar().maximum()}) / "
+        f"操作の帯の見える幅={bs.viewport().width()} 必要={bs.widget().sizeHint().width()} "
+        f"横バー={'出' if bs.horizontalScrollBar().isVisible() else '無'}(最大{bs.horizontalScrollBar().maximum()}) / "
+        f"右の列={rs.width()} / 字={fnt.family()} {fnt.pointSizeF():g}pt 画面の点の数の倍率={scr.devicePixelRatio()} 論理DPI={scr.logicalDotsPerInch():g}")
 
 
 def win32(w):

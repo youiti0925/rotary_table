@@ -919,9 +919,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             path = c.get("saved_path") or ""
             lines = ["保存しました。"]
             if path:
-                import os
-                folder = os.path.basename(os.path.dirname(path)) or os.path.dirname(path)
-                lines = [f"保存先: {folder} フォルダ（{os.path.basename(path)}）"]
+                import ntpath              # Windows の道（\\ 区切り）を、どの OS で動かしても同じに分ける
+                folder = ntpath.basename(ntpath.dirname(path)) or ntpath.dirname(path)
+                lines = [f"保存先: {folder} フォルダ（{ntpath.basename(path)}）"]
             if c.get("next_mode"):
                 lines.append(f"つぎは「{c['next_mode']}」。")
         if sid == "rz_plan":

@@ -80,6 +80,16 @@ QPushButton#primary {{
 QPushButton#primary:hover {{ background: {accent_press}; }}
 QPushButton#primary:disabled {{ background: {border}; color: {muted}; }}
 
+/* チェックの四角・丸ボタンの丸は、選んでいないときも枠が見えるようにする（会社PC 150% で、枠が無く文字だけに見えた） */
+QCheckBox::indicator, QGroupBox::indicator {{ width: 13px; height: 13px; border: 1px solid {muted};
+    border-radius: 3px; background: #ffffff; }}
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+QCheckBox::indicator:disabled, QGroupBox::indicator:disabled {{ background: {bg}; border-color: {border}; }}
+QRadioButton::indicator {{ width: 13px; height: 13px; border: 1px solid {muted}; border-radius: 7px; background: #ffffff; }}
+QRadioButton::indicator:checked {{ border-color: {accent};
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 {accent}, stop:0.5 {accent}, stop:0.55 #ffffff, stop:1 #ffffff); }}
+QRadioButton::indicator:disabled {{ background: {bg}; border-color: {border}; }}
+
 QGroupBox {{
     background: {panel}; border: 1px solid {border}; border-radius: 8px;
     margin-top: 9px; padding: 5px 7px 4px 7px;

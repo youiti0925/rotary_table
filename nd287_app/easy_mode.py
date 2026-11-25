@@ -487,7 +487,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.right_scroll = QtWidgets.QScrollArea()   # 右の札が窓より高くなっても、中を潰さない（足りない分は縦に動かす）
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)     # 狭い窓でも、右のボタンが切れて押せない所を作らない（横にも動かせる）
         self.right_scroll.setStyleSheet("QScrollArea{background:transparent;} QScrollArea > QWidget > QWidget{background:transparent;}")
         self.right_scroll.setWidget(self.right_w)
         mid.addWidget(self.right_scroll, 5)
@@ -995,6 +995,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             self._build_suffix()
             b = self._act_button("保存する", self._save)
             self._extra_widgets["act"] = b
+            QtCore.QTimer.singleShot(0, lambda bb=b: self._show_button(bb))      # 「保存する」が下に隠れて、止まって見えないように
             if c.get("ng"):
                 r = QtWidgets.QPushButton("もう一度測る")
                 r.setObjectName("sub")
@@ -1008,6 +1009,12 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
         self._refresh()
+
+    def _show_button(self, btn):
+        try:
+            self.right_scroll.ensureWidgetVisible(btn, 0, 12)
+        except RuntimeError:
+            pass
 
     def _ng_rows(self, items, limit=8):
         """外れた所の一覧。項目名は折り返し、値は右にそろえて折り返さない（値だけが次の行に落ちない）。
@@ -1050,7 +1057,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         sc.setWidget(box)
         box.setMinimumWidth(10)
         h = box.sizeHint().height() + 4
-        sc.setFixedHeight(max(40, min(h, 240)))
+        sc.setFixedHeight(max(40, min(h, 160)))
         self.extra.addWidget(sc)
         self._extra_widgets["ng"] = sc
 

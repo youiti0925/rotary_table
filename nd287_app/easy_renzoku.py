@@ -280,7 +280,7 @@ class RenzokuMixin:
                      "保存した結果は、そのまま残ります。"], f"つぎは{RZ.STAGE_JA[nx['stage']]} ▶")
         lines = [f"{cur['label']}が終わりました。", "ぜんぶ測り終わりました。"]
         if self.ctx.get("rz_return_answered") and not self.ctx.get("rz_return_mode"):
-            lines.append("フルクロには、もどしていません。機械はいま「" + RZ.STAGE_JA.get(rz.machine or "", "不明") + "」です。")
+            lines.append("フルクロには、もどしていません。機械はいま「" + RZ.STAGE_JA.get(rz.machine or cur["stage"], "セミクロ") + "」の状態です（最後に測ったのがこの状態です）。")
         return "連続測定が終わりました", lines, None
 
     def _rz_advance(self):

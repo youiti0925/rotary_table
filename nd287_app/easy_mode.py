@@ -196,7 +196,7 @@ class ChoiceButton(QtWidgets.QAbstractButton):
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setMinimumSize(110 if compact else 150, 66 if compact else 96)       # 3つ並べても狭い窓の右に切れない
+        self.setMinimumSize(110 if compact else 120, 66 if compact else 96)       # 3つ並べても狭い窓の右に切れない
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setAccessibleName(title)
 

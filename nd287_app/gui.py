@@ -13865,7 +13865,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_settings.clicked.connect(self.open_settings)
         b_help.clicked.connect(self.show_help)
         # ロード名・取込手順は最上部ツールバーの「アラーム」の右に出す（場所を取らない）
-        self.guide = QtWidgets.QLabel("")
+        self.guide = main_top.ElidedLabel("")      # 長いときは「…」で省く（右が黙って切れた）
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         self.guide.setStyleSheet("padding:1px 10px;")
@@ -13973,6 +13973,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 操作の帯の「受信」「データ数」は入る幅に合わせて省く（長くて帯が右で切れた。会社PC 150%）
         self.live = main_top.ElidedLabel("")
         self.live.setStyleSheet("color:#64748b; padding:2px;")
+        self.live.setMinimumWidth(self.live.fontMetrics().horizontalAdvance("受信: +359°59'59.9\"") + 12)   # 受信は削らず、データ数だけが縮む
         self.counts = main_top.ElidedLabel(
             "", short_of=_counts_short_forms)
         # 受信点数はグラフ拡大ボタンの右に小さめで出す（例 ホイール CW 3/36）。
@@ -17287,7 +17288,7 @@ class MainWindow(QtWidgets.QMainWindow):
         table.verticalHeader().setMinimumSectionSize(1)
         fm = table.fontMetrics()
         floor = fm.height() + 6  # 文字が収まる最低限＋わずかな余白（詰めすぎない）
-        header_h = max(table.horizontalHeader().sizeHint().height(), floor)
+        header_h = 0 if table.horizontalHeader().isHidden() else max(table.horizontalHeader().sizeHint().height(), floor)
         height = header_h + 2 * table.frameWidth() + 4
         for r in range(table.rowCount()):
             rh = max(table.rowHeight(r), floor)

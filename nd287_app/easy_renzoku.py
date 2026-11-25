@@ -60,7 +60,7 @@ class RenzokuMixin:
             else:
                 cur = rz.pos + (1 if sid in ("finish", "rz_return") else 0)           # 保存が済んだ画面では、いまの工程も済んだ印
                 parts = [("✓ " if i < cur else ("● " if i == cur else "○ ")) + s["label"] for i, s in enumerate(rz.stages)]
-                text = "つづけて測る　" + "　→　".join(parts) + (f"　（{rz.unit}台目）" if rz.unit >= 2 else "")
+                text = "つづけて測る　" + " → ".join(parts) + (f"　（{rz.unit}台目）" if rz.unit >= 2 else "")
             lb.setText(text)
             li = getattr(self, "lbl_rz_in", None)
             if li is not None:

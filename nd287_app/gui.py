@@ -6169,7 +6169,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._motor_kind = {}             # {種別: "product"/"temp"}。片方だけ仮モーターのときだけ入る（空なら cmb_motor のまま）
         self._mx = None                   # 2製品の軸の決め方の途中経過（_apply_probe_multi）
         self.setWindowTitle("受注番号から かんたん作成")
-        fit_to_screen(self, 1060, 600)    # 縦長を避け、横長(2カラム)で見やすく
+        fit_to_screen(self, 1200, 620)    # 縦長を避け、横長(2カラム)で見やすく（150% の画面で横の動かし棒が出ないよう広めに）
         self._files = []          # 見つかった製品ファイル [{kind,prefix,path,name,meta,chk}]
         mpath = settings.get("controller_master_csv", "")
         if mpath and not Path(mpath).is_absolute():
@@ -6278,6 +6278,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         f0.addRow("特注パラの場所", crow)
         self.lbl_cidx = QtWidgets.QLabel("")
         self.lbl_cidx.setStyleSheet("color:#6b7280; font-size:11px;")
+        self.lbl_cidx.setWordWrap(True)
         f0.addRow("", self.lbl_cidx)
         # 製品データ・BASIC が両方設定済みなら畳んでおく（日常は①②③に集中）
         _set = bool(self.e_pdir.text().strip()) and bool(self.e_bdir.text().strip())
@@ -6527,6 +6528,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
 
         self.lbl_basic_dir = QtWidgets.QLabel("")
         self.lbl_basic_dir.setStyleSheet("color:#6b7280; font-size:11px;")
+        self.lbl_basic_dir.setWordWrap(True)
         v.addWidget(self.lbl_basic_dir)
 
         row = QtWidgets.QHBoxLayout()
@@ -13441,7 +13443,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_r2s.setValue(-90.0)
         self.e_r2e.setValue(0.0)
         for spin in (self.e_r1s, self.e_r1e, self.e_r2s, self.e_r2e):
-            spin.setMaximumWidth(74)
+            wdt = spin.fontMetrics().horizontalAdvance("-360.00 °") + 34      # 文字＋上下ボタン。固定の 74 では -90.00 ° が切れた（150% の画面）
+            spin.setMinimumWidth(wdt)
+            spin.setMaximumWidth(max(74, wdt))
         # 狭いサイドに収まるよう、チェック行→開始/終了行 で2段に折り返す
         self.box_ranges = QtWidgets.QWidget()
         ranges_h = QtWidgets.QHBoxLayout(self.box_ranges)
@@ -14299,12 +14303,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if lb is None:
             return
         parts = [f"測り方: {KR.label(kind)}の登録"]
+        srcs = []
         for g, name in (("backlash", "バックラッシの規格"), ("slope", "傾きの規格")):
             if tilt and g == "backlash":
                 continue
-            parts.append(f"{name}: {jr['source'].get(g, '未登録')}")
+            src = jr['source'].get(g, '未登録')
+            srcs.append(src)
+            parts.append(f"{name}: {src}")
         full = "／".join(parts)
-        short = full.replace("の登録", "").replace("測り方: ", "測り方:").replace("バックラッシの規格: ", "バックラッシ:").replace("傾きの規格: ", "傾き:").replace("前の表（合否判定.csv）", "前の表")
+        same = len(set(srcs)) == 1                       # 規格の出どころが同じなら1つにまとめる（狭い枠で切れない短さに）
+        short = f"測り方:{KR.label(kind)}／規格:{srcs[0]}" if same else (
+            f"測り方:{KR.label(kind)}／" + "／".join(f"{n}:{x}" for n, x in zip(("バックラッシ", "傾き"), srcs)))
+        short = short.replace("前の表（合否判定.csv）", "前の表")
         lb.setText(short)
         lb.setToolTip(full)
         lb.setVisible(True)

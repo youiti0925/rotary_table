@@ -14,7 +14,9 @@
 import re
 import time
 
-from . import (controllers, focas_backup, focas_client, focas_find, focas_ops, machine_decide, wizard_probe)
+from . import (controllers, fanuc, focas_backup, focas_client, focas_find, focas_ops, machine_decide, masters,
+               wizard_probe)
+from . import wizard_programs as WP
 
 AXES = controllers.AXES
 BATTERY_CODES = {"DS0306": "切れています", "DS0307": "弱っています", "DS0308": "弱っています"}
@@ -519,3 +521,111 @@ def check_step(settings, client_factory, job):
                 client.close()
             except Exception:
                 pass
+
+
+# ------------------------------------------------------------------ 測定プログラムを送る（かんたん作成の段④と同じ中身）
+# 作るもの・送り方・安全の決まりは、かんたん作成の段④（wizard_programs / focas_ops.run_programs_send）をそのまま使う。
+#   プログラムは非常停止をもどしてから（for_params=False の点検は check_program_send の中）。
+#   同じ番号で中身が違うときは、人が「入れ替える」を選んだ番号だけ入れ替える（選ばなければ書かずに飛ばす）。
+#   1本ずつ書いて読み戻して比べる（run_program_send）。機械に書くのは、prog_send を呼んだときだけ。
+
+def prog_plan(settings, model, kinds, *, tilt=None, choice=None, numbers=None, masters_dict=None):
+    """送るプログラムを決める（機械には触らない）。製品の種別 kinds が無ければ、回転か傾斜かを人が選べる（plan["ambiguous"]）。"""
+    m = masters_dict if masters_dict is not None else masters.load_masters(settings)
+    return WP.make_plan(settings, m, model, list(kinds or []), tilt=tilt, choice=choice, numbers=numbers)
+
+
+def prog_nc(plan):
+    """送る中身（nc）。作れないとき・問題があるときは空。"""
+    if not plan or not plan["programs"] or plan["problems"]:
+        return b""
+    progs = []
+    for p in plan["programs"]:
+        progs += focas_ops.split_programs(p["nc"], fanuc.DEFAULT_EOB)
+    return focas_ops.join_programs(progs, fanuc.DEFAULT_EOB)
+
+
+def prog_numbers(plan):
+    """送る番号の一覧（本体とサブ）。"""
+    return [int(n) for p in (plan or {}).get("programs") or [] for n in p["numbers"]]
+
+
+def prog_labels(plan):
+    """番号 → 画面に出す名前。"""
+    lines = {}
+    for p in (plan or {}).get("programs") or []:
+        lines.update(p.get("lines") or {})
+    out = {}
+    for s in (plan or {}).get("slots") or []:
+        out[int(s["number"])] = lines.get(s["number"]) or s["label"]
+    return out
+
+
+def prog_folder(settings):
+    return str(settings.get("focas_prog_folder") or focas_ops.DEFAULT_PROG_FOLDER)
+
+
+def prog_allowed(settings, unit):
+    """許すアラーム。SW0100 など標準のものと、この機械で「無視する」と人が選んだもの（パラメータを書くときと同じ）。"""
+    return focas_ops.allowed_codes(settings, str(unit or ""))
+
+
+def prog_read(client, settings, plan, *, host, port, unit="", controllers_list=None, progress=None, root=None):
+    """読むだけ。つなぐ → 控え（機械のプログラム一覧ごと）→ 送れるかの点検 → 機械の中の確認。
+    戻り値 {"info","cnc_id","chk","states","folder"}。控えが不完全・CNC ID が読めないときは EasyError。"""
+    nc = prog_nc(plan)
+    if not nc:
+        raise EasyError("送るプログラムを作れません: " + "／".join((plan or {}).get("problems") or ["中身がありません"]))
+    client.call("connect", {"host": host, "port": port, "timeout": focas_client.connect_timeout(settings),
+                            "families": dict(settings.get("focas_families") or {})})
+    ident = client.call("identify")
+    if not ident.get("cnc_id"):
+        raise EasyError("機械ごとの番号（CNC ID）が読めないので、この機械には書きません")
+    root = root or focas_backup.resolve_root({"focas_backup_dir": settings.get("focas_backup_dir", "")})
+    res = focas_backup.take_backup(client, root, settings, purpose="測定プログラム書込前", unit=str(unit or ""), host=host,
+                                   port=port, controllers=controllers_list, progress=progress)
+    info = dict(res.info, complete=bool(res.complete))
+    if not res.complete:
+        raise EasyError("控えが不完全です（この控えでは書けません）: " + "／".join(res.problems[:3]))
+    folder = prog_folder(settings)
+    chk = focas_ops.check_program_send(client, nc, fanuc.DEFAULT_EOB, folder=folder, cnc_id=ident["cnc_id"], backup_info=info,
+                                       allowed=prog_allowed(settings, unit))
+    states = focas_ops.inspect_programs(client, nc, fanuc.DEFAULT_EOB, folder=folder) if not chk["reasons"] else {}
+    return {"info": info, "cnc_id": ident["cnc_id"], "chk": chk, "states": states, "folder": folder}
+
+
+def prog_recheck(client, settings, plan, rd, *, host, port, unit=""):
+    """非常停止をもどしたあとなど、もう一度だけ点検する（読むだけ。控えは取り直さない）。"""
+    nc = prog_nc(plan)
+    client.call("connect", {"host": host, "port": port, "timeout": focas_client.connect_timeout(settings),
+                            "families": dict(settings.get("focas_families") or {})})
+    chk = focas_ops.check_program_send(client, nc, fanuc.DEFAULT_EOB, folder=rd["folder"], cnc_id=rd["cnc_id"],
+                                       backup_info=rd["info"], allowed=prog_allowed(settings, unit))
+    states = focas_ops.inspect_programs(client, nc, fanuc.DEFAULT_EOB, folder=rd["folder"]) if not chk["reasons"] else {}
+    return dict(rd, chk=chk, states=states)
+
+
+def prog_send(client, settings, plan, rd, *, host, port, unit="", overwrite_numbers=(), progress=None):
+    """送る（人が［送る］を押したときだけ）。かんたん作成の段④と同じ run_programs_send。戻り値はその結果 dict。"""
+    client.call("connect", {"host": host, "port": port, "timeout": focas_client.connect_timeout(settings),
+                            "families": dict(settings.get("focas_families") or {})})
+    return focas_ops.run_programs_send(
+        client, prog_nc(plan), fanuc.DEFAULT_EOB, approved=True,
+        overwrite_numbers={int(n) for n in overwrite_numbers}, groups=WP.groups_of(plan["programs"]),
+        folder=rd["folder"], cnc_id=rd["cnc_id"], backup_info=rd["info"], allowed=prog_allowed(settings, unit),
+        progress=progress)
+
+
+def prog_all_in(plan, states, results):
+    """全部の番号が、もう入っている（送った・読み戻しが合った・中身が同じで送らなかった）か。"""
+    nums = prog_numbers(plan)
+    if not nums:
+        return False
+    for n in nums:
+        it = (results or {}).get(n)
+        if it is not None:
+            if not (WP.row_status(it)[1] == "ok" or it.get("skip_reason") == "same"):
+                return False
+        elif (states or {}).get(n) != "same":
+            return False
+    return not WP.mismatched_numbers(list((results or {}).values()))

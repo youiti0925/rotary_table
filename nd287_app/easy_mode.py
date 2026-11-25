@@ -19,6 +19,8 @@ from .easy_flow import STEPS, INDEX, CHAPTERS
 AUT_TO_DIAL = {0: 3, 1: 5, 3: 6, 4: 4, 5: 1, 9: 2}
 WATCH_COLORS = {"wait": ("#E9EEF5", "#5A6876"), "ok": ("#E3F4EA", "#16864C"), "done": ("#E3F4EA", "#16864C"),
                 "stop": ("#FBE9E7", "#C8362B")}
+MANUAL_TEXT = "機械から読めません。\nやったら、ここを押します"
+OFFLINE_TEXT = "機械とつながっていません（電源と LAN ケーブル）。\nつながらないまま進む"
 FALLBACK_SEC = 25        # 機械から「できた」を読めないまま、これだけたったら、人が押す小さなボタンを出す
 FALLBACK_MISMATCH_SEC = 6   # つまみの位置を読めているのに「合っていない」と出つづけるとき、早めに「やりました」を出す（読みが違う機械でも進める）
 
@@ -29,6 +31,7 @@ QLabel#line { font-size:17px; color:#17212B; }
 QLabel#who { font-size:13px; font-weight:bold; border-radius:11px; padding:3px 14px; }
 QLabel#watch { font-size:16px; font-weight:bold; border-radius:10px; padding:10px 14px; }
 QFrame#art { background:#F4F6F8; border-radius:14px; }
+QFrame#rightcard { background:#FFFFFF; border:1px solid #D5DBE1; border-radius:14px; }
 QFrame#card { background:#FFFFFF; border:1px solid #D5DBE1; border-radius:12px; }
 QPushButton#next { background:#1560D4; color:#FFFFFF; font-size:19px; font-weight:bold; border-radius:12px; padding:12px 30px; border:0; }
 QPushButton#next:disabled { background:#A9BFE6; }
@@ -38,6 +41,8 @@ QPushButton#back:disabled { color:#B5BEC8; }
 QPushButton#act { background:#F0A400; color:#2A1E00; font-size:19px; font-weight:bold; border-radius:12px; padding:14px 22px; border:0; }
 QPushButton#act:disabled { background:#EBD9A8; }
 QPushButton#sub { background:transparent; color:#5A6876; font-size:13px; text-decoration:underline; border:0; padding:4px; text-align:left; }
+QPushButton#fallback { background:#FFFFFF; color:#17212B; font-size:15px; font-weight:700; border:2px solid #9AA6B2; border-radius:10px; padding:10px 16px; text-align:left; }
+QPushButton#fallback:hover { border-color:#1560D4; background:#F3F7FD; }
 QLineEdit#fld { font-size:21px; font-weight:bold; padding:7px 12px; border:2px solid #D5DBE1; border-radius:10px; background:#FFFFFF; color:#17212B; }
 QLineEdit#fld:focus { border-color:#1560D4; }
 QProgressBar#pbar { border:0; border-radius:7px; background:#DCE2E8; height:14px; text-align:center; }
@@ -96,6 +101,34 @@ class SvgView(QtWidgets.QWidget):
         k = min(self.width() / size.width(), self.height() / size.height())
         w, h = size.width() * k, size.height() * k
         self._r.render(p, QtCore.QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h))
+
+
+class ElideLabel(QtWidgets.QLabel):
+    """1行に収まらない文は、まん中を … にして縮める（全文は、ふきだし）。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.setFull(text)
+
+    def setFull(self, text):
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._fit()
+
+    def full(self):
+        return self._full
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        fm = QtGui.QFontMetrics(self.font())
+        w = max(40, self.width() - 4)
+        self.setText(fm.elidedText(self._full, QtCore.Qt.ElideMiddle, w))
+        self.setFixedHeight(fm.height() + 6)
 
 
 class TileButton(QtWidgets.QAbstractButton):
@@ -350,7 +383,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.flow = "home"               # home / measure / program / results / alarm
         self.history = []
         self.ctx = {"powered_on": False, "cycled": False, "cycled_in_wizard": False, "handoff": False,
-                    "skip_machine": False, "counter_reset": True}
+                    "skip_machine": False, "counter_reset": True, "offline_go": False}
         self.track = {"offline": False}
         self.manual = False              # 人が「やりました」を押した（機械から読めない手順）
         self._entered_at = 0.0
@@ -384,8 +417,7 @@ class EasyModeDialog(QtWidgets.QDialog):
         al.setSpacing(10)
         self.v_map = SvgView()
         self.v_main = SvgView()
-        al.addWidget(self.v_map, 11)
-        al.addWidget(self.v_main, 14)
+        al.addWidget(self.v_main, 1)
         self.b_photo = QtWidgets.QPushButton("絵 ／ 写真")
         self.b_photo.setCheckable(True)
         self.b_photo.setCursor(QtCore.Qt.PointingHandCursor)
@@ -402,8 +434,15 @@ class EasyModeDialog(QtWidgets.QDialog):
         art_col.addWidget(self.b_photo, 0, QtCore.Qt.AlignRight)
         mid.addWidget(self.art_wrap, 6)
         self.right_w = QtWidgets.QWidget()
-        right = QtWidgets.QVBoxLayout(self.right_w)
-        right.setContentsMargins(0, 0, 0, 0)
+        outer = QtWidgets.QVBoxLayout(self.right_w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.card = QtWidgets.QFrame()               # 右の文は、白い札にまとめて、上下まん中に置く（片側に寄せない・空白だらけにしない）
+        self.card.setObjectName("rightcard")
+        outer.addStretch(1)
+        outer.addWidget(self.card)
+        outer.addStretch(1)
+        right = QtWidgets.QVBoxLayout(self.card)
+        right.setContentsMargins(26, 22, 26, 22)
         right.setSpacing(10)
         self.lbl_who = QtWidgets.QLabel("")
         self.lbl_who.setObjectName("who")
@@ -424,12 +463,15 @@ class EasyModeDialog(QtWidgets.QDialog):
         self.lbl_watch.setObjectName("watch")
         self.lbl_watch.setWordWrap(True)
         right.addWidget(self.lbl_watch)
-        self.b_manual = QtWidgets.QPushButton("機械から読めません。やったら、ここを押します")
-        self.b_manual.setObjectName("sub")
+        self.b_manual = QtWidgets.QPushButton(MANUAL_TEXT)
+        self.b_manual.setObjectName("fallback")      # 小さい下線の文字ではなく、はっきりしたボタン（主ボタンの「次へ」よりは控えめ）
         self.b_manual.setCursor(QtCore.Qt.PointingHandCursor)
         self.b_manual.clicked.connect(self._manual_done)
         right.addWidget(self.b_manual)
-        right.addStretch(1)
+        self.v_map.setParent(self.right_w)          # 操作盤の全体の絵（どこを触るか）は右の空きに置き、左は拡大の絵を大きく
+        self.v_map.setMinimumSize(200, 130)
+        self.v_map.setMaximumHeight(300)
+        right.addWidget(self.v_map, 3)
         mid.addWidget(self.right_w, 5)
         self.embed = QtWidgets.QWidget()           # 「機械に入れる」: かんたん作成を、この画面の中に入れる
         el = QtWidgets.QVBoxLayout(self.embed)
@@ -521,6 +563,22 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.resize(min(1100, g.width() - 20), min(700, g.height() - 40))
         self.setMinimumSize(900, 580)
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._apply_scale()
+
+    def _apply_scale(self):
+        """画面が大きいほど、右の文字を大きくする（右がスカスカにならないように）。小さい画面では今のまま。"""
+        k = max(1.0, min(1.5, min(self.width() / 1100.0, self.height() / 700.0)))
+        key = round(k, 2)
+        if getattr(self, "_scale_key", None) == key:
+            return
+        self._scale_key = key
+        self.right_w.setStyleSheet(
+            f"QLabel#title{{font-size:{int(26 * k)}px;}} QLabel#line{{font-size:{int(17 * k)}px;}}"
+            f"QLabel#watch{{font-size:{int(16 * k)}px;}} QLabel#who{{font-size:{int(13 * k)}px;}}"
+            f"QPushButton#act{{font-size:{int(19 * k)}px;}} QPushButton#fallback{{font-size:{int(15 * k)}px;}}")
+
     # ------------------------------------------------------------ 手順の移り変わり
     def _hctx(self):
         """測定の画面の状態（取込・結果・入力欄）。"""
@@ -579,8 +637,9 @@ class EasyModeDialog(QtWidgets.QDialog):
             return
         self.flow = flow
         self.history = [INDEX["home"]]
+        self.ctx["offline_go"] = False
         if flow == "measure":
-            self.ctx.update(handoff=False, skip_machine=False, params="auto", prog="auto")   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
+            self.ctx.update(handoff=False, skip_machine=False, offline_go=False, params="auto", prog="auto")   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
         if flow == "cond":
             self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
         self._enter(j)
@@ -643,6 +702,8 @@ class EasyModeDialog(QtWidgets.QDialog):
             return
         if self.history:
             j = self.history.pop()
+            while STEPS[j]["id"] == "measuring" and self.history:
+                j = self.history.pop()                  # 「測っています」は待つだけの画面。もどるときは飛び越える（入ると 1.2 秒後に結果へ戻されるため）
             if STEPS[j]["id"] == "home":
                 self.flow = "home"
             self._enter(j)
@@ -769,6 +830,8 @@ class EasyModeDialog(QtWidgets.QDialog):
 
     def _manual_done(self):
         self.manual = True
+        if STEPS[self.i].get("detect") == "online":     # 機械につながらないまま進む。以降の機械の手順は、人の「やりました」で進める
+            self.ctx["offline_go"] = True
         self._refresh()
 
     # ------------------------------------------------------------ 画面
@@ -811,23 +874,30 @@ class EasyModeDialog(QtWidgets.QDialog):
                 title = f"{flow_guide._o(progs[:1])} を呼び出す"
         if sid == "result":
             ng, spec = c.get("ng", 0), c.get("has_spec", False)
-            lines = ([f"外れた所が {ng} か所あります。"] + easy_words.ng_lines(c.get("ng_items") or []) if ng else
+            lines = ([f"外れた所が {ng} か所あります。"] if ng else
                      ["ぜんぶ規格の中です。"] if spec else
                      ["規格は画面に出ていません。値を見て、保存します。"])
             title = "測り終わりました"
         if sid == "view_result":
             ng, spec = c.get("view_ng", 0), c.get("view_spec", False)
             title = "規格から外れた所があります" if ng else ("ぜんぶ規格の中です" if spec else "結果")
-            lines = ([f"外れた所は {ng} か所です。"] + easy_words.ng_lines(c.get("view_ng_items") or [])
-                     + ["通常の画面で、くわしく見られます。"]) if ng else []
+            lines = ([f"外れた所は {ng} か所です。"] + ["通常の画面で、くわしく見られます。"]) if ng else []
         if sid == "finish":
             path = c.get("saved_path") or ""
-            lines = [("保存先: " + path) if path else "保存しました。"]
+            lines = ["保存しました。"]
+            if path:
+                import os
+                folder = os.path.basename(os.path.dirname(path)) or os.path.dirname(path)
+                lines = [f"保存先: {folder} フォルダ（{os.path.basename(path)}）"]
             if c.get("next_mode"):
                 lines.append(f"つぎは「{c['next_mode']}」。")
         self.lbl_title.setText(title)
         self.lbl_lines.setText("\n".join(lines))
         self.lbl_lines.setVisible(bool(lines))
+        if sid == "result" and c.get("ng"):
+            self._ng_rows(c.get("ng_items") or [])
+        if sid == "view_result" and c.get("view_ng"):
+            self._ng_rows(c.get("view_ng_items") or [])
         if sid == "machine_in":
             self._open_wizard_inside()
         elif sid == "choose":
@@ -849,6 +919,11 @@ class EasyModeDialog(QtWidgets.QDialog):
         elif sid == "prog_manual":
             self._small_note("機械の操作は、まだ実機で確かめていません。")
         elif sid == "finish":
+            if c.get("saved_path"):
+                el = ElideLabel(c["saved_path"])
+                el.setStyleSheet("color:#5A6876; font-size:12px;")
+                self.extra.addWidget(el)
+                self._extra_widgets["path"] = el
             self._act_button("印刷する", self._print)
             self._act_button("PDFにする", self._pdf)
             if c.get("saved_path"):
@@ -878,6 +953,42 @@ class EasyModeDialog(QtWidgets.QDialog):
             self.extra.addWidget(pg)
             self._extra_widgets["pg"] = pg
         self._refresh()
+
+    def _ng_rows(self, items, limit=8):
+        """外れた所の一覧。項目名は折り返し、値は右にそろえて折り返さない（値だけが次の行に落ちない）。
+        値が長いときだけ、項目名の下に横いっぱいで出す（名前の欄を押しつぶさない）。"""
+        box = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(5)
+        for n, val in items[:limit]:
+            a = QtWidgets.QLabel("・" + str(n))
+            a.setObjectName("line")
+            a.setWordWrap(True)
+            b = QtWidgets.QLabel(str(val))
+            b.setObjectName("line")
+            b.setStyleSheet("font-weight:900; color:#C8362B;")
+            if len(str(val)) <= 12:
+                row = QtWidgets.QHBoxLayout()
+                row.setSpacing(14)
+                row.addWidget(a, 1)
+                b.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignTop)
+                row.addWidget(b, 0)
+            else:
+                row = QtWidgets.QVBoxLayout()
+                row.setSpacing(0)
+                b.setWordWrap(True)
+                b.setIndent(14)
+                row.addWidget(a)
+                row.addWidget(b)
+            v.addLayout(row)
+        if len(items) > limit:
+            m = QtWidgets.QLabel(f"…ほか {len(items) - limit} か所")
+            m.setObjectName("line")
+            v.addWidget(m)
+        box.setObjectName("ng_rows")
+        self.extra.addWidget(box)
+        self._extra_widgets["ng"] = box
 
     # ------------------------------------------------------------ 測り方（測定条件）
     def _cond_get(self):
@@ -1627,9 +1738,15 @@ class EasyModeDialog(QtWidgets.QDialog):
         import time
         d = s.get("detect")
         waited = time.time() - self._entered_at
-        show_manual = bool(s["kind"] == "machine" and d and d != "online" and not done
-                           and (not easy_flow.can_detect(d, st) and st["online"] or waited > FALLBACK_SEC
-                                or (str(d).startswith("aut_") and st["online"] and waited > FALLBACK_MISMATCH_SEC)))
+        offline_go = bool(self.ctx.get("offline_go")) and not st["online"]   # つながらないまま進むと決めたあと: 機械の手順は、待たずに人が押せる
+        if d == "online":                                      # 電源: 機械が見えないまま待ちつづけない
+            show_manual = bool(s["kind"] == "machine" and not done and not st["online"] and waited > FALLBACK_SEC)
+            self.b_manual.setText(OFFLINE_TEXT)
+        else:
+            show_manual = bool(s["kind"] == "machine" and d and not done
+                               and (not easy_flow.can_detect(d, st) and st["online"] or waited > FALLBACK_SEC or offline_go
+                                    or (str(d).startswith("aut_") and st["online"] and waited > FALLBACK_MISMATCH_SEC)))
+            self.b_manual.setText(MANUAL_TEXT)
         self.b_manual.setVisible(show_manual)
         # 「次へ」
         no_detect = s["kind"] == "machine" and not d
@@ -1933,9 +2050,14 @@ class EasyModeDialog(QtWidgets.QDialog):
         self._drop_wizard()
         if res.get("unit"):
             self.ctx["unit"] = res["unit"]
-        if res.get("program_manual"):                      # 新しい画面は、パラメータだけを入れる。測定プログラムは機械で用意する
+        if res.get("program_manual"):                      # 測定プログラムを送らなかったときは、機械で用意する
             self.ctx["prog"] = "manual"
-        if res.get("cycled") and res.get("program_manual"):
+        if res.get("program_handoff"):                     # 送ったとき: 型式・測り方を、送ったプログラムに合わせる
+            try:
+                self.host.easy_apply_handoff(res["program_handoff"])
+            except Exception as e:
+                self._notice = f"型式と測り方を入れられませんでした: {e}"
+        if res.get("cycled") and (res.get("program_manual") or res.get("panel")):
             self.ctx["cycled"] = True                      # 電源の入れ直しは、画面の中で済んだ（そのあとの原点復帰は次の手順）
         if res.get("handoff"):
             self.ctx["handoff"] = True

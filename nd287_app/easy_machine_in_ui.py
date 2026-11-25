@@ -10,9 +10,10 @@ import threading
 from PySide6 import QtCore, QtWidgets
 
 from . import controllers, easy_art, easy_machine_in as M, first_unit, focas_client, focas_find, focas_ops
+from . import wizard_programs as WP
 
-PAGES = ("connect", "order", "decide", "write", "power")
-STAGE_NAMES = ("つなぐ", "伝票番号", "決まったこと", "書く")
+PAGES = ("connect", "order", "decide", "write", "power", "prog")
+STAGE_NAMES = ("つなぐ", "伝票番号", "決まったこと", "書く", "プログラム")
 RED = "background:#FBE9E7; color:#B02A20; border:2px solid #D43A2F; border-radius:10px; padding:8px 12px; font-size:15px; font-weight:bold;"
 AMBER = "background:#FFF3CF; color:#7A5200; border-radius:10px; padding:8px 12px; font-size:14px; font-weight:bold;"
 GREY = "color:#5A6876; font-size:12px;"
@@ -157,6 +158,13 @@ class MachineInPanel(QtWidgets.QWidget):
         self.power_needed, self.ref_axes, self.cycled = False, [], False
         self._outcome = {}
         self._checked = None
+        self._k = 1.0                          # 画面が大きいときの文字の倍率
+        self.params_skipped = False           # パラメータは書かない（プログラムだけ送る）
+        self.prog_plan, self.prog_rd = None, None
+        self.prog_results, self.prog_sent = {}, False
+        self._prog_tilt, self._prog_choice = None, None
+        self._prog_error = ""
+        self._prog_checks = {}
         self._build(SvgView)
         self.progress_sig.connect(self._on_progress)
         self._timer = QtCore.QTimer(self)
@@ -186,11 +194,18 @@ class MachineInPanel(QtWidgets.QWidget):
         fl.addWidget(self.art)
         body.addWidget(frame, 5)
         right_w = QtWidgets.QWidget()
+        self.right_w = right_w
         right_w.setMinimumWidth(470)
-        right = QtWidgets.QVBoxLayout(right_w)
-        right.setContentsMargins(0, 0, 0, 0)
+        outer = QtWidgets.QVBoxLayout(right_w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card = QtWidgets.QFrame()                    # 白い札にまとめて、上下まん中に置く
+        card.setObjectName("rightcard")
+        outer.addStretch(1)
+        outer.addWidget(card)
+        outer.addStretch(1)
+        right = QtWidgets.QVBoxLayout(card)
+        right.setContentsMargins(24, 20, 24, 20)
         right.setSpacing(8)
-        right.addStretch(1)
         self.lbl_title = QtWidgets.QLabel("")
         self.lbl_title.setObjectName("title")
         self.lbl_title.setWordWrap(True)
@@ -206,7 +221,6 @@ class MachineInPanel(QtWidgets.QWidget):
         self.lbl_msg.setWordWrap(True)
         self.lbl_msg.setVisible(False)
         right.addWidget(self.lbl_msg)
-        right.addStretch(1)
         body.addWidget(right_w, 6)
         root.addLayout(body, 1)
         foot = QtWidgets.QHBoxLayout()
@@ -222,6 +236,14 @@ class MachineInPanel(QtWidgets.QWidget):
         self.b_main.clicked.connect(self._main)
         foot.addWidget(self.b_main)
         root.addLayout(foot)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        k = round(max(1.0, min(1.4, min(self.width() / 950.0, self.height() / 540.0))), 2)
+        if k != self._k:
+            self._k = k
+            if self.rd is not None:
+                self._render()
 
     def _clear(self, lay):
         while lay.count():
@@ -251,8 +273,12 @@ class MachineInPanel(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- 裏で動かす
     def _spawn(self, fn, cb):
-        if self.sync:
-            cb(fn())
+        if self.sync:                                  # 試験用: 同じ場所で動かす（失敗は、裏で動かすときと同じ形で渡す）
+            try:
+                res = fn()
+            except Exception as e:
+                res = {"__error__": getattr(e, "message", None) or str(e), "__exc__": e}
+            cb(res)
             return
         wk = _Worker(fn)
         self._workers.append(wk)
@@ -280,8 +306,11 @@ class MachineInPanel(QtWidgets.QWidget):
         self._read()
 
     def result(self):
-        return {"handoff": True, "cycled": bool(self.cycled), "model": self.env.get("model", ""),
-                "unit": self.unit, "program_manual": True}
+        out = {"handoff": True, "cycled": bool(self.cycled), "model": self.env.get("model", ""),
+               "unit": self.unit, "program_manual": not self.prog_sent, "panel": True}
+        if self.prog_sent and self.prog_plan:                 # 送ったプログラムに合わせて、測定の画面の型式・測り方を入れる
+            out["program_handoff"] = WP.handoff(self._masters(), self._model(), self.prog_plan)
+        return out
 
     def reject(self):
         self._timer.stop()
@@ -292,7 +321,7 @@ class MachineInPanel(QtWidgets.QWidget):
                 pass
 
     def stage_index(self):
-        return {"connect": 0, "order": 1, "decide": 2, "write": 3, "power": 3}[self.page]
+        return {"connect": 0, "order": 1, "decide": 2, "write": 3, "power": 3, "prog": 4}[self.page]
 
     # ---------------------------------------------------------------- 画面の切り替え
     def _go(self, page):
@@ -304,6 +333,11 @@ class MachineInPanel(QtWidgets.QWidget):
             return
         i = PAGES.index(self.page)
         if self.page == "power":
+            return
+        if self.page == "prog":                      # パラメータを書いたあとは、もどれない（書き終わっている）
+            if self.params_skipped and not self.prog_sent:
+                self.params_skipped = False
+                self._go("connect")
             return
         if i > 0:
             self._go(PAGES[i - 1])
@@ -321,9 +355,14 @@ class MachineInPanel(QtWidgets.QWidget):
             self._do_write()
         elif self.page == "power":
             if self._checked and self._checked["all_ok"]:
-                self._finish()
+                self._enter_prog()
             else:
                 self._do_check()
+        elif self.page == "prog":
+            if self.prog_sent and M.prog_all_in(self.prog_plan, self.prog_rd["states"] if self.prog_rd else {}, self.prog_results):
+                self._finish()
+            else:
+                self._prog_do_send()
 
     def _finish(self):
         self._timer.stop()
@@ -356,13 +395,22 @@ class MachineInPanel(QtWidgets.QWidget):
         self.lbl_msg.setStyleSheet(style)
         self.lbl_msg.setVisible(bool(text))
 
+    def _fs(self, px):
+        return int(px * self._k)
+
     def _render(self):
+        k = self._k
+        self.right_w.setStyleSheet(
+            f"QLabel#title{{font-size:{self._fs(26)}px;}} QLabel#line{{font-size:{self._fs(17)}px;}}"
+            f"QPushButton#act{{font-size:{self._fs(19)}px;}} QPushButton#fallback{{font-size:{self._fs(15)}px;}}"
+            f"QPushButton#back{{font-size:{self._fs(15)}px;}}")
+        self.lbl_stage.setStyleSheet(f"font-size:{self._fs(14)}px; color:#5A6876;")
         self._clear(self.extra)
         self._msg("")
         self.lbl_text.setStyleSheet("")
         i = self.stage_index()
         self.lbl_stage.setText("　".join((f"【{n}】" if k == i else n) + (" ✓" if k < i else "") for k, n in enumerate(STAGE_NAMES)))
-        self.b_prev.setVisible(self.page in ("order", "decide", "write"))
+        self.b_prev.setVisible(self.page in ("order", "decide", "write") or (self.page == "prog" and self.params_skipped and not self.prog_sent))
         getattr(self, "_page_" + self.page)()
 
     # ---------------------------------------------------------------- ① つなぐ
@@ -411,8 +459,7 @@ class MachineInPanel(QtWidgets.QWidget):
             bands.append(("機械の値が、マスタと違います:\n" + "\n".join(mm["lines"]), RED,
                           [(f"マスタの{self.unit}号機の行を直す", lambda mm=mm: self._fix_master(mm))]))
         shown, hidden = M.split_alarms(alarms or [], self.settings, self.unit)
-        for line in M.battery_lines(shown):
-            bands.append((line, RED, []))
+        bands += self._battery_bands(shown)
         others = M.other_alarm_lines([a for a in shown if not focas_ops_allowed(self.settings, self.unit, a)])
         if others:
             bands.append(("いま出ているアラーム（書く前に直してください）: " + "、".join(others), AMBER, []))
@@ -432,6 +479,7 @@ class MachineInPanel(QtWidgets.QWidget):
         self.lbl_title.setText(f"{phrase}とつながりました")
         self.lbl_text.setText(f"軸の容量: {M.axes_summary(probe)}")
         self._lab("この機械で、続けます。", GREENB)
+        self._btn("パラメータは書かない（測定プログラムだけ送る）", self._skip_params, "fallback")
         self.b_main.setEnabled(True)
 
     def _reg_box(self):
@@ -495,6 +543,23 @@ class MachineInPanel(QtWidgets.QWidget):
         self.planner.reload_controllers()
         self._render()
         self._msg(f"マスタの{self.unit}号機の行を直しました（前のものは {bak} に残してあります）", GREENB)
+
+    def _battery_bands(self, alarms):
+        """電池のアラームの赤い帯。帯ごとに［この機械では無視する］（押したときだけ。設定の alarm_ignore に残す）。"""
+        out = []
+        for a in alarms or []:
+            lines = M.battery_lines([a])
+            if lines:
+                code = str(a.get("code") or "").upper()
+                out.append((lines[0], RED, [("この機械では無視する", lambda c=code: self._ignore(c))]))
+        return out
+
+    def _ignore(self, code):
+        M.add_ignore(self.settings, self.unit, code)
+        cb = self.env.get("save_settings")
+        if cb:
+            cb()
+        self._render()
 
     def _unignore(self, code):
         M.remove_ignore(self.settings, self.unit, code)
@@ -560,10 +625,10 @@ class MachineInPanel(QtWidgets.QWidget):
         self._set_bands([])
         self.lbl_title.setText("決まったこと")
         self.lbl_text.setText(M.card_text(self.idn, self.rows))
-        self.lbl_text.setStyleSheet("font-size:18px; font-weight:bold; background:#FFFFFF; border:1px solid #D5DBE1; border-radius:12px; padding:12px;")
+        self.lbl_text.setStyleSheet(f"font-size:{self._fs(20)}px; font-weight:bold; background:#FFFFFF; border:1px solid #D5DBE1; border-radius:12px; padding:14px;")
         bad = [r for r in self.rows if not r["axis"]]
         self.art.set_svg(easy_art.kinds([(r["kind"], f"{r['axis']}軸" if r["axis"] else "未定") for r in self.rows], ok=not bad))
-        self._lab(M.reason_line(self.rows), GREY)
+        self._lab(M.reason_line(self.rows), f"color:#5A6876; font-size:{self._fs(13)}px;")
         if bad:
             self._lab("使う軸を選んでください（容量が合う軸が、機械にありません）", AMBER)
             self._change(render=False)
@@ -821,8 +886,7 @@ class MachineInPanel(QtWidgets.QWidget):
             mark = "✓" if r["ok"] else "✗"
             self._lab(f"{mark} N{r['no']:05d} {r['label'] or '-'}　機械 {r['now']}／書いた値 {r['want']}"
                       + (f"　（{r['note']}）" if r["note"] else ""), "font-size:13px; color:#16864C;" if r["ok"] else "font-size:13px; color:#B02A20; font-weight:bold;")
-        bands = [(line, RED, []) for line in M.battery_lines(M.split_alarms(ck["alarms"], self.settings, self.unit)[0])]
-        self._set_bands(bands)
+        self._set_bands(self._battery_bands(M.split_alarms(ck["alarms"], self.settings, self.unit)[0]))
         self.b_main.setText("次へ ▶" if ck["all_ok"] else "もう一度確かめる")
         self.b_main.setEnabled(True)
 
@@ -841,6 +905,295 @@ class MachineInPanel(QtWidgets.QWidget):
             self._checked = res
             self._render()
         self._spawn(lambda: M.check_step(self.settings, self.factory, self.job), done)
+
+    # ---------------------------------------------------------------- 測定プログラムを送る
+    # かんたん作成の段④と同じ中身（easy_machine_in.prog_*）。読むだけで状況を出し、［送る］を押したときだけ書く。
+    def _masters(self):
+        if getattr(self, "_masters_cache", None) is None:
+            try:
+                from . import masters
+                self._masters_cache = masters.load_masters(self.settings)
+            except Exception:
+                self._masters_cache = {}
+        return self._masters_cache
+
+    def _model(self):
+        m = str(self.env.get("model") or "").strip()
+        if not m and self.env.get("model_fn"):
+            try:
+                m = str(self.env["model_fn"]() or "").strip()
+            except Exception:
+                m = ""
+        return m
+
+    def _skip_params(self):
+        """［パラメータは書かない］: 書き込みも電源の入れ直しもしないで、測定プログラムだけ送る。"""
+        if self._busy:
+            return
+        self.params_skipped = True
+        self._enter_prog()
+
+    def _enter_prog(self):
+        self.prog_rd, self.prog_results, self.prog_sent = None, {}, False
+        self._prog_error, self._prog_checks = "", {}
+        self._prog_tilt, self._prog_choice = None, None
+        self._prog_make_plan()
+        self._go("prog")
+
+    def _prog_make_plan(self):
+        try:
+            self.prog_plan = M.prog_plan(self.settings, self._model(), [p["kind"] for p in self.products],
+                                         tilt=self._prog_tilt, choice=self._prog_choice, masters_dict=self._masters())
+        except Exception as e:
+            self.prog_plan = {"problems": [f"測定プログラムを作れませんでした: {e}"], "programs": [], "slots": [], "allowed": [],
+                              "choice": "", "ambiguous": False, "tilt": False}
+
+    def _prog_reset(self):
+        self.prog_rd, self.prog_results, self.prog_sent, self._prog_error = None, {}, False, ""
+
+    def _prog_kind_changed(self, v):
+        self._prog_tilt = bool(v)
+        self._prog_choice = None
+        self._prog_reset()
+        self._prog_make_plan()
+        self._render()
+
+    def _prog_choice_changed(self, key):
+        if key == (self.prog_plan or {}).get("choice"):
+            return
+        self._prog_choice = key
+        self._prog_reset()
+        self._prog_make_plan()
+        self._render()
+
+    def _prog_host(self):
+        if self.job:
+            return self.job["host"], self.job["port"]
+        pr = (self.rd or {}).get("probe") or {}
+        return pr.get("host"), pr.get("port")
+
+    def _prog_client_work(self, fn):
+        def work():
+            client = self.factory(self.settings)
+            try:
+                return fn(client)
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        return work
+
+    def _prog_read(self):
+        """機械の中を読む（読むだけ）。つなぐ → 控え → 点検 → 機械の中の確認。"""
+        host, port = self._prog_host()
+        plan = self.prog_plan
+        self._busy = True
+        self._prog_error = ""
+        self._render()
+
+        def done(res):
+            self._busy = False
+            if not isinstance(res, dict) or "__error__" in res:
+                self._prog_error = str((res or {}).get("__error__") or "機械を読めませんでした")
+                self.prog_rd = None
+            else:
+                self.prog_rd = res
+            self._render()
+        self._spawn(self._prog_client_work(lambda c: M.prog_read(
+            c, self.settings, plan, host=host, port=port, unit=self.unit, controllers_list=self.planner.controllers(),
+            progress=lambda d, t, n: self.progress_sig.emit(f"控え {d}/{t} {n}"), root=self.env.get("backup_root"))), done)
+
+    def _prog_reread(self):
+        """もう一度確かめる（非常停止をもどしたあとなど）。控えは、取ったものをそのまま使う。"""
+        if self._busy:
+            return
+        if self.prog_rd is None or self.prog_sent:
+            self._prog_reset()
+            self._render()
+            return
+        host, port = self._prog_host()
+        plan, rd = self.prog_plan, self.prog_rd
+        self._busy = True
+        self._render()
+
+        def done(res):
+            self._busy = False
+            if not isinstance(res, dict) or "__error__" in res:
+                self._prog_error = str((res or {}).get("__error__") or "機械を読めませんでした")
+            else:
+                self.prog_rd = res
+            self._render()
+        self._spawn(self._prog_client_work(lambda c: M.prog_recheck(c, self.settings, plan, rd, host=host, port=port, unit=self.unit)), done)
+
+    def _prog_skip(self):
+        if self._busy:
+            return
+        self._finish()
+
+    def _confirm_overwrite(self, numbers):
+        """同じ番号を入れ替えてよいか（人が［入れ替える］を選んだとき、送る直前に確かめる）。試験では差しかえる。"""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("プログラムの入れ替え")
+        box.setText("機械にある " + "・".join(f"O{n}" for n in numbers) + " は消えて、新しいものに入れ替わります。\n"
+                    "消す前の中身は、いま取った控え（機械のプログラム一覧ごと）に入っています。\nよろしいですか？")
+        yes = box.addButton("入れ替える", QtWidgets.QMessageBox.AcceptRole)
+        no = box.addButton("やめる", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(no)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _prog_do_send(self):
+        """［送る］。1回だけ。機械に書くのは、ここだけ。"""
+        plan, rd = self.prog_plan, self.prog_rd
+        if self._busy or self.prog_sent or rd is None or rd["chk"]["reasons"] or not plan or plan["problems"]:
+            return
+        ow = sorted(n for n, ck in self._prog_checks.items() if ck.isChecked())
+        if ow and not self._confirm_overwrite(ow):
+            return
+        host, port = self._prog_host()
+        self._busy = self.prog_sent = True
+        self._msg("送っています…（終わるまで機械にさわらないでください）", AMBER)
+        self.b_main.setEnabled(False)
+
+        def done(res):
+            self._busy = False
+            if not isinstance(res, dict) or "__error__" in res:
+                e = (res or {}).get("__exc__")
+                why = "／".join(getattr(e, "reasons", None) or [str((res or {}).get("__error__") or "")])
+                self.prog_results = {}
+                self._prog_error = "送れませんでした: " + why
+                self._render()
+                return
+            self.prog_results = {it["number"]: it for it in res["items"]}
+            self._prog_log(res)
+            self._render()
+        self._spawn(self._prog_client_work(lambda c: M.prog_send(
+            c, self.settings, plan, rd, host=host, port=port, unit=self.unit, overwrite_numbers=ow,
+            progress=lambda i, t, n: self.progress_sig.emit(f"{i}/{t} {n}"))), done)
+
+    def _prog_log(self, res):
+        plan = self.prog_plan or {}
+        try:
+            from .settings import app_dir
+            path = self.settings.get("prog_log_csv") or str(app_dir() / WP.LOG_NAME)
+            WP.append_log(path, self._model(), self.unit or "", plan.get("choice", ""), res.get("items", []),
+                          WP.fingerprints(plan["programs"]))
+        except Exception:
+            pass
+        if plan.get("choice"):
+            self.settings["wizard_prog_choice"] = plan["choice"]
+            cb = self.env.get("save_settings")
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
+
+    def _prog_is_all_in(self):
+        rd = self.prog_rd
+        return bool(self.prog_sent and not self._busy
+                    and M.prog_all_in(self.prog_plan, rd["states"] if rd else {}, self.prog_results))
+
+    def _page_prog(self):
+        plan = self.prog_plan
+        rd = self.prog_rd
+        self._set_bands([])
+        self.lbl_title.setText("測定プログラムを機械に送ります")
+        self.art.set_svg(easy_art.auto(False, "プログラムを送ります"))
+        self.b_main.setText("送る")
+        self.b_main.setEnabled(False)
+        nums = M.prog_numbers(plan)
+        if plan["problems"]:
+            self.lbl_text.setText("送るプログラムを作れません。")
+            for t in plan["problems"]:
+                self._lab(t, RED)
+            self._lab("型式が入っていないときは、通常の画面で型式を入れてから、もう一度来てください。", GREY)
+            self._btn("プログラムは機械で用意する（送らない）", self._prog_skip, "fallback")
+            return
+        self.lbl_text.setText("送るのは " + "・".join(f"O{n:04d}" for n in nums) + "（型式 " + (self._model() or "-") + "）。"
+                              "書く前に、機械の今の中身は控えます。")
+        if plan["ambiguous"]:                                  # 製品が無いので、回転か傾斜かを選ぶ
+            cb = QtWidgets.QComboBox()
+            cb.addItem("回転として作る", False)
+            cb.addItem("傾斜として作る", True)
+            cb.setCurrentIndex(1 if plan["tilt"] else 0)
+            cb.activated.connect(lambda _i, c=cb: self._prog_kind_changed(c.currentData()))
+            self.extra.addWidget(cb)
+            self._lab(plan["kind_note"], GREY)
+        if len(plan["allowed"]) > 1:
+            cc = QtWidgets.QComboBox()
+            for key, label in WP.CHOICES:
+                if key in plan["allowed"]:
+                    cc.addItem(label, key)
+            cc.setCurrentIndex(max(0, cc.findData(plan["choice"])))
+            cc.activated.connect(lambda _i, c=cc: self._prog_choice_changed(c.currentData()))
+            self.extra.addWidget(cc)
+        self._prog_rows(plan, rd)
+        if self._prog_error:
+            self._lab(self._prog_error, RED)
+            self._btn("もう一度確かめる", self._prog_reread, "back")
+        elif self._busy and not self.prog_sent:
+            self._lab("機械の今の中身を控えています（読むだけ。1分ほど）…", AMBER)
+        elif rd is None and not self._busy:
+            self._prog_read()
+            return
+        elif rd is not None and not self.prog_sent:
+            reasons = rd["chk"]["reasons"]
+            if reasons:
+                self._lab("いまは送れません:\n・" + "\n・".join(reasons), RED)
+                if any("非常停止" in r for r in reasons):
+                    self._lab("プログラムは、非常停止をもどしてから送ります。", AMBER)
+                self._btn("もう一度確かめる", self._prog_reread, "back")
+            else:
+                self._lab("プログラムは、非常停止をもどした状態で送ります（機械の運転はしません）。", GREY)
+                self.b_main.setEnabled(not self._busy)
+        if self.prog_sent and not self._busy and not self._prog_error:
+            if self._prog_is_all_in():
+                self._lab("測定プログラムが機械に入りました。", GREENB)
+                self.art.set_svg(easy_art.auto(True, "入りました"))
+                self.b_main.setText("次へ ▶")
+                self.b_main.setEnabled(True)
+            elif self.prog_results:
+                held = [it for it in self.prog_results.values() if str(it.get("skip_reason") or "").startswith("hold")]
+                if held:
+                    self._lab("機械に同じ番号で中身が違うものがあるので、送っていません（本体とサブは、セットで送ります）。"
+                              "入れ替えるときは、［入れ替える］にチェックを入れて、もう一度確かめてから送ります。", RED)
+                else:
+                    self._lab("入っていない、または読み戻しが違うものがあります。", RED)
+                self._btn("もう一度確かめる", self._prog_reread, "back")
+        if not self._prog_is_all_in():
+            self._btn("プログラムは機械で用意する（送らない）", self._prog_skip, "fallback")
+
+    def _prog_rows(self, plan, rd):
+        """番号ごとに1行: 名前・いまの機械・結果。同じ番号で中身が違うものには［入れ替える］（選ばなければ書かない）。"""
+        labels = M.prog_labels(plan)
+        states = (rd or {}).get("states") or {}
+        self._prog_checks = {}
+        for n in M.prog_numbers(plan):
+            lab = labels.get(n, "")
+            name = lab if lab.startswith(f"O{n:04d}") else f"O{n:04d}　{lab}".strip()   # 名前が番号から始まるときは、番号を2度出さない
+            it = self.prog_results.get(n)
+            if it is not None:
+                text, kind = WP.row_status(it)
+                mark = {"ok": "✓", "bad": "✗", "skip": "－"}.get(kind, "")
+                color = {"ok": "#16864C", "bad": "#B02A20", "skip": "#92400E"}.get(kind, "#5A6876")
+                if it.get("skip_reason") == "same":
+                    mark, color = "✓", "#16864C"
+                self._lab(f"{mark} {name}　{text}", f"font-size:{self._fs(16)}px; font-weight:bold; color:{color};")
+                continue
+            st = states.get(n)
+            if rd is None or st is None:
+                self._lab(f"・{name}", f"font-size:{self._fs(16)}px;")
+                continue
+            self._lab(f"・{name}　{WP.state_text(st)}",
+                      f"font-size:{self._fs(16)}px; color:" + ("#16864C" if st == "same" else "#92400E" if st != "new" else "#17212B") + ";")
+            if st in ("differs", "unknown") and not self.prog_sent:
+                ck = QtWidgets.QCheckBox(f"O{n:04d} を入れ替える（機械の O{n:04d} は消えます。消す前の中身は控えに入っています）")
+                ck.setStyleSheet("font-size:13px;")
+                self.extra.addWidget(ck)
+                self._prog_checks[n] = ck
 
 
 def focas_ops_allowed(settings, unit, alarm):

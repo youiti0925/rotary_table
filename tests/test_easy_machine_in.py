@@ -292,6 +292,42 @@ class TestPanel(PanelBase):
         self.assertFalse(any("電池" in b for b in bands))
         self.assertTrue(any(b == "無視中: DS0307" for b in bands), bands)
 
+    def band_buttons(self, p):
+        out = []
+        for i in range(p.bands.count()):
+            lay = p.bands.itemAt(i).layout()
+            out.append((lay.itemAt(0).widget().text(), [lay.itemAt(k).widget() for k in range(1, lay.count())]))
+        return out
+
+    def test_battery_band_has_an_ignore_button_that_unblocks_writing(self):
+        self.lib.m.alarms = [tuple(BATT)]
+        p = self.panel()
+        p.start()
+        bands = self.band_buttons(p)
+        batt = [b for b in bands if "電池" in b[0]]
+        self.assertTrue(batt, bands)
+        btn = batt[0][1][0]
+        self.assertEqual(btn.text(), "この機械では無視する")
+        self.assertEqual(self.settings.get("alarm_ignore") or {}, {})          # 押すまでは、何も変えない
+        self.assertEqual(self.saved, [])
+        btn.click()
+        self.assertEqual(self.settings["alarm_ignore"], {"23": ["DS0307"]})   # 既存の設定（号機ごと）に残す
+        self.assertEqual(self.saved, [1])                                      # 既存の保存の道
+        bands = self.band_buttons(p)
+        self.assertFalse(any("電池" in b[0] for b in bands))
+        self.assertTrue(any(b[0] == "無視中: DS0307" for b in bands), bands)
+        self.walk_to_write(p)                                                  # 無視したので、書き試しが止まらない
+        p._do_trial()
+        self.assertTrue(p.trial_ok, p._outcome)
+
+    def test_battery_alarm_not_ignored_still_blocks_writing(self):
+        self.lib.m.alarms = [tuple(BATT)]
+        p = self.panel()
+        self.walk_to_write(p)
+        p._do_trial()
+        self.assertFalse(p.trial_ok)
+        self.assertEqual(p._outcome["state"], "not_ready")
+
     def test_unknown_machine_offers_registration_with_candidates(self):
         self.lib.m.cnc_id = [1, 2, 3, 4]                                      # 台帳に無い機械
         p = self.panel()
@@ -356,11 +392,15 @@ class TestPanel(PanelBase):
         self.assertGreater(self.lib.called("cnc_wrparam"), before)
         p._main()                                                             # 確かめる
         self.assertTrue(p._checked["all_ok"], p._checked)
-        p._main()
+        p._main()                                                             # 次へ → 測定プログラムを送る段（読むだけ）
+        self.assertEqual(p.page, "prog")
+        self.assertEqual(done, [])
+        p._prog_skip()                                                        # 送らない（機械で用意する）
         self.assertEqual(done, [1])
         r = p.result()
         self.assertTrue(r["handoff"])
         self.assertTrue(r["program_manual"])
+        self.assertNotIn("program_handoff", r)
 
     def test_refusal_is_shown_with_the_setting_instruction(self):
         self.lib.sc["pwe_required"] = True                                    # 書込許可 0（SW0100 も出ていない）
@@ -406,6 +446,260 @@ class TestPanel(PanelBase):
         self.assertTrue(dlg.b_next.isHidden())
         dlg._close_wizard()
         self.assertEqual(poller.log, ["pause", "resume"])
+
+
+# ------------------------------------------------------------------ 測定プログラムを送る段（かんたん作成の段④と同じ中身）
+FOLDER = "//CNC_MEM/USER/PATH1/"
+
+
+class TestPanelPrograms(PanelBase):
+    def setUp(self):
+        super().setUp()
+        cond = self.work / "測定条件.csv"
+        cond.write_text("回転,,,,,,,,,,,,傾斜\n型式,クローズ,間隔H,間隔W,1/N_H,1/N_W,分割数1,分割数2,"
+                        "測定順HR,測定順WR,測定順WL,測定順HL,\nRTV-510,,100000,3000,1,1,36,10,1,2,3,4,\n",
+                        encoding="utf-8-sig")
+        rep = self.work / "再現.csv"
+        rep.write_text("型式,ブロック数,回数,再現開始,再現終了\nRTV-510,4,5,0,270\n", encoding="utf-8-sig")
+        self.settings.update(
+            conditions_csv=str(cond), user_rotary_repeat_csv=str(rep),
+            user_rotary_csv=str(self.work / "none1.csv"), user_tilt_csv=str(self.work / "none2.csv"),
+            user_tilt_repeat_csv=str(self.work / "none3.csv"), judgement_csv=str(self.work / "none4.csv"),
+            prog_log_csv=str(self.work / "proglog.csv"), focas_prog_folder=FOLDER)
+        self.m = self.lib.m
+        self.m.programs.pop(FOLDER + "O1000", None)                  # 偽物の機械にもともとある O1000（別の中身）は、別の試験で使う
+
+    def panel(self, **extra):
+        extra.setdefault("model_fn", lambda: "RTV-510")             # 製品を探さずに来たときの、測定の画面の型式
+        return super().panel(**extra)
+
+    def written(self):
+        return list(getattr(self.m, "written_programs", []))
+
+    def to_prog_after_params(self, p):
+        TestPanel.walk_to_write(self, p)
+        p._do_trial()
+        p._main()
+        p._main()                                                            # 確かめる
+        self.assertTrue(p._checked["all_ok"], p._checked)
+        p._main()
+        self.assertEqual(p.page, "prog")
+
+    def labels(self, p):
+        from PySide6 import QtWidgets
+        return [p.extra.itemAt(i).widget().text() for i in range(p.extra.count())
+                if isinstance(p.extra.itemAt(i).widget(), (QtWidgets.QLabel, QtWidgets.QCheckBox, QtWidgets.QPushButton))]
+
+    def old_program(self, main):
+        return b"%\nO" + b"%04d" % main + b"(OLD) \nM30 \n%"
+
+    def test_other_content_on_the_sub_number_is_held_not_overwritten(self):
+        """偽物の機械にもとからある O1000（別の中身）。本体とサブはセット。チェックが無ければ、どちらも送らない。"""
+        self.m.add_program(FOLDER + "O1000", b"%\nO1000(MAIN) \nM98P901 \nM30 \n%", "MAIN")
+        old = self.m.programs[FOLDER + "O1000"]
+        self.m.status["emergency"] = 0
+        p = self.panel()
+        p.start()
+        p._skip_params()
+        self.assertEqual(p.prog_rd["states"][1000], "differs")
+        p._prog_do_send()
+        self.assertEqual(self.written(), [])                                     # セットの片方だけは送らない
+        self.assertEqual(self.m.programs[FOLDER + "O1000"], old)
+        texts = " ".join(self.labels(p))
+        self.assertIn("送っていません", texts)
+        self.assertIn("もう一度確かめる", texts)
+        self.assertFalse(p.b_main.isEnabled())
+
+    def test_battery_alarm_blocks_program_send_until_ignored_on_the_connect_band(self):
+        self.m.status["emergency"] = 0
+        self.m.alarms = [tuple(BATT)]
+        p = self.panel()
+        p.start()
+        p._skip_params()
+        self.assertTrue(any("DS0307" in r for r in p.prog_rd["chk"]["reasons"]), p.prog_rd["chk"]["reasons"])
+        p._prog_do_send()
+        self.assertEqual(self.written(), [])                                     # 無視していないので、書かない
+        p._go("connect")
+        batt = [b for b in TestPanel.band_buttons(self, p) if "電池" in b[0]]
+        batt[0][1][0].click()                                                    # ［この機械では無視する］
+        p._skip_params()
+        self.assertEqual(p.prog_rd["chk"]["reasons"], [])
+        p._prog_do_send()
+        self.assertTrue(self.written())
+
+    def test_stage_names_include_programs(self):
+        p = self.panel()
+        p.start()
+        self.assertIn("プログラム", p.lbl_stage.text())
+
+    def test_program_stage_reads_only_then_sends_once_with_readback(self):
+        p = self.panel()
+        self.to_prog_after_params(p)
+        wr_params = self.lib.called("cnc_wrparam")
+        self.assertEqual(self.written(), [])                                     # 読んだだけ。まだ何も書いていない
+        nums = M.prog_numbers(p.prog_plan)
+        self.assertTrue(nums and nums[0] == 100, nums)
+        texts = " ".join(self.labels(p))
+        for n in nums:
+            self.assertIn(f"O{n:04d}", texts)                                    # 送る番号が見える
+        self.assertTrue(any("非常停止" in t for t in self.labels(p)))            # プログラムは非常停止をもどしてから
+        self.assertFalse(p.b_main.isEnabled())
+        p._prog_do_send()                                                         # 非常停止のままなら、押しても書かない
+        self.assertEqual(self.written(), [])
+        self.m.status["emergency"] = 0                                            # もどした
+        p._prog_reread()
+        self.assertEqual(p.prog_rd["chk"]["reasons"], [], p.prog_rd["chk"]["reasons"])
+        self.assertIn("送ります", " ".join(self.labels(p)))                      # 機械に同じ番号が無い
+        self.assertTrue(p.b_main.isEnabled())
+        self.assertEqual(p.b_main.text(), "送る")
+        self.assertEqual(self.written(), [])
+        p._main()                                                                 # ［送る］
+        written = self.written()
+        self.assertEqual(len(written), len(nums), written)
+        self.assertEqual(self.lib.called("cnc_wrparam"), wr_params)              # パラメータは、ここでは書いていない
+        texts = self.labels(p)
+        for n in nums:
+            self.assertTrue(any(t.startswith("✓") and f"O{n:04d}" in t for t in texts), texts)   # 番号ごとに ✓（読み戻し一致）
+        self.assertTrue(all(it["match"] for it in p.prog_results.values()))
+        self.assertEqual(p.b_main.text(), "次へ ▶")
+        done = []
+        p.finished.connect(done.append)
+        p._main()                                                                 # 次へ。もう一度は送らない
+        self.assertEqual(done, [1])
+        self.assertEqual(self.written(), written)
+        r = p.result()
+        self.assertFalse(r["program_manual"])
+        self.assertEqual(r["program_handoff"]["steps"][0]["programs"], [100])
+        self.assertTrue(r["handoff"])
+        self.assertTrue(Path(self.settings["prog_log_csv"]).exists())            # 送った記録は、段④と同じ所に残る
+        self.assertEqual(self.settings["wizard_prog_choice"], p.prog_plan["choice"])
+
+    def test_second_press_of_send_does_not_write_again(self):
+        p = self.panel()
+        self.m.status["emergency"] = 0
+        p.start()
+        p._skip_params()
+        self.assertEqual(p.page, "prog")
+        p._prog_do_send()
+        n = len(self.written())
+        self.assertGreaterEqual(n, 1)
+        p._prog_do_send()
+        self.assertEqual(len(self.written()), n)
+
+    def test_usable_when_parameters_are_skipped(self):
+        self.m.status["emergency"] = 0
+        p = self.panel()
+        p.start()
+        self.assertTrue(any(getattr(w, "text", lambda: "")().startswith("パラメータは書かない") for w in
+                            [p.extra.itemAt(i).widget() for i in range(p.extra.count())]))
+        p._skip_params()
+        self.assertEqual(p.page, "prog")
+        self.assertEqual(self.lib.called("cnc_wrparam"), 0)                      # パラメータは書かない
+        self.assertEqual(self.written(), [])
+        self.assertEqual(p.prog_rd["chk"]["reasons"], [])
+        p._main()
+        self.assertTrue(self.written())
+        self.assertEqual(self.lib.called("cnc_wrparam"), 0)
+        p._main()
+        r = p.result()
+        self.assertFalse(r["program_manual"])
+        self.assertFalse(r["cycled"])
+        self.assertIsNotNone(r["program_handoff"])
+
+    def test_same_number_with_other_content_is_not_overwritten_without_the_check(self):
+        self.m.status["emergency"] = 0
+        p = self.panel()
+        p.start()
+        main = 100
+        path = FOLDER + f"O{main}"
+        self.m.add_program(path, self.old_program(main), "OLD")
+        old = self.m.programs[path]
+        p._skip_params()
+        self.assertEqual(p.prog_rd["states"][main], "differs")
+        texts = self.labels(p)
+        self.assertTrue(any("中身が違います" in t for t in texts), texts)        # 何が上書きになるか見える
+        self.assertIn(main, p._prog_checks)
+        self.assertFalse(p._prog_checks[main].isChecked())                       # 初めは入れ替えない
+        asked = []
+        p._confirm_overwrite = lambda nums: (asked.append(nums), True)[1]
+        p._prog_do_send()
+        self.assertEqual(asked, [])                                              # チェックが無いので聞かず、入れ替えない
+        self.assertEqual(self.m.programs[path], old)
+
+    def test_overwrite_needs_the_check_and_an_explicit_confirmation(self):
+        self.m.status["emergency"] = 0
+        p = self.panel()
+        p.start()
+        main = 100
+        path = FOLDER + f"O{main}"
+        self.m.add_program(path, self.old_program(main), "OLD")
+        old = self.m.programs[path]
+        p._skip_params()
+        p._prog_checks[main].setChecked(True)
+        p._confirm_overwrite = lambda nums: False                                # 確認で［やめる］
+        p._prog_do_send()
+        self.assertEqual(self.m.programs[path], old)
+        self.assertFalse(p.prog_sent)
+        asked = []
+        p._confirm_overwrite = lambda nums: (asked.append(nums), True)[1]
+        p._prog_do_send()
+        self.assertEqual(asked, [[main]])
+        self.assertNotEqual(self.m.programs[path], old)                          # 確認のあと、入れ替わった
+        self.assertTrue(any(t.startswith("✓") and f"O{main:04d}" in t for t in self.labels(p)))
+
+    def test_already_same_content_is_not_sent_and_shows_a_check(self):
+        self.m.status["emergency"] = 0
+        p = self.panel()
+        p.start()
+        p._skip_params()
+        p._prog_do_send()
+        first = self.written()
+        p2 = self.panel()
+        p2.start()
+        p2._skip_params()
+        self.assertTrue(all(st == "same" for st in p2.prog_rd["states"].values()), p2.prog_rd["states"])
+        self.assertTrue(any("もう入っています" in t for t in self.labels(p2)))
+        p2._prog_do_send()                                                       # 同じ中身: 送るものは無い
+        self.assertEqual(self.written(), first)
+
+    def test_cannot_send_with_a_reason_and_skip_is_always_offered(self):
+        p = self.panel()
+        p.start()
+        p._skip_params()                                                         # 非常停止のまま
+        self.assertTrue(p.prog_rd["chk"]["reasons"])
+        self.assertFalse(p.b_main.isEnabled())
+        self.assertTrue(any(t.startswith("プログラムは機械で用意する") for t in self.labels(p)))
+        done = []
+        p.finished.connect(done.append)
+        p._prog_skip()
+        self.assertEqual(done, [1])
+        self.assertTrue(p.result()["program_manual"])
+        self.assertEqual(self.written(), [])
+
+    def test_easy_dialog_applies_the_program_handoff_and_keeps_programs_auto(self):
+        from PySide6 import QtWidgets
+        from test_easy_mode import FakeHost, FakePoller, S
+        from nd287_app import easy_mode
+
+        class MachineInPanel(QtWidgets.QWidget):
+            def result(self):
+                return {"handoff": True, "cycled": True, "unit": "23", "program_manual": False, "panel": True,
+                        "program_handoff": {"model": "RTV-510", "steps": [{"mode": "回転分割+再現", "programs": [100]}]}}
+
+            def reject(self):
+                pass
+
+        host = FakeHost()
+        host.easy_apply_handoff = lambda h: host.calls.append(("handoff", h["model"]))
+        dlg = easy_mode.EasyModeDialog(host, FakePoller(S(aut=0, emergency=1)))
+        self.addCleanup(dlg.close)
+        dlg._start_flow("measure")
+        dlg._wiz = MachineInPanel(dlg.embed)
+        dlg._wizard_finished(1)
+        self.assertIn(("handoff", "RTV-510"), host.calls)
+        self.assertNotEqual(dlg.ctx.get("prog"), "manual")                       # 送ったので、プログラムは機械で用意しない
+        self.assertTrue(dlg.ctx["cycled"])                                       # 電源の入れ直しは、画面の中で済んだ
+        self.assertTrue(dlg.ctx["handoff"])
 
 
 if __name__ == "__main__":

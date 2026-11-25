@@ -15372,7 +15372,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.e_model.text().strip() != m:
                 self.e_model.setText(m)
                 self.on_model_entered()
-        return {"settings": self.settings, "set_model": set_model, "save_settings": self.easy_save_settings}
+        return {"settings": self.settings, "set_model": set_model, "save_settings": self.easy_save_settings,
+                "model_fn": lambda: self.e_model.text().strip()}
+
+    def easy_apply_handoff(self, h):
+        """専用画面で測定プログラムを送り終えた: 型式と測り方（モード）を、送ったプログラムに合わせて入れる。"""
+        self._apply_wizard_handoff(h)
 
     def easy_save_settings(self):
         """無視するアラーム・確かめた型など、設定に残すものを保存する。"""

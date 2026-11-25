@@ -843,8 +843,159 @@ class TestDialog(unittest.TestCase):
         host.ng = 2
         host.ng_items = [("ホイール CW 精度PP", "12.3"), ("総合バックラッシ", "8.1")]
         dlg._enter(F.INDEX["result"])
-        self.assertIn("ホイール CW 精度PP", dlg.lbl_lines.text())
+        self.assertIn("2", dlg.lbl_lines.text())
+        box = dlg.extra.itemAt(0).widget()                     # 外れた所は、1行ずつの部品（値は右、折り返さない）
+        self.assertEqual(box.objectName(), "ng_rows")
+        from PySide6 import QtWidgets
+        texts = [w.text() for w in box.findChildren(QtWidgets.QLabel)]
+        self.assertIn("・ホイール CW 精度PP", texts)
+        self.assertIn("12.3", texts)
+        self.assertFalse(any(w.wordWrap() for w in box.findChildren(QtWidgets.QLabel) if w.text() in ("12.3", "8.1")))
         host.saved = True
+        dlg.close()
+
+    def test_ng_rows_with_a_long_value_do_not_crush_the_name_column(self):
+        from PySide6 import QtWidgets
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.ng = 3
+        host.ng_items = [("ホイール CCW 単一誤差", "-3.9″"), ("ウォーム CW 傾き", "+5.2″"),
+                         ("総合バックラッシ", "MIN -0.4\"　規格 ≧5.0\"　NG")]
+        dlg.resize(1024, 768)
+        dlg._enter(F.INDEX["result"])
+        self._wait(200)
+        box = dlg._extra_widgets["ng"]
+        for lb in box.findChildren(QtWidgets.QLabel):
+            if lb.text().startswith("・"):
+                self.assertGreaterEqual(lb.width(), 150, (lb.text(), lb.width()))        # 項目名の欄が細くならない
+                if lb.wordWrap() and lb.text():
+                    self.assertGreaterEqual(lb.height(), lb.heightForWidth(lb.width()) - 2)   # 切れない
+        host.saved = True
+        dlg.close()
+
+    def _wait(self, ms):
+        import time
+        end = time.time() + ms / 1000.0
+        while time.time() < end:
+            self.app.processEvents()
+            time.sleep(0.02)
+
+    def test_back_from_result_skips_measuring_and_does_not_bounce(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        dlg._enter(F.INDEX["start2"])
+        dlg.history.append(dlg.i)
+        host.finished = True
+        dlg._enter(F.INDEX["measuring"])                      # 測り終わっている: 1.2 秒後に結果へ
+        self._wait(1700)
+        self.assertEqual(self.sid(dlg), "result")
+        host.saved = True                                     # 保存した（保存前なら、いまの確認がそのまま働く）
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "start2")             # 「測っています」には入らない
+        self._wait(1700)
+        self.assertEqual(self.sid(dlg), "start2")             # 結果へ戻されない
+        self.assertTrue(host.finished)                        # 値は消えていない
+        dlg.close()
+
+    def test_back_from_result_unsaved_still_asks(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        dlg._enter(F.INDEX["start2"])
+        dlg.history.append(dlg.i)
+        host.finished = True
+        dlg._enter(F.INDEX["measuring"])
+        self._wait(1700)
+        asked = []
+        dlg._yesno = lambda text, *a, **k: (asked.append(text), False)[1]
+        dlg._back()
+        self.assertTrue(asked)
+        self.assertEqual(self.sid(dlg), "result")
+        dlg.close()
+
+    def test_power_step_has_an_offline_fallback_and_later_steps_follow(self):
+        dlg, host, poller = self.make(F.OFFLINE)
+        self.pass_choose(dlg)
+        self.assertEqual(self.sid(dlg), "power")
+        self.assertTrue(dlg.b_manual.isHidden())               # はじめは待つ
+        self.assertFalse(dlg.b_next.isEnabled())
+        dlg._entered_at -= 40
+        dlg._refresh()
+        self.assertFalse(dlg.b_manual.isHidden())
+        self.assertIn("機械とつながっていません（電源と LAN ケーブル）", dlg.b_manual.text())
+        self.assertIn("つながらないまま進む", dlg.b_manual.text())
+        dlg.b_manual.click()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertNotEqual(self.sid(dlg), "power")
+        # 機械の手順は、待たずに「やりました」を出す（機械がつながらないので、人が確認する）
+        guard = 0
+        while F.step(self.sid(dlg))["kind"] != "machine" and guard < 20:
+            dlg._next()
+            guard += 1
+        self.assertEqual(F.step(self.sid(dlg))["kind"], "machine")
+        dlg._refresh()
+        self.assertFalse(dlg.b_manual.isHidden())
+        dlg.b_manual.click()
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg.close()
+
+    def test_manual_fallback_is_a_real_button(self):
+        from PySide6 import QtWidgets
+        dlg, host, poller = self.make(S(aut=1, emergency=0))
+        dlg._enter(F.INDEX["dial_mdi"])                         # つまみは「メモリ」→ MDI ではない
+        dlg._entered_at -= 40
+        dlg._refresh()
+        self.assertIsInstance(dlg.b_manual, QtWidgets.QPushButton)
+        self.assertFalse(dlg.b_manual.isHidden())
+        self.assertEqual(dlg.b_manual.objectName(), "fallback")  # 下線だけの小さい文字ではない
+        self.assertGreaterEqual(dlg.b_manual.sizeHint().height(), 40)
+        self.assertGreaterEqual(dlg.b_manual.sizeHint().width(), 200)
+        self.assertNotEqual(dlg.b_manual.objectName(), "sub")
+        dlg.close()
+
+    def test_right_column_is_centered_and_scaled_at_all_sizes(self):
+        from PySide6 import QtCore
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        sizes = {}
+        for (w, h) in ((1600, 980), (1366, 768), (1024, 768)):
+            dlg.resize(w, h)
+            self._wait(100)
+            for sid in ("intro", "dial_mdi"):
+                dlg._enter(F.INDEX[sid])
+                self._wait(100)
+                top = dlg.lbl_who.mapTo(dlg.right_w, QtCore.QPoint(0, 0)).y() if dlg.lbl_who.isVisible() else                     dlg.lbl_title.mapTo(dlg.right_w, QtCore.QPoint(0, 0)).y()
+                kids = [x for x in (dlg.lbl_who, dlg.lbl_title, dlg.lbl_lines, dlg.lbl_watch, dlg.b_manual, dlg.v_map) if x.isVisible()]
+                bottom = max(x.mapTo(dlg.right_w, QtCore.QPoint(0, x.height())).y() for x in kids)
+                gap_top, gap_bot = top, dlg.right_w.height() - bottom
+                self.assertLess(abs(gap_top - gap_bot), 12, (w, h, sid, gap_top, gap_bot))   # 上下の余白が同じ（まん中）
+            sizes[w] = int(dlg.lbl_title.font().pixelSize() if dlg.lbl_title.font().pixelSize() > 0 else 0)
+        dlg._enter(F.INDEX["dial_mdi"])
+        self.assertTrue(dlg.v_map.isVisible())                  # 操作盤の絵は右の空きに置く
+        self.assertTrue(dlg.right_w.isAncestorOf(dlg.v_map))
+        dlg.resize(1600, 980)
+        self._wait(100)
+        self.assertIn("font-size:36px", dlg.right_w.styleSheet())    # 大きい画面では文字も大きく
+        dlg.resize(1024, 768)
+        self._wait(100)
+        self.assertIn("font-size:26px", dlg.right_w.styleSheet())
+        dlg.close()
+
+    def test_finish_shows_folder_and_elided_path_with_tooltip(self):
+        dlg, host, poller = self.make(S(aut=0, emergency=0))
+        host.finished = True
+        host.saved = True
+        long = r"C:\Users\AA4344\AppData\Local\Temp\nd287v_tpiple1a\RBS\T-001.csv"
+        orig = host.easy_ctx
+        host.easy_ctx = lambda: dict(orig(), saved_path=long)
+        dlg.resize(1024, 768)
+        dlg._enter(F.INDEX["finish"])
+        self._wait(150)
+        self.assertIn("RBS", dlg.lbl_lines.text())
+        self.assertIn("T-001.csv", dlg.lbl_lines.text())
+        self.assertNotIn("AppData", dlg.lbl_lines.text())
+        el = dlg._extra_widgets["path"]
+        self.assertEqual(el.toolTip(), long)
+        self.assertEqual(el.full(), long)
+        self.assertLessEqual(el.height(), 30)                   # 1行
+        self.assertIn("…", el.text())
         dlg.close()
 
     def test_photo_lookup_and_toggle(self):

@@ -3,6 +3,9 @@
 
 かんたん作成の窓を中に入れる代わりに、短い画面を順に出す（easy_machine_in_ui.py）。
 決め方はここ（新しい決め方は作らない。今ある部品を順に呼ぶ）:
+  順番       受注伝票番号 → 製品 → 号機（マスタで自動）→ つなぐ → 機械を読んで号機・軸を確かめる → 書く。
+             どの制御装置かは製品が決まってから分かるので、つなぐのは号機が決まったあと
+             （すでにつながっている機械があれば、先に読んで、その号機を使う＝例外の道）
   つなぐ     読むだけ（identify・各軸の 2020/2165・状態・アラーム）。号機は machine_decide.identify_unit
   決める     軸は machine_decide.choose_axes。モーターは「軸を決めたあと、その軸の 2020 が製品と同じか」
   控え・一覧 focas_backup.take_backup（読むだけ）→ cli_write と同じ plan_writes
@@ -93,6 +96,42 @@ def other_alarm_lines(alarms):
     """電池以外で出ているアラームの一行。"""
     return [f"{a.get('code')} {a.get('text', '')}".strip() for a in alarms or []
             if str(a.get("code") or "").upper() not in BATTERY_CODES]
+
+
+# ------------------------------------------------------------------ 製品から号機を決める（機械につなぐ前）
+def needs_line(products):
+    """「回転 160A・傾斜 80A（200V）」。必要な容量を1行で。"""
+    parts = [f"{p.get('kind') or ''} {p.get('cap') or '容量不明'}".strip() for p in products]
+    volts = sorted({str(p.get("voltage") or "") for p in products if p.get("voltage")})
+    return "・".join(parts) + (f"（{'・'.join(volts)}）" if volts else "")
+
+
+def ledger_ip(settings, unit):
+    """台帳にある、その号機の機械の IP（いちばん新しいもの）。無ければ ''。"""
+    try:
+        reg = focas_find.load_registry(focas_find.registry_path(settings))
+    except Exception:
+        return ""
+    rows = sorted((r for r in reg.values() if str(r.get("unit")) == str(unit) and r.get("ip")),
+                  key=lambda r: r.get("when", ""), reverse=True)
+    return rows[0]["ip"] if rows else ""
+
+
+def lan_guide(settings, unit):
+    """機械側の LAN のつなぎ方（つなぐ画面の案内）。"""
+    ip = ledger_ip(settings, unit)
+    lines = [f"{unit}号機の機械の電源を入れ、LAN ケーブルを PC につないでください。",
+             "機械の LAN（イーサネット）の設定は済んでいるものとします。つないだら［つなぐ］を押します（読むだけです。何も書きません）。"]
+    if ip:
+        lines.append(f"前につないだときの IP: {ip}")
+    return lines
+
+
+def fits_unit(idn, unit):
+    """つないだ機械（identify の結果）が、決めた号機か。戻り値 "ok"（決めた号機）・"other"（別の号機）・"unknown"（登録がない）。"""
+    if idn.get("unknown"):
+        return "unknown"
+    return "ok" if str(unit) in [str(u) for u in idn.get("units") or []] else "other"
 
 
 # ------------------------------------------------------------------ つなぐ（読むだけ）

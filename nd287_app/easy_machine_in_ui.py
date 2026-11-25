@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """はじめてモード「機械に入れる」の画面（絵が主役・やさしい言葉）。決め方は easy_machine_in（Qt なし）。
 
-画面の順: ① つなぐ → ② 伝票番号 → ③ 決まったこと → ④ 書く → 電源を入れ直す → 確かめる。
-機械に書くのは、④ の「書けるか確かめる」「書く」を人が押したときだけ。それ以外は読むだけ（登録は手元のファイルに書く）。
+画面の順: ① 伝票番号（製品）→ ② 号機（合う一覧から人が選ぶ）→ ③ つなぐ → ④ 決まったこと（機械を読んで軸を決める）
+         → ⑤ 書く → 電源を入れ直す → 確かめる。どの制御装置かは製品が決まってから分かるので、つなぐのは号機が決まったあと。
+号機は、合うものの一覧から人が選ぶ（アプリは決めない）。つながっている機械の号機が分かれば、一覧の先頭に ★ で出すだけ。
+機械に書くのは、⑤ の「書けるか確かめる」「書く」を人が押したときだけ。それ以外は読むだけ（登録は手元のファイルに書く）。
 かんたん作成の窓は、書く中身を作るためだけに、見えない形で使う（Planner）。
 """
 import threading
@@ -12,8 +14,11 @@ from PySide6 import QtCore, QtWidgets
 from . import controllers, easy_art, easy_machine_in as M, first_unit, focas_client, focas_find, focas_ops
 from . import wizard_programs as WP
 
-PAGES = ("connect", "order", "decide", "write", "power", "prog")
-STAGE_NAMES = ("つなぐ", "伝票番号", "決まったこと", "書く", "プログラム")
+PAGES = ("order", "unit", "connect", "decide", "write", "power", "prog")
+STAGES = ("伝票番号", "号機", "つなぐ", "決まったこと", "書く", "プログラム")            # ふつうの順
+STAGE_OF = {"order": "伝票番号", "unit": "号機", "connect": "つなぐ", "decide": "決まったこと",
+            "write": "書く", "power": "書く", "prog": "プログラム"}
+BACK = {"unit": "order", "connect": "unit", "decide": "connect", "write": "decide"}                 # ひとつ前
 RED = "background:#FBE9E7; color:#B02A20; border:2px solid #D43A2F; border-radius:10px; padding:8px 12px; font-size:15px; font-weight:bold;"
 AMBER = "background:#FFF3CF; color:#7A5200; border-radius:10px; padding:8px 12px; font-size:14px; font-weight:bold;"
 GREY = "color:#5A6876; font-size:12px;"
@@ -61,6 +66,33 @@ class Planner:
                         "motor_id": wizard_probe.file_motor_id(f), "model": m.get("model") or "",
                         "motor": m.get("motor") or "", "name": f.get("name") or "", "values": f.get("values") or {}})
         return out
+
+    def candidates(self):
+        """見つけた製品を載せられる号機（かんたん作成の候補と同じ計算: 容量・電圧（400V 品は 200V 機なら×2）・
+        モーター末尾の規則 -D など。つながっている機械は見ない）。戻り値 {"units","assign","notes"}。"""
+        from PySide6 import QtWidgets as W
+        w = self.w
+        mb = W.QMessageBox
+        saved = {n: getattr(mb, n) for n in ("question", "warning", "information", "critical")}
+        for n in saved:
+            setattr(mb, n, staticmethod(lambda *a, **k: W.QMessageBox.Yes))
+        try:
+            w.cmb_motor.setCurrentIndex(w.cmb_motor.findData("product"))
+            w._update_candidates()
+        finally:
+            for n, f in saved.items():
+                setattr(mb, n, f)
+        units, assign = [], {}
+        for c, axes in w._cand:
+            u = str(c.unit)
+            if u not in assign:
+                units.append(u)
+                assign[u] = list(axes)
+        import re
+
+        def plain(n):                                      # 正規表現のまま出さない（^\s*(30|31)i → 30i・31i）
+            return re.sub(r"\^\\s\*\(([\d|]+)\)i", lambda m: "・".join(x + "i" for x in m.group(1).split("|")) + " のみ", n)
+        return {"units": units, "assign": assign, "notes": [plain(n) for n in getattr(w, "_used_rule_notes", []) or []]}
 
     def build(self, seiban, unit, rows):
         """決めた軸・モーターで、書く中身 plan_fn を作る。作れなければ PlanError（やさしい一文）。"""
@@ -144,7 +176,10 @@ class MachineInPanel(QtWidgets.QWidget):
             lambda st: focas_client.make_client(st, log_path=str(app_dir() / "focas_helper.log")))
         self.port_open = env.get("port_open")
         self.planner = env.get("planner") or Planner(self.settings)
-        self.page = "connect"
+        self.page = "order"
+        self.known_units = []        # 入ったとき読んで分かった、つながっている機械の号機（一覧の先頭に ★ を付けるだけ）
+        self.cand = {"units": [], "assign": {}, "notes": []}      # 製品に合う号機（マスタ＋モーターの規則）
+        self._rd_unit = ""           # いま読んだ機械を確かめた号機
         self.rd = None               # つないで読んだもの
         self.idn = {"units": [], "unit": "", "how": "無し", "unknown": True}
         self.unit = ""
@@ -242,7 +277,7 @@ class MachineInPanel(QtWidgets.QWidget):
         k = round(max(1.0, min(1.4, min(self.width() / 950.0, self.height() / 540.0))), 2)
         if k != self._k:
             self._k = k
-            if self.rd is not None:
+            if self.rd is not None or self.products:
                 self._render()
 
     def _clear(self, lay):
@@ -303,7 +338,9 @@ class MachineInPanel(QtWidgets.QWidget):
         return False
 
     def start(self):
-        self._read()
+        """伝票番号から始める。すでにつながっている機械があれば、こっそり読んで（読むだけ）、号機の一覧の ★ にだけ使う。"""
+        self._go("order")
+        self._spawn(lambda: M.read_machine(self.settings, self.factory, port_open=self.port_open), self._on_probe)
 
     def result(self):
         out = {"handoff": True, "cycled": bool(self.cycled), "model": self.env.get("model", ""),
@@ -320,8 +357,11 @@ class MachineInPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    def stages(self):
+        return STAGES
+
     def stage_index(self):
-        return {"connect": 0, "order": 1, "decide": 2, "write": 3, "power": 3, "prog": 4}[self.page]
+        return self.stages().index(STAGE_OF[self.page])
 
     # ---------------------------------------------------------------- 画面の切り替え
     def _go(self, page):
@@ -331,7 +371,6 @@ class MachineInPanel(QtWidgets.QWidget):
     def _prev(self):
         if self._busy or self._writing:
             return
-        i = PAGES.index(self.page)
         if self.page == "power":
             return
         if self.page == "prog":                      # パラメータを書いたあとは、もどれない（書き終わっている）
@@ -339,16 +378,22 @@ class MachineInPanel(QtWidgets.QWidget):
                 self.params_skipped = False
                 self._go("connect")
             return
-        if i > 0:
-            self._go(PAGES[i - 1])
+        back = BACK.get(self.page)
+        if back:
+            self._go(back)
 
     def _main(self):
         if self._busy or self._writing:
             return
-        if self.page == "connect":
-            self._go("order")
-        elif self.page == "order":
-            self._go("decide")
+        if self.page == "order":
+            self._after_order()
+        elif self.page == "unit":
+            self._go("connect")
+        elif self.page == "connect":
+            if self.rd and self.rd.get("ok") and self._rd_unit == self.unit:
+                self._go("order" if not self.products else "decide")
+            else:
+                self._read()
         elif self.page == "decide":
             self._go("write")
         elif self.page == "write":
@@ -409,19 +454,28 @@ class MachineInPanel(QtWidgets.QWidget):
         self._msg("")
         self.lbl_text.setStyleSheet("")
         i = self.stage_index()
-        self.lbl_stage.setText("　".join((f"【{n}】" if k == i else n) + (" ✓" if k < i else "") for k, n in enumerate(STAGE_NAMES)))
-        self.b_prev.setVisible(self.page in ("order", "decide", "write") or (self.page == "prog" and self.params_skipped and not self.prog_sent))
+        self.lbl_stage.setText("　".join((f"【{n}】" if k == i else n) + (" ✓" if k < i else "") for k, n in enumerate(self.stages())))
+        self.b_prev.setVisible(self.page in BACK
+                               or (self.page == "prog" and self.params_skipped and not self.prog_sent))
         getattr(self, "_page_" + self.page)()
 
-    # ---------------------------------------------------------------- ① つなぐ
+    # ---------------------------------------------------------------- ③ つなぐ（④ 機械を読んで確かめる）
+    def _on_probe(self, res):
+        """入ったときの、こっそり読み。つながっていなくても何も言わない。分かった号機は、一覧の ★ にだけ使う。"""
+        if not isinstance(res, dict) or not res.get("ok"):
+            return
+        try:
+            self.planner.reload_controllers()
+            self.known_units = [str(u) for u in M.identify(res["probe"], self.planner.controllers())["units"]]
+        except Exception:
+            self.known_units = []
+        if self.page in ("order", "unit"):
+            self._render()
+
     def _read(self):
-        self.page = "connect"
         self._busy = True
+        self.page = "connect"
         self._render()
-        self.lbl_title.setText("機械につないでいます")
-        self.lbl_text.setText("機械を読んでいます（読むだけです。何も書きません）")
-        self.art.set_svg(easy_art.plug(False))
-        self.b_main.setEnabled(False)
         self._spawn(lambda: M.read_machine(self.settings, self.factory, port_open=self.port_open), self._on_read)
 
     def _on_read(self, res):
@@ -430,34 +484,48 @@ class MachineInPanel(QtWidgets.QWidget):
         if self.rd["ok"]:
             self.planner.reload_controllers()
             self.idn = M.identify(self.rd["probe"], self.planner.controllers())
-            us = self.idn["units"]
-            self.unit = us[0] if us else ""
+            self._rd_unit = self.unit
         self._render()
 
     def _page_connect(self):
         rd = self.rd
-        self.art.set_svg(easy_art.plug(bool(rd and rd["ok"])))
         self.b_main.setText("次へ ▶")
         if rd is None or self._busy:
             self._set_bands([])
-            self.lbl_title.setText("機械につないでいます")
-            self.lbl_text.setText("機械を読んでいます（読むだけです。何も書きません）")
+            self.art.set_svg(easy_art.plug(False))
+            if self._busy:
+                self.lbl_title.setText("機械につないでいます")
+                self.lbl_text.setText("機械を読んでいます（読むだけです。何も書きません）")
+                self.b_main.setEnabled(False)
+                return
+            self.lbl_title.setText(f"{self.unit}号機につなぎます")
+            self.lbl_text.setText(M.lan_guide(self.settings, self.unit)[0])
+            for line in M.lan_guide(self.settings, self.unit)[1:]:
+                self._lab(line, f"color:#5A6876; font-size:{self._fs(14)}px;")
+            self._btn("つなぐ", self._read)
             self.b_main.setEnabled(False)
             return
+        self.art.set_svg(easy_art.plug(bool(rd["ok"])))
         if not rd["ok"]:
             self._set_bands([])
             self.lbl_title.setText("機械につながりません")
             self.lbl_text.setText(rd["error"])
+            for line in M.lan_guide(self.settings, self.unit)[:1]:
+                self._lab(line, f"color:#5A6876; font-size:{self._fs(14)}px;")
             self._btn("もう一度つなぐ", self._read)
             self.b_main.setEnabled(False)
             return
         probe, alarms = rd["probe"], rd["alarms"]
         bands = []
-        ctl = M.controller_of(self.planner.controllers(), self.unit) if self.idn["how"] == "台帳" else None
+        ctl = M.controller_of(self.planner.controllers(), self.unit) if (
+            self.idn["how"] == "台帳" and M.fits_unit(self.idn, self.unit) == "ok") else None
         mm = M.mismatch_lines(probe, ctl)
         if mm["lines"]:
             bands.append(("機械の値が、マスタと違います:\n" + "\n".join(mm["lines"]), RED,
                           [(f"マスタの{self.unit}号機の行を直す", lambda mm=mm: self._fix_master(mm))]))
+        fit = M.fits_unit(self.idn, self.unit)
+        if fit == "other":
+            bands += self._other_unit_bands()
         shown, hidden = M.split_alarms(alarms or [], self.settings, self.unit)
         bands += self._battery_bands(shown)
         others = M.other_alarm_lines([a for a in shown if not focas_ops_allowed(self.settings, self.unit, a)])
@@ -469,24 +537,46 @@ class MachineInPanel(QtWidgets.QWidget):
             code = a.get("code")
             bands.append((f"無視中: {code}", GREY, [("無視をやめる", lambda c=code: self._unignore(c))]))
         self._set_bands(bands)
-        if self.idn["unknown"]:
+        if fit == "unknown":
             self.lbl_title.setText("この機械は、登録がありません")
             self.lbl_text.setText(f"軸の容量: {M.axes_summary(probe) or '読めません'}")
             self._reg_box()
             self.b_main.setEnabled(False)
             return
-        phrase = M.unit_phrase(self.idn)
-        self.lbl_title.setText(f"{phrase}とつながりました")
+        if fit == "other":
+            self.lbl_title.setText(f"この機械は、{M.unit_phrase(self.idn)}です")
+            self.lbl_text.setText(f"決めた号機は {self.unit}号機です。軸の容量: {M.axes_summary(probe)}")
+            self._btn("もう一度つなぐ", self._read, "back")
+            self._btn("号機を選び直す", lambda: self._go("unit"), "back")
+            self.b_main.setEnabled(False)
+            return
+        self.lbl_title.setText(f"{self.unit}号機とつながりました")
         self.lbl_text.setText(f"軸の容量: {M.axes_summary(probe)}")
-        self._lab("この機械で、続けます。", GREENB)
+        self._lab(f"{self.unit}号機の機械です。この機械で、続けます。", GREENB)
         self._btn("パラメータは書かない（測定プログラムだけ送る）", self._skip_params, "fallback")
         self.b_main.setEnabled(True)
+
+    def _other_unit_bands(self):
+        """つないだ機械が、決めた号機ではなかったとき（赤い帯）。製品に合う別の号機なら、その号機で続けられる。"""
+        us = [str(u) for u in self.idn.get("units") or []]
+        mine = [u for u in us if u in self.cand["units"]]
+        text = (f"つないだ機械は {M.unit_phrase(self.idn)} で、決めた {self.unit}号機ではありません。")
+        if mine:
+            return [(text + f"（{'・'.join(m + '号機' for m in mine)}は、この製品にも合います）", RED,
+                     [(f"{mine[0]}号機として続ける", lambda u=mine[0]: self._use_machine_unit(u))])]
+        return [(text + "この製品に合う号機ではありません。決めた号機の機械につなぎ直してください", RED, [])]
+
+    def _use_machine_unit(self, unit):
+        self._apply_unit(unit, keep_rd=True)
+        self._rd_unit = unit
+        self._render()
 
     def _reg_box(self):
         probe = self.rd["probe"]
         cands = M.unit_candidates_for_register(self.idn, self.planner.controllers(), probe)
         self._lab("BASIC（パラメータの控え）を機械から取って、何号機として登録しますか？（機械には書きません。読むだけです）", "font-size:15px;")
-        e = QtWidgets.QLineEdit(cands[0] if cands else "")
+        first = self.unit if (self.unit in cands or not cands) else cands[0]
+        e = QtWidgets.QLineEdit(first)
         e.setObjectName("fld")
         e.setMaximumWidth(200)
         e.setPlaceholderText("号機の数字")
@@ -530,7 +620,9 @@ class MachineInPanel(QtWidgets.QWidget):
         probe["unit"], probe["unit_from"] = res["unit"], "registry"
         self.planner.reload_controllers()
         self.idn = M.identify(probe, self.planner.controllers())
-        self.unit = self.idn["units"][0] if self.idn["units"] else res["unit"]
+        if not self.unit:
+            self.unit = self.idn["units"][0] if self.idn["units"] else res["unit"]
+        self._rd_unit = self.unit
         self._render()
         self._msg(f"{res['unit']}号機として登録しました", GREENB)
 
@@ -571,6 +663,12 @@ class MachineInPanel(QtWidgets.QWidget):
     # ---------------------------------------------------------------- ② 伝票番号
     def _page_order(self):
         self._set_bands(self._keep_bands())
+        if self._busy:                                     # 入ったとき、すでにつながっている機械があるか読んでいる
+            self.lbl_title.setText("機械を確かめています")
+            self.lbl_text.setText("すでにつながっている機械があるか、読んで確かめています（読むだけです。何も書きません）")
+            self.art.set_svg(easy_art.plug(False))
+            self.b_main.setEnabled(False)
+            return
         self.lbl_title.setText("受注伝票番号を入れてください")
         self.lbl_text.setText("型式は、製品のデータから自動で入ります。")
         e = QtWidgets.QLineEdit(self.seiban or (self.env.get("seiban") or (lambda: ""))())
@@ -607,6 +705,10 @@ class MachineInPanel(QtWidgets.QWidget):
         self.seiban = sb
         self.products = self.planner.search(sb)
         self.job, self.rows, self._job_error = None, [], ""
+        self.cand = self.planner.candidates() if self.products else {"units": [], "assign": {}, "notes": []}
+        if self.unit not in self.cand["units"]:             # 製品を替えて、選んでいた号機が合わなくなった
+            self.unit = ""
+            self.rd, self._rd_unit = None, ""
         if not self.products:
             self._render()
             self._msg("この番号の製品データが見つかりません（FANUC の製品だけ、ここでは使えます）", RED)
@@ -617,14 +719,59 @@ class MachineInPanel(QtWidgets.QWidget):
             self.env["set_model"](models[0])
         self._render()
 
-    # ---------------------------------------------------------------- ③ 決まったこと
+    def _after_order(self):
+        """製品が決まった。合う号機の一覧を出す（選ぶのは人）。"""
+        self._go("unit")
+
+    # ---------------------------------------------------------------- ② 号機（合う一覧から人が選ぶ）
+    def _page_unit(self):
+        cand = self.cand
+        self._set_bands([])
+        self.art.set_svg(easy_art.kinds([(p["kind"], f"{self.unit}号機" if self.unit else "") for p in self.products],
+                                        ok=bool(self.unit)))
+        self.b_main.setText("つなぐ画面へ ▶")
+        self.b_main.setEnabled(bool(self.unit) and not self._busy)
+        units = [u for u in cand["units"] if u in self.known_units] + [u for u in cand["units"] if u not in self.known_units]
+        why = f"必要な容量: {M.needs_line(self.products)}" + (("　" + "／".join(cand["notes"])) if cand["notes"] else "")
+        if not units:
+            self.lbl_title.setText("合う号機が、マスタにありません")
+            self.lbl_text.setText(why)
+            self._lab("この製品を載せられる制御装置が、制御装置マスタにありません（容量・電圧・モーターの規則で、全部外れました）", RED)
+            self.b_main.setEnabled(False)
+            return
+        self.lbl_title.setText("使う号機を選んでください")
+        self.lbl_text.setText(f"この製品を動かせる号機は {len(units)} 台です。目の前の機械の号機を選んでください" + ("（★ はいまつながっている機械）" if self.known_units and any(u in self.known_units for u in units) else ""))
+        self._lab(why, f"color:#5A6876; font-size:{self._fs(13)}px;")
+        lst = QtWidgets.QListWidget()
+        lst.setObjectName("units")
+        lst.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        lst.setStyleSheet(f"QListWidget{{font-size:{self._fs(17)}px; border:1px solid #D5DBE1; border-radius:8px;}}"
+                          f"QListWidget::item{{padding:6px 10px;}} QListWidget::item:selected{{background:#DCEBFF; color:#16324F;}}")
+        for u in units:
+            ctl = M.controller_of(self.planner.controllers(), u)
+            axes = cand["assign"].get(u) or []
+            use = "　".join(f"{pr['kind']}→{a}軸" for pr, a in zip(self.products, axes))
+            star = "★ " if u in self.known_units else ""
+            tail = ""
+            lab = f"{star}{u}号機　{(ctl.cnc if ctl is not None else '')}　{use}{tail}"
+            it = QtWidgets.QListWidgetItem(lab)
+            it.setData(QtCore.Qt.UserRole, u)
+            lst.addItem(it)
+            if u == self.unit:
+                lst.setCurrentItem(it)
+        lst.setFixedHeight(min(len(units), 6) * int(self._fs(40)) + 12)
+        lst.currentItemChanged.connect(lambda cur, _prev: self._apply_unit(cur.data(QtCore.Qt.UserRole), render=True) if cur else None)
+        self.extra.addWidget(lst)
+        self.lst_unit = lst
+
+    # ---------------------------------------------------------------- ④ 決まったこと
     def _page_decide(self):
         if not self.rows:
             ctl = M.controller_of(self.planner.controllers(), self.unit)
             self.rows = M.decide_rows(self.products, self.rd["probe"], ctl)
         self._set_bands([])
         self.lbl_title.setText("決まったこと")
-        self.lbl_text.setText(M.card_text(self.idn, self.rows))
+        self.lbl_text.setText(M.card_text({"units": [self.unit]}, self.rows))
         self.lbl_text.setStyleSheet(f"font-size:{self._fs(20)}px; font-weight:bold; background:#FFFFFF; border:1px solid #D5DBE1; border-radius:12px; padding:14px;")
         bad = [r for r in self.rows if not r["axis"]]
         self.art.set_svg(easy_art.kinds([(r["kind"], f"{r['axis']}軸" if r["axis"] else "未定") for r in self.rows], ok=not bad))
@@ -632,7 +779,7 @@ class MachineInPanel(QtWidgets.QWidget):
         if bad:
             self._lab("使う軸を選んでください（容量が合う軸が、機械にありません）", AMBER)
             self._change(render=False)
-        elif M.changeable(self.rows) or len(self.idn["units"]) > 1:
+        elif M.changeable(self.rows):
             self._btn("変える", self._change, "back")
         self.b_main.setText("書く画面へ ▶")
         self.b_main.setEnabled(self.job is not None and not self._busy)
@@ -678,13 +825,6 @@ class MachineInPanel(QtWidgets.QWidget):
                 cmb.setCurrentIndex(cmb.findData(r["axis"]))
                 cmb.currentIndexChanged.connect(lambda _i, k=k, c=cmb: self._apply_axis(k, c.currentData()))
                 self.extra.addWidget(cmb)
-        if len(self.idn["units"]) > 1:
-            cu = QtWidgets.QComboBox()
-            for u in self.idn["units"]:
-                cu.addItem(f"{u}号機", u)
-            cu.setCurrentIndex(cu.findData(self.unit))
-            cu.currentIndexChanged.connect(lambda _i, c=cu: self._apply_unit(c.currentData()))
-            self.extra.addWidget(cu)
         self._btn("決める", self._render, "back")
         if render is False:
             return
@@ -699,9 +839,17 @@ class MachineInPanel(QtWidgets.QWidget):
             return
         self.job, self._job_error = None, ""
 
-    def _apply_unit(self, unit):
+    def _apply_unit(self, unit, keep_rd=False, render=False):
+        """号機を替える。つないで確かめた機械は、号機が違えば確かめ直し（keep_rd は、同じ仕様の別の号機に替えるとき）。"""
+        if not unit:
+            return
         self.unit = unit
         self.job, self._job_error = None, ""
+        self.rows = []
+        if not keep_rd and self._rd_unit != unit:
+            self.rd, self._rd_unit = None, ""
+        if render:
+            self.b_main.setEnabled(True)
 
     def _make_job(self):
         """書く内容を作る（かんたん作成と同じ中身）。控えを取る所は裏で、一覧は表で作る。"""

@@ -131,6 +131,15 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(F.watch_line("dial_mdi", S(aut=0))[0], "ok")
         self.assertEqual(F.watch_line("power", F.OFFLINE)[0], "wait")
 
+    def test_machine_in_intro_says_the_unit_is_decided_from_the_order_before_connecting(self):
+        """「機械に入れる」の案内: どの号機かは、伝票番号（製品）から決めて、そのあとつなぐ（つないでから号機を決めるのではない）。"""
+        lines = " ".join(F.STEPS[F.INDEX["machine_in"]]["lines"])
+        self.assertIn("受注伝票番号", lines)
+        self.assertIn("号機の一覧", lines)
+        self.assertLess(lines.index("受注伝票番号"), lines.index("号機"))
+        self.assertLess(lines.index("号機"), lines.index("つないで"))
+        self.assertNotIn("号機を自動で決めます", lines)
+
     def test_pc_steps_wait_for_their_result(self):
         self.assertFalse(F.done_now("machine_in", S(), {}))
         self.assertTrue(F.done_now("machine_in", S(), {"handoff": True}))

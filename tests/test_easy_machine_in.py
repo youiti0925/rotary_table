@@ -224,6 +224,16 @@ class TestLogic(unittest.TestCase):
         rows = M.decide_rows([{"kind": "回転", "cap": "40A", "voltage": "400V", "motor_id": ""}], PROBE21, ctl21)
         self.assertIn(rows[0]["axis"], ("X", "Z"))
 
+    def test_needs_line_and_fit_and_lan_guide(self):
+        prods = [{"kind": "傾斜", "cap": "80A", "voltage": "200V"}, {"kind": "回転", "cap": "40A", "voltage": "200V"}]
+        self.assertEqual(M.needs_line(prods), "傾斜 80A・回転 40A（200V）")
+        self.assertEqual(M.fits_unit({"units": ["20", "21"], "unknown": False}, "21"), "ok")
+        self.assertEqual(M.fits_unit({"units": ["23"], "unknown": False}, "21"), "other")
+        self.assertEqual(M.fits_unit({"units": [], "unknown": True}, "21"), "unknown")
+        guide = M.lan_guide({}, "21")
+        self.assertIn("21号機", guide[0])
+        self.assertTrue(any("LAN" in x for x in guide))
+
 
 # ------------------------------------------------------------------ 画面（本物の部品。偽物は機械だけ）
 from test_wizard_machine_write import WizardBase                    # noqa: E402
@@ -269,11 +279,40 @@ class PanelBase(WizardBase):
         self.addCleanup(p.reject)
         return p
 
+    # 正しい順で、つないで読んだ画面まで進める（伝票番号 → 合う号機の一覧から選ぶ → つなぐ → 読む）
+    def to_unit(self, p, seiban="50014984"):
+        p.start()
+        self.assertEqual(p.page, "order")
+        p.e_seiban.setText(seiban)
+        p._search()
+        self.assertTrue(p.products)
+        p._main()
+        self.assertEqual(p.page, "unit")
+
+    def pick(self, p, unit):
+        for r in range(p.lst_unit.count()):
+            if p.lst_unit.item(r).data(0x0100) == unit:        # Qt.UserRole
+                p.lst_unit.setCurrentRow(r)
+                return
+        self.fail(f"{unit}号機は一覧にありません")
+
+    def to_connect(self, p, unit="23", seiban="50014984"):
+        self.to_unit(p, seiban)
+        self.pick(p, unit)
+        self.assertEqual(p.unit, unit)
+        p._main()
+        self.assertEqual(p.page, "connect")
+
+    def connected(self, p, unit="23", seiban="50014984"):
+        self.to_connect(p, unit, seiban)
+        p._read()
+        self.assertTrue(p.rd["ok"], p.rd)
+
 
 class TestPanel(PanelBase):
     def test_first_screen_reads_only_and_shows_the_unit(self):
         p = self.panel()
-        p.start()
+        self.connected(p)
         self.assertEqual(p.page, "connect")
         self.assertEqual(p.idn["unit"], "23")
         self.assertTrue(p.b_main.isEnabled())
@@ -283,7 +322,7 @@ class TestPanel(PanelBase):
     def test_battery_alarm_makes_a_red_band_and_ignore_hides_it(self):
         self.lib.m.alarms = [tuple(BATT)]
         p = self.panel()
-        p.start()
+        self.connected(p)
         bands = [p.bands.itemAt(i).layout().itemAt(0).widget().text() for i in range(p.bands.count())]
         self.assertTrue(any("Y軸の位置を覚える電池が弱っています。早めに交換してください" in b for b in bands), bands)
         M.add_ignore(self.settings, "23", "DS0307")
@@ -302,7 +341,7 @@ class TestPanel(PanelBase):
     def test_battery_band_has_an_ignore_button_that_unblocks_writing(self):
         self.lib.m.alarms = [tuple(BATT)]
         p = self.panel()
-        p.start()
+        self.connected(p)
         bands = self.band_buttons(p)
         batt = [b for b in bands if "電池" in b[0]]
         self.assertTrue(batt, bands)
@@ -331,7 +370,7 @@ class TestPanel(PanelBase):
     def test_unknown_machine_offers_registration_with_candidates(self):
         self.lib.m.cnc_id = [1, 2, 3, 4]                                      # 台帳に無い機械
         p = self.panel()
-        p.start()
+        self.connected(p)
         if p.idn["unknown"]:
             self.assertFalse(p.b_main.isEnabled())
             self.assertTrue(hasattr(p, "e_unit"))
@@ -350,7 +389,7 @@ class TestPanel(PanelBase):
         from nd287_app import first_unit
         first_unit.apply_master_fix(str(mp), "23", {"X": "160A"}, "", order=["X", "Y", "Z", "A", "B", "C"])
         p = self.panel()
-        p.start()
+        self.connected(p)
         self.assertEqual(p.idn["how"], "台帳")
         texts = [p.bands.itemAt(i).layout().itemAt(0).widget().text() for i in range(p.bands.count())]
         self.assertTrue(any("マスタの23号機" in t for t in texts), texts)
@@ -361,16 +400,12 @@ class TestPanel(PanelBase):
         self.assertTrue(list(self.work.glob("master.csv.bak_*")))             # 直す前の控えが残る
 
     def walk_to_write(self, p):
-        p.start()
-        p._main()
-        self.assertEqual(p.page, "order")
-        p.e_seiban.setText("50014984")
-        p._search()
-        self.assertTrue(p.products)
-        self.assertEqual(self.models, [p.products[0]["model"]])               # 型式は製品のデータから自動で入る
+        """正しい順: 伝票番号 → 合う号機の一覧から選ぶ → つなぐ → 決まったこと → 書く。"""
+        self.connected(p)
         p._main()
         self.assertEqual(p.page, "decide")
         self.assertIsNotNone(p.job, p.lbl_text.text())
+        self.assertEqual(self.models[-1:], [p.products[0]["model"]])               # 型式は製品のデータから自動で入る
         p._main()
         self.assertEqual(p.page, "write")
 
@@ -448,6 +483,281 @@ class TestPanel(PanelBase):
         self.assertEqual(poller.log, ["pause", "resume"])
 
 
+# ------------------------------------------------------------------ 正しい順: 伝票番号 → 号機（自動）→ つなぐ → 機械を読んで確かめる → 書く
+class TestPanelNewOrder(PanelBase):
+    """機械は最初つながっていない（port_open が False）。①伝票番号 → ②号機の一覧（人が選ぶ）→ ③つなぐ → ④読んで確かめる。"""
+
+    def setUp(self):
+        super().setUp()
+        self.up = [False]
+
+    def panel(self, **extra):
+        extra.setdefault("port_open", lambda ip, port, timeout=0.3: self.up[0])
+        return super().panel(**extra)
+
+    def labels(self, p):
+        from PySide6 import QtWidgets
+        return [p.extra.itemAt(i).widget().text() for i in range(p.extra.count())
+                if isinstance(p.extra.itemAt(i).widget(), (QtWidgets.QLabel, QtWidgets.QCheckBox, QtWidgets.QPushButton))]
+
+    def rows(self, p):
+        return [p.lst_unit.item(r).text() for r in range(p.lst_unit.count())]
+
+    def bands(self, p):
+        return TestPanel.band_buttons(self, p)
+
+    def test_not_connected_starts_at_the_order_number_without_an_error(self):
+        p = self.panel()
+        p.start()
+        self.assertEqual(p.page, "order")
+        self.assertEqual(p.known_units, [])
+        self.assertIsNone(p.rd)
+        self.assertIn("【伝票番号】", p.lbl_stage.text())
+        self.assertIn("受注伝票番号", p.lbl_title.text())
+        self.assertTrue(p.lbl_msg.isHidden())
+        self.assertEqual(self.lib.called("cnc_wrparam"), 0)
+
+    def test_stage_names_follow_the_order(self):
+        p = self.panel()
+        p.start()
+        t = p.lbl_stage.text()
+        pos = [t.index(n) for n in ("伝票番号", "号機", "つなぐ", "決まったこと", "書く", "プログラム")]
+        self.assertEqual(pos, sorted(pos))
+
+    def test_candidates_are_the_units_that_hold_the_product_under_the_motor_rule(self):
+        from nd287_app import seiban_flow
+        p = self.panel()
+        TestPanel.to_unit(self, p)
+        prod = p.products[0]                                           # 50014984: 回転 400V 40A、モーター末尾 -B
+        capable = [str(c.unit) for c, _a in seiban_flow.capable_controllers(CTL, [prod["cap"]], prod["voltage"], convert=True)]
+        self.assertTrue(p.cand["units"])
+        self.assertTrue(set(p.cand["units"]) <= set(capable))
+        self.assertLess(len(p.cand["units"]), len(capable))             # -B の規則（30/31/32/35i）で、18i・Oi は外れた
+        for u in p.cand["units"]:
+            self.assertRegex(M.controller_of(CTL, u).cnc, r"^\s*(30|31|32|35)i")
+        self.assertTrue(any("-B" in n and "31i" in n and "^" not in n for n in p.cand["notes"]), p.cand["notes"])
+
+    def test_the_list_shows_only_those_units_and_the_person_chooses(self):
+        p = self.panel()
+        TestPanel.to_unit(self, p)
+        rows = self.rows(p)
+        self.assertEqual([r.split("号機")[0] for r in rows], p.cand["units"])      # 候補だけ
+        self.assertIn("選んでください", p.lbl_title.text())
+        self.assertEqual(p.unit, "")                                    # アプリは決めない
+        self.assertFalse(p.b_main.isEnabled())
+        self.assertNotIn("自動で決めました", p.lbl_text.text() + " ".join(self.labels(p)))
+        TestPanel.pick(self, p, "23")
+        self.assertEqual(p.unit, "23")
+        self.assertTrue(p.b_main.isEnabled())
+        self.assertIsNone(p.rd)                                         # まだつないでいない
+        self.assertEqual(self.lib.called("cnc_rdparam"), 0)
+
+    def test_single_candidate_is_still_chosen_by_the_person(self):
+        p = self.panel()
+        p.planner.candidates = lambda: {"units": ["23"], "assign": {"23": ["Z"]}, "notes": []}
+        TestPanel.to_unit(self, p)
+        self.assertEqual(len(self.rows(p)), 1)
+        self.assertEqual(p.unit, "")
+        self.assertFalse(p.b_main.isEnabled())
+        self.assertNotIn("自動で決めました", p.lbl_text.text() + " ".join(self.labels(p)))
+        TestPanel.pick(self, p, "23")
+        self.assertTrue(p.b_main.isEnabled())
+
+    def test_connected_machine_unit_is_only_starred_at_the_top(self):
+        self.up[0] = True                                               # 入ったときすでに機械につながっている
+        p = self.panel()
+        p.start()
+        self.assertEqual(p.page, "order")                               # 画面の順は変わらない
+        self.assertEqual(p.known_units, ["23"])
+        p.e_seiban.setText("50014984")
+        p._search()
+        p._main()
+        rows = self.rows(p)
+        self.assertTrue(rows[0].startswith("★ 23号機"), rows)
+        self.assertEqual(sum(1 for r in rows if r.startswith("★")), 1)
+        self.assertEqual(p.unit, "")                                    # ★ でも選ぶのは人
+        self.assertFalse(p.b_main.isEnabled())
+
+    def test_star_is_not_shown_for_a_machine_that_does_not_fit(self):
+        self.up[0] = True
+        p = self.panel()
+        p.planner.candidates = lambda: {"units": ["22", "31"], "assign": {}, "notes": []}
+        p.start()
+        p.e_seiban.setText("50014984")
+        p._search()
+        p._main()
+        self.assertFalse(any("★" in r for r in self.rows(p)))
+
+    def test_no_capable_unit_is_a_red_stop(self):
+        p = self.panel()
+        p.planner.candidates = lambda: {"units": [], "assign": {}, "notes": []}
+        p.start()
+        p.e_seiban.setText("50014984")
+        p._search()
+        p._main()
+        self.assertEqual(p.page, "unit")
+        self.assertIn("合う号機が、マスタにありません", p.lbl_title.text())
+        self.assertFalse(p.b_main.isEnabled())
+
+    def test_connect_screen_guides_the_lan_and_reads_only_when_pressed(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        self.assertIn("23号機", p.lbl_title.text())
+        self.assertIn("LAN", p.lbl_text.text() + " ".join(self.labels(p)))
+        self.assertIn("127.0.0.1", " ".join(self.labels(p)))              # 台帳にある、前につないだ IP
+        self.assertIn("つなぐ", self.labels(p))
+        self.assertFalse(p.b_main.isEnabled())
+        self.assertIsNone(p.rd)
+        self.up[0] = True
+        p._read()
+        self.assertTrue(p.rd["ok"])
+        self.assertIn("23号機とつながりました", p.lbl_title.text())
+        self.assertEqual(M.fits_unit(p.idn, "23"), "ok")
+        self.assertTrue(p.b_main.isEnabled())
+        self.assertEqual(self.lib.called("cnc_wrparam"), 0)               # 読むだけ
+
+    def test_connect_failure_offers_retry_and_blocks_next(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        p._read()                                                         # まだ機械が見つからない
+        self.assertFalse(p.rd["ok"])
+        self.assertIn("つながりません", p.lbl_title.text())
+        self.assertIn("もう一度つなぐ", self.labels(p))
+        self.assertFalse(p.b_main.isEnabled())
+        self.up[0] = True
+        p._read()
+        self.assertTrue(p.rd["ok"])
+        self.assertTrue(p.b_main.isEnabled())
+
+    def test_full_flow_unit_then_connect_then_axes_then_write(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        self.up[0] = True
+        p._read()
+        p._main()
+        self.assertEqual(p.page, "decide")
+        self.assertEqual(p.unit, "23")
+        self.assertTrue(all(r["axis"] for r in p.rows))                   # 軸は機械の 2165 から自動
+        self.assertIn("使う機械：23号機", p.lbl_text.text())
+        self.assertIsNotNone(p.job, p.lbl_text.text())
+        self.assertEqual(self.lib.called("cnc_wrparam"), 0)
+        p._main()
+        self.assertEqual(p.page, "write")
+        p._do_trial()
+        self.assertTrue(p.trial_ok, p._outcome)
+        p._main()
+        self.assertEqual(p.page, "power", p._outcome)
+
+    def test_two_products_get_two_different_axes_automatically(self):
+        p = self.panel()
+        p.start()
+        p.e_seiban.setText("50014984")
+        p._search()
+        one = p.products[0]
+        p.products = [dict(one, kind="傾斜", cap="80A", voltage="200V"), dict(one, kind="回転", cap="160A", voltage="200V")]
+        p.cand = {"units": ["23"], "assign": {}, "notes": []}
+        p._main()
+        TestPanel.pick(self, p, "23")
+        p._main()
+        self.up[0] = True
+        p._read()
+        p._main()
+        self.assertEqual(p.page, "decide")
+        axes = [r["axis"] for r in p.rows]
+        self.assertEqual([r["kind"] for r in p.rows], ["傾斜", "回転"])
+        self.assertIn(axes[0], ("A", "B"))                                # 23号機の 80A は A・B、160A は C
+        self.assertEqual(axes[1], "C")
+        self.assertEqual(len(set(axes)), 2)
+
+    def test_machine_of_another_capable_unit_is_a_red_band_and_can_be_used(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p, "22")
+        self.up[0] = True
+        p._read()                                                         # 機械は台帳で 23号機
+        self.assertEqual(M.fits_unit(p.idn, "22"), "other")
+        self.assertFalse(p.b_main.isEnabled())
+        red = [b for b in self.bands(p) if "決めた 22号機ではありません" in b[0]]
+        self.assertTrue(red, self.bands(p))
+        self.assertEqual(red[0][1][0].text(), "23号機として続ける")           # 23号機もこの製品に合う（押すのは人）
+        red[0][1][0].click()
+        self.assertEqual(p.unit, "23")
+        self.assertTrue(p.b_main.isEnabled())
+        self.assertFalse(any("決めた" in b[0] for b in self.bands(p)))
+        p._main()
+        self.assertEqual(p.page, "decide")
+
+    def test_machine_of_a_unit_that_does_not_fit_cannot_go_on(self):
+        p = self.panel()
+        p.planner.candidates = lambda: {"units": ["22"], "assign": {"22": ["Z"]}, "notes": []}
+        TestPanel.to_connect(self, p, "22")
+        self.up[0] = True
+        p._read()
+        self.assertEqual(M.fits_unit(p.idn, "22"), "other")
+        red = [b for b in self.bands(p) if "決めた 22号機ではありません" in b[0]]
+        self.assertTrue(red)
+        self.assertEqual(red[0][1], [])                                   # 続けるボタンは無い
+        self.assertFalse(p.b_main.isEnabled())
+        self.assertIn("もう一度つなぐ", self.labels(p))
+        self.assertIn("号機を選び直す", self.labels(p))
+
+    def test_unregistered_machine_offers_basic_registration_for_the_chosen_unit(self):
+        self.lib.m.cnc_id = [9, 9, 9, 9]                                  # 台帳に無い
+        for k in range(1, 5):
+            self.lib.m.params[(2165, f"A{k}")] = "45"                      # どの号機の並びとも合わない（40A ばかり）
+        p = self.panel()
+        TestPanel.to_connect(self, p, "22")
+        self.up[0] = True
+        p._read()
+        self.assertTrue(p.idn["unknown"], p.idn)
+        self.assertIn("登録がありません", p.lbl_title.text())
+        self.assertEqual(p.e_unit.text(), "22")                           # 選んだ号機を先に入れる
+        self.assertFalse(p.b_main.isEnabled())
+
+    def test_back_button_goes_back_in_the_order(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        self.up[0] = True
+        p._read()
+        p._main()
+        self.assertEqual(p.page, "decide")
+        for want in ("connect", "unit", "order"):
+            p._prev()
+            self.assertEqual(p.page, want)
+        self.assertTrue(p.b_prev.isHidden())
+
+    def test_changing_the_unit_after_connecting_asks_to_connect_again(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        self.up[0] = True
+        p._read()
+        p._prev()
+        TestPanel.pick(self, p, "31")
+        self.assertIsNone(p.rd)                                           # 別の号機: つなぎ直して確かめる
+        p._main()
+        self.assertIsNone(p.rd)
+        self.assertFalse(p.b_main.isEnabled())
+
+    def test_going_back_and_forth_without_changing_keeps_the_connection(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        self.up[0] = True
+        p._read()
+        p._prev()
+        self.assertTrue(p.b_main.isEnabled())                             # 選んだ号機が残っている
+        p._main()
+        self.assertTrue(p.rd["ok"])
+        self.assertTrue(p.b_main.isEnabled())
+
+    def test_searching_another_order_drops_a_unit_that_no_longer_fits(self):
+        p = self.panel()
+        TestPanel.to_connect(self, p)
+        p.planner.candidates = lambda: {"units": ["22"], "assign": {}, "notes": []}
+        p._go("order")
+        p.e_seiban.setText("50014984")
+        p._search()
+        self.assertEqual(p.unit, "")
+
+
 # ------------------------------------------------------------------ 測定プログラムを送る段（かんたん作成の段④と同じ中身）
 FOLDER = "//CNC_MEM/USER/PATH1/"
 
@@ -499,7 +809,7 @@ class TestPanelPrograms(PanelBase):
         old = self.m.programs[FOLDER + "O1000"]
         self.m.status["emergency"] = 0
         p = self.panel()
-        p.start()
+        self.connected(p)
         p._skip_params()
         self.assertEqual(p.prog_rd["states"][1000], "differs")
         p._prog_do_send()
@@ -514,7 +824,7 @@ class TestPanelPrograms(PanelBase):
         self.m.status["emergency"] = 0
         self.m.alarms = [tuple(BATT)]
         p = self.panel()
-        p.start()
+        self.connected(p)
         p._skip_params()
         self.assertTrue(any("DS0307" in r for r in p.prog_rd["chk"]["reasons"]), p.prog_rd["chk"]["reasons"])
         p._prog_do_send()
@@ -529,7 +839,7 @@ class TestPanelPrograms(PanelBase):
 
     def test_stage_names_include_programs(self):
         p = self.panel()
-        p.start()
+        self.connected(p)
         self.assertIn("プログラム", p.lbl_stage.text())
 
     def test_program_stage_reads_only_then_sends_once_with_readback(self):
@@ -577,7 +887,7 @@ class TestPanelPrograms(PanelBase):
     def test_second_press_of_send_does_not_write_again(self):
         p = self.panel()
         self.m.status["emergency"] = 0
-        p.start()
+        self.connected(p)
         p._skip_params()
         self.assertEqual(p.page, "prog")
         p._prog_do_send()
@@ -589,7 +899,7 @@ class TestPanelPrograms(PanelBase):
     def test_usable_when_parameters_are_skipped(self):
         self.m.status["emergency"] = 0
         p = self.panel()
-        p.start()
+        self.connected(p)
         self.assertTrue(any(getattr(w, "text", lambda: "")().startswith("パラメータは書かない") for w in
                             [p.extra.itemAt(i).widget() for i in range(p.extra.count())]))
         p._skip_params()
@@ -609,7 +919,7 @@ class TestPanelPrograms(PanelBase):
     def test_same_number_with_other_content_is_not_overwritten_without_the_check(self):
         self.m.status["emergency"] = 0
         p = self.panel()
-        p.start()
+        self.connected(p)
         main = 100
         path = FOLDER + f"O{main}"
         self.m.add_program(path, self.old_program(main), "OLD")
@@ -629,7 +939,7 @@ class TestPanelPrograms(PanelBase):
     def test_overwrite_needs_the_check_and_an_explicit_confirmation(self):
         self.m.status["emergency"] = 0
         p = self.panel()
-        p.start()
+        self.connected(p)
         main = 100
         path = FOLDER + f"O{main}"
         self.m.add_program(path, self.old_program(main), "OLD")
@@ -650,12 +960,12 @@ class TestPanelPrograms(PanelBase):
     def test_already_same_content_is_not_sent_and_shows_a_check(self):
         self.m.status["emergency"] = 0
         p = self.panel()
-        p.start()
+        self.connected(p)
         p._skip_params()
         p._prog_do_send()
         first = self.written()
         p2 = self.panel()
-        p2.start()
+        self.connected(p2)
         p2._skip_params()
         self.assertTrue(all(st == "same" for st in p2.prog_rd["states"].values()), p2.prog_rd["states"])
         self.assertTrue(any("もう入っています" in t for t in self.labels(p2)))
@@ -664,7 +974,7 @@ class TestPanelPrograms(PanelBase):
 
     def test_cannot_send_with_a_reason_and_skip_is_always_offered(self):
         p = self.panel()
-        p.start()
+        self.connected(p)
         p._skip_params()                                                         # 非常停止のまま
         self.assertTrue(p.prog_rd["chk"]["reasons"])
         self.assertFalse(p.b_main.isEnabled())

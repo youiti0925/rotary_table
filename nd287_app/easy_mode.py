@@ -2010,7 +2010,7 @@ class EasyModeDialog(QtWidgets.QDialog):
             env = self.host.easy_machine_in_env()
         except Exception:
             env = None
-        if env:                                            # 専用の画面（つなぐ→伝票番号→決まったこと→書く）
+        if env:                                            # 専用の画面（伝票番号→号機→つなぐ→決まったこと→書く。すでにつながっていれば先につなぐ）
             from .easy_machine_in_ui import MachineInPanel
             panel = MachineInPanel(env, self.embed)
             self.strip.setVisible(False)

@@ -59,7 +59,7 @@ STEPS = [
     dict(id="cond_check", ch=1, kind="pc", title="測り方を確かめる",
          lines=["型式を入れると、登録してある測り方が自動で入ります。"], art="cond_kind", button="このまま進む ▶"),
     dict(id="machine_in", ch=2, fl={"program": 1}, kind="pc", title="製品の設定と測定プログラムを機械に入れる",
-         lines=["受注伝票番号を入れると、PC が機械を読んで自動で決めます。", "機械に書く前に、いまの中身を PC に控えます。"],
+         lines=["受注伝票番号を入れると、PC が、その製品を動かせる号機の一覧を出します。", "選んだ号機の機械につないで、軸は自動で決めます。書く前に、いまの中身を PC に控えます。"],
          art="product", button="受注伝票番号から入れる…", skip_button="もう機械に入っている（飛ばす）"),
     dict(id="params_manual", ch=2, kind="machine", title="機械で、パラメータを打つ",
          lines=["操作盤で、番号と値を1つずつ打ちます。", "打つ一覧は、下のボタンで見られます。"], art="params_manual",

@@ -84,6 +84,7 @@ class TestEasyFixes(unittest.TestCase):
         iv = d._cf_box.parentWidget().layout()
         self.assertEqual(iv.indexOf(d._cf_box), iv.indexOf(d.lbl_target) + 1)   # ③は対象の行のすぐ下
         self.assertTrue(d._bbx.isHidden())                                      # 閉じるは二重なので出さない
+        self.assertEqual(d._cl_layout.indexOf(d._vr_widget), 1)
         self.assertEqual(d._cl_layout.indexOf(d._wr_widget), 0)                 # 書くボタンは箱の先頭
 
 

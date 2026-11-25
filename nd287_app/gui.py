@@ -3280,7 +3280,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         vr.addWidget(QtWidgets.QLabel("確認済みでない型:"))
         vr.addWidget(self.cmb_verify, 1)
         vr.addWidget(self.b_verify)
-        cl.addWidget(hscroll_buttons(vr))
+        self._vr_widget = hscroll_buttons(vr)
+        cl.addWidget(self._vr_widget)
         self.lbl_why = QtWidgets.QLabel("")
         self.lbl_why.setWordWrap(True)
         cl.addWidget(self.lbl_why)
@@ -3755,6 +3756,8 @@ class FocasWriteDialog(QtWidgets.QDialog):
         self._bbx.setVisible(False)
         self._cl_layout.removeWidget(self._wr_widget)
         self._cl_layout.insertWidget(0, self._wr_widget)
+        self._cl_layout.removeWidget(self._vr_widget)             # 「同じ値を書く確認」も書くボタンの隣（すぐ下）へ
+        self._cl_layout.insertWidget(1, self._vr_widget)
         iv = self._cf_box.parentWidget().layout()
         iv.removeWidget(self._cf_box)
         iv.insertWidget(iv.indexOf(self.lbl_target) + 1, self._cf_box)
@@ -9104,6 +9107,8 @@ class ParamWizardDialog(QtWidgets.QDialog):
         for p in plan["programs"]:
             lines.update(p.get("lines") or {})
         self.tbl_p.setRowCount(len(slots))
+        rows_h = self.tbl_p.horizontalHeader().sizeHint().height() + 6 + max(1, len(slots)) * 28
+        self.tbl_p.setFixedHeight(max(60, min(150, rows_h)))      # 空の行ぶんの空きを作らない（送るが下に隠れた）
         for i, s in enumerate(slots):
             it0 = QtWidgets.QTableWidgetItem(lines.get(s["number"]) or s["label"])
             it0.setToolTip(s["label"])

@@ -18315,10 +18315,25 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
+def install_japanese_standard_buttons(app):
+    """「OK / Cancel / Yes / No」などの標準ボタンを日本語にする（Qt 付属の日本語の訳を読み込む）。無ければ何もしない。"""
+    try:
+        tr = QtCore.QTranslator(app)
+        path = QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.TranslationsPath)
+        if tr.load("qtbase_ja", path):
+            app.installTranslator(tr)
+            app._ja_translator = tr
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def run(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings):
     import sys
 
     app = QtWidgets.QApplication(sys.argv)
+    install_japanese_standard_buttons(app)
     apply_font(app, settings.get("ui_font_pt", DEFAULT_FONT_PT))
     apply_theme(app, settings.get("ui_theme", DEFAULT_THEME))
     win = MainWindow(device, wheel_pitch, worm_pitch, worm_range, worm_start, settings)

@@ -1239,6 +1239,15 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         lay.addWidget(lb)
 
     def _choose_kind(self, kind, tilt=None):
+        rz = getattr(self, "rz", None)
+        if rz is not None and not self.ctx.get("rz_return_mode"):
+            cur = rz.current
+            if cur.get("kind") and kind != cur["kind"]:             # 連続測定中は、予定の種類で測る（押し違えで、セミの回がフルの名前で保存されるのを防ぐ）
+                self._notice = f"連続測定の「{cur['label']}」は、予定どおりの種類で測ります。種類を変えるときは、連続測定をやめてください。"
+                self._rz_apply_current()
+                self._fill_kind_box()
+                self._refresh()
+                return
         try:
             if tilt is None:
                 self.host.easy_set_kind(kind)

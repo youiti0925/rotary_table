@@ -54,6 +54,12 @@ FOR_STEP = {
 }
 ALL = tuple(CARDS)
 
+# 手順ごとの「なぜ、これをするのか」（easy_why.py）。その手順の「？ことば」で最初に出す。ことばの一覧（ALL）には入れない。
+from . import easy_why as _why  # noqa: E402
+CARDS.update(_why.CARDS)
+for _sid, _ids in _why.FOR_STEP.items():
+    FOR_STEP[_sid] = tuple(_ids) + tuple(x for x in FOR_STEP.get(_sid, ()) if x not in _ids)
+
 
 def cards_for(step_id):
     """その手順で見るカード（無ければ、全部）。"""

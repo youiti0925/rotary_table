@@ -3294,7 +3294,9 @@ class FocasWriteDialog(QtWidgets.QDialog):
         wr.addWidget(self.b_write)
         wr.addWidget(self.b_stop)
         wr.addStretch(1)
-        cl.addWidget(hscroll_buttons(wr))
+        self._cl_layout = cl
+        self._wr_widget = hscroll_buttons(wr)
+        cl.addWidget(self._wr_widget)
         v.addWidget(cf, 1)
 
         # 結果
@@ -3350,6 +3352,7 @@ class FocasWriteDialog(QtWidgets.QDialog):
         bbx.addButton("閉じる", QtWidgets.QDialogButtonBox.RejectRole)
         bbx.rejected.connect(self.reject)
         v.addWidget(bbx)
+        self._bbx = bbx
         wrap_long_labels(self)
         wrap_scrollable(self, keep_bottom=1)
 
@@ -4835,6 +4838,10 @@ class FocasProgramSendDialog(QtWidgets.QDialog):
         bbx.addButton("閉じる", QtWidgets.QDialogButtonBox.RejectRole)
         bbx.rejected.connect(self.reject)
         v.addWidget(bbx)
+        if self._wizard:                    # かんたん作成の中: 「送る」を先頭に出す（下に隠れて見つからなかった）・窓の「閉じる」は二重なので出さない
+            v.removeWidget(box2)
+            v.insertWidget(0, box2)
+            bbx.setVisible(False)
         wrap_long_labels(self)
         wrap_scrollable(self, keep_bottom=1)
         self._timer = QtCore.QTimer(self)
@@ -8629,6 +8636,13 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self._close_writer(force=True)
         d = FocasWriteDialog(self, settings, plan_fn, **kw)
         d.setWindowFlags(QtCore.Qt.Widget)
+        # 画面の中に入れたときは、閉じるを隠し、書くボタンを一番上へ（下に隠れないように）
+        try:
+            d._bbx.setVisible(False)
+            d._cl_layout.removeWidget(d._wr_widget)
+            d._cl_layout.insertWidget(0, d._wr_widget)
+        except Exception:
+            pass
         self.panel.layout().addWidget(d)
         self._params_ok = False
         self._params_same = False
@@ -8813,7 +8827,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.lbl_p_problem.setWordWrap(True)
         self.lbl_p_problem.setStyleSheet("color:#b91c1c; font-weight:bold;")
         self.lbl_p_problem.setVisible(False)
-        lay.addWidget(self.lbl_p_problem)
+        lay.insertWidget(1, self.lbl_p_problem)          # 困ったこと・登録の道・種類選びは、分け方より上に出す（下に隠れて見つからなかった）
         self.box_p_register = QtWidgets.QWidget()          # 測定条件が無い型式: 行き止まりにせず、その場で登録して先へ進む
         rl = QtWidgets.QHBoxLayout(self.box_p_register)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -8825,12 +8839,12 @@ class ParamWizardDialog(QtWidgets.QDialog):
         rl.addWidget(self.b_p_reg_cond)
         rl.addStretch(1)
         self.box_p_register.setVisible(False)
-        lay.addWidget(self.box_p_register)
+        lay.insertWidget(2, self.box_p_register)
         self.box_p_kinds = QtWidgets.QWidget()              # 登録した種類が複数あって決まらない: どれで作るか選ぶ
         self.box_p_kinds_lay = QtWidgets.QHBoxLayout(self.box_p_kinds)
         self.box_p_kinds_lay.setContentsMargins(0, 0, 0, 0)
         self.box_p_kinds.setVisible(False)
-        lay.addWidget(self.box_p_kinds)
+        lay.insertWidget(3, self.box_p_kinds)
         self.lbl_p_done = QtWidgets.QLabel("")
         self.lbl_p_done.setWordWrap(True)
         self.lbl_p_done.setStyleSheet("color:#166534; font-weight:bold;")

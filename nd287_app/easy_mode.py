@@ -1285,6 +1285,8 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             self.extra.addWidget(lb)
             self._extra_widgets["cond_note"] = lb
         if lack and not once:                           # 登録が無いときは、登録の画面へ進むのが普通の道。横に「今回だけ」
+            self.lbl_lines.setVisible(False)            # 上の決まり文句は出さない（下の2つのボタンが札の中に収まるように）
+            self.lbl_why.setVisible(False)              # 「なぜ:」も出さない（赤い字が、いま何をするかを言っている。札が縦にはみ出すため）
             self._extra_widgets["act"] = self._act_button("登録する（次から自動で入ります）", self._cond_from_check)
             o = QtWidgets.QPushButton("今回だけ手で入れる（登録しません）")
             o.setObjectName("fallback")
@@ -2300,8 +2302,8 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.show_photo = self.b_photo.isChecked()
         self._refresh()
 
-    def _plan_html(self):
-        """これから測る中身（host.easy_plan。読むだけ）。出せなければ ""（絵のまま）。"""
+    def _plan_html(self, shrink=1.0):
+        """これから測る中身（host.easy_plan。読むだけ）。出せなければ ""（絵のまま）。shrink＝箱に入らないとき字を小さくする倍率。"""
         try:
             p = self.host.easy_plan()
         except Exception:
@@ -2333,8 +2335,8 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         cell = lambda label, n: f'<td style="padding:1px 14px 1px 0;">{label}</td><td align="right" style="padding-right:34px;"><b>{n}</b> 点</td>'
         rr = list(p["rows"])
         rows = "".join("<tr>" + "".join(cell(l, n) for l, n in rr[i:i + 2]) + "</tr>" for i in range(0, len(rr), 2))
-        k = getattr(self, "_scale_key", 1.0) or 1.0
-        f1, f2, f3 = int(23 * k), int(17 * k), int(14 * k)
+        k = (getattr(self, "_scale_key", 1.0) or 1.0) * shrink
+        f1, f2, f3 = int(23 * k), int(17 * k), max(10, int(14 * k))
         html = (f'<div style="font-size:{f3}px; color:#5A6876; font-weight:700;">これから測る中身</div>'
                 f'<div style="font-size:{f1}px; font-weight:900;">{p["model"]}　{mode}</div>'
                 f'<div style="font-size:{f3}px; margin-top:4px;">{src_html}</div>'
@@ -2353,11 +2355,22 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
     def _set_art(self, s, st, c, done, ph):
         """絵を出し、同じ内容の写真が `写真` フォルダにあれば、写真に切り替えられるようにする（無ければ絵のまま）。"""
         plan = self._plan_html() if s["id"] in ("fields", "cond_check") else ""
-        if plan != getattr(self, "_plan_shown", None):
-            self._plan_shown = plan
-            self.lbl_plan.setText(plan)
         self.lbl_plan.setVisible(bool(plan))
         self.v_main.setVisible(not plan)
+        key = (plan, self.lbl_plan.width(), self.lbl_plan.height())
+        if key != getattr(self, "_plan_shown", None):
+            self._plan_shown = key
+            self.lbl_plan.setText(plan)
+            self.plan_clipped = False
+            if plan and self.lbl_plan.height() > 80:
+                # 箱に入りきらないときは、入るまで字を小さくする（会社PC 150% の字の高さで、下の行が切れた。2026-11-26）
+                for shrink in (1.0, 0.93, 0.87, 0.81, 0.75, 0.7):
+                    if shrink != 1.0:
+                        self.lbl_plan.setText(self._plan_html(shrink))
+                    need = self.lbl_plan.heightForWidth(self.lbl_plan.width())
+                    self.plan_clipped = need + 8 > self.lbl_plan.height()
+                    if not self.plan_clipped:
+                        break
         if plan:
             self.v_map.setVisible(False)
             self.b_photo.setVisible(False)

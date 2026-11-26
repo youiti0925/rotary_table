@@ -128,10 +128,15 @@ class TestRealScreens(unittest.TestCase):
     def tearDown(self):
         self.dlg._timer.stop()
         self.dlg.host_saved = True
+        self.w.saved = True
+        self.dlg.hide()
         self.dlg.deleteLater()
         self.w.flow_timer.stop()
         self.w.close()
         self.w.deleteLater()
+        from PySide6 import QtCore
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)   # 窓を今こわす（終わるときにまとめてこわすと落ちる）
+        self.app.processEvents()
 
     def test_plan_before_measuring_counts_like_the_real_sequence(self):
         plan = self.w.easy_plan()

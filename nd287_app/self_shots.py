@@ -89,6 +89,16 @@ def run(out_dir, settings):
             f = out / f"{tag}_{name}.png"
             d.grab().save(str(f))
             say(f"{f.name}: 窓 {d.width()}x{d.height()}　画面の中に{inside(d)}")
+            # 中身の切れ（窓は収まっていても、箱の中で字が切れることがある）
+            try:
+                if d.lbl_plan.isVisible():
+                    need, have = d.lbl_plan.heightForWidth(d.lbl_plan.width()), d.lbl_plan.height()
+                    say(f"　左の箱: 要る高さ {need}　ある高さ {have}" + ("　★ 切れています" if need > have else ""))
+                sb = d.right_scroll.verticalScrollBar()
+                if d.right_scroll.isVisible() and sb.maximum() > 0:
+                    say(f"　右の札: 縦に {sb.maximum()} はみ出しています（動かせば見える） ★")
+            except Exception as e:
+                say(f"　（切れの点検はできませんでした: {e}）")
 
         def goto(sid):
             d.ctx["axes"] = list(axes)

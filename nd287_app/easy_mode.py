@@ -287,24 +287,33 @@ class WordsDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(20, 16, 20, 16)
         v.setSpacing(10)
-        self.row = QtWidgets.QHBoxLayout()
+        # カードの切り替えボタンは3列に並べる（横1列だと 150% の画面で右が切れ、横の動かし棒が出た。11/26 会社PC）
+        self.row = QtWidgets.QGridLayout()
+        self.row.setContentsMargins(0, 0, 0, 0)
+        self.row.setSpacing(6)
         self._btns = {}
         if len(self.ids) > 1:
+            cols = 3
             wrap = QtWidgets.QScrollArea()
             wrap.setWidgetResizable(True)
-            wrap.setFixedHeight(54)
             wrap.setFrameShape(QtWidgets.QFrame.NoFrame)
+            wrap.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             inner = QtWidgets.QWidget()
             inner.setLayout(self.row)
             wrap.setWidget(inner)
             v.addWidget(wrap)
-            for cid in self.ids:
+            for i, cid in enumerate(self.ids):
                 b = QtWidgets.QPushButton(easy_words.card(cid)["title"])
                 b.setCheckable(True)
                 b.clicked.connect(lambda _c=False, c=cid: self.show_card(c))
-                self.row.addWidget(b)
+                self.row.addWidget(b, i // cols, i % cols)
                 self._btns[cid] = b
-            self.row.addStretch(1)
+            bh = max(b.sizeHint().height() for b in self._btns.values())
+            rows = (len(self.ids) + cols - 1) // cols
+            shown = min(rows, 3)                                       # 3段まで見せる（それより多いときだけ縦に動かす）
+            wrap.setFixedHeight(shown * bh + (shown - 1) * 6 + 2)      # 4段目が少しだけ覗いて切れて見えないよう、段の高さちょうど
+            bw = max(b.sizeHint().width() for b in self._btns.values())
+            self._row_w = cols * bw + (cols - 1) * 6 + 20
         self.pic = SvgView()
         self.pic.setMinimumHeight(220)
         v.addWidget(self.pic, 1)
@@ -318,7 +327,7 @@ class WordsDialog(QtWidgets.QDialog):
         b = QtWidgets.QPushButton("とじる")
         b.clicked.connect(self.accept)
         v.addWidget(b)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(max(520, getattr(self, "_row_w", 0) + 40))
         self.show_card(self.ids[0])
 
     def show_card(self, cid):

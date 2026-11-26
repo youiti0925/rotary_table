@@ -17587,6 +17587,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if not t.isVisible():
                 continue
             t.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            # 短い見出し（「傾き」）の列が、見出しの字ぎりぎりの幅にならないように、列の最小の幅を決める
+            # （見出しは太字・大きめで、中身ぶんの計算より広い。会社PC 150% で縁に付いていた。2026-11-26）
+            _hh = t.horizontalHeader()
+            _hf = QtGui.QFont(_hh.font())
+            _hf.setBold(True)
+            _hh.setMinimumSectionSize(QtGui.QFontMetrics(_hf).horizontalAdvance("傾き") + 30)
             t.resizeColumnsToContents()  # 全列を中身ぶんに確定させてから合計
             s = 2 * t.frameWidth() + 10
             for c in range(t.columnCount()):

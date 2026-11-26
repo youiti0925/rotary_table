@@ -35,6 +35,9 @@ CARDS = {
     "why_worm": dict(title="なぜ、ウォームも測るのか", art="wheel_worm",
                      lines=["ホイールは、1周を大きな刻みで測ります。", "ウォームは、ウォーム1回転ぶんの短い範囲を、細かい刻みで測ります。",
                             "大きな刻みでは見えない、細かいずれを見ます。"]),
+    "why_detach": dict(title="なぜ、軸取り外しを有効にするのか", art="axis_detach",
+                       lines=["この制御装置は、軸ごとに「取り外し」（その軸を使わない）を切り替えられます。",
+                              "取り外しのままだと、その軸は使えず、動きません。", "使う軸だけ、有効にします。"]),
 }
 
 # 手順 → その手順で最初に出す「なぜ」（先頭が最初）
@@ -47,4 +50,5 @@ FOR_STEP = {
     "start1": ("why_first",),
     "counter0": ("why_counter0",),
     "measuring": ("why_no_touch", "why_both", "why_worm"),
+    "axis_on": ("why_detach",),
 }

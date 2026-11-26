@@ -16237,7 +16237,56 @@ class MainWindow(QtWidgets.QMainWindow):
                     ng=g["ng"], has_spec=g["has_spec"], saved=g["saved"], saved_path=g["saved_path"],
                     programs=g["programs"], next_mode=g["next_mode"], mode=g["mode"], counter_reset=counter_reset,
                     param_estop=focas_ops.estop_mode(True),
-                    has_data=self.has_view_data(), ng_items=self._safe_ng_items(g["ng"]), **self._easy_view())
+                    has_data=self.has_view_data(), ng_items=self._safe_ng_items(g["ng"]),
+                    model=self.e_model.text().strip(), serial=self.e_machine.text().strip(), kind=self._easy_kind_name(),
+                    nd_ok=g["nd_ok"], nd_dummy=g["nd_dummy"], **self._easy_view())
+
+    def easy_plan(self):
+        """これから測る中身（はじめてモードが、測る前に見せる。読むだけ。取込は始めない）。
+        {"model","mode","kind","rows":[(向き, 点数)],"total","cond":[文],"spec":[文],"usual":文,"programs":[番号]}。
+        点数は取込開始と同じ組み立て（build_sequence）、規格は右の表と同じ（_spec_text）、時間は「測定にかかった時間.csv」。"""
+        seq = self.build_sequence()
+        rows = [(str(label), int(req)) for label, _cur, req in seq.counts()]
+        total = len(seq)
+        cond, spec = [], []
+        rep = self.is_repeat()
+        if not rep:
+            if self.is_tilt():
+                cond.append(f"傾斜: {self.e_wstart.value():g}° から {self.e_wend.value():g}° まで、{self.e_wheel.value():g}° ごと")
+            else:
+                cond.append(f"ホイール: 1周を {self.e_wheel.value():g}° ごと")
+            cond.append(f"ウォーム: {self.e_start.value():g}° から {self.e_range.value():g}° の範囲を、{self.e_worm.value():g}° ごと")
+            for grp, name in (("wheel", "ホイール"), ("worm", "ウォーム")):
+                parts = [f"{label} {self._spec_text(grp, kind)}" for kind, label in
+                         (("single", "単一誤差"), ("adjacent", "隣接誤差"), ("slope", "傾き")) if self._spec_limit(grp, kind)]
+                if parts:
+                    spec.append(f"{name}: " + "　".join(parts))
+        if rep or self.is_combined():
+            try:
+                blocks = list(self.repeat_blocks())
+            except Exception:
+                blocks = []
+            if blocks:
+                cond.append("再現性: " + "・".join(f"{b:g}°" for b in blocks) + f" の {len(blocks)} か所に、{self.e_repeats.value()} 回ずつ")
+        usual = ""
+        try:
+            from . import live_guide as LG, live_guide_ui
+            sec, n = LG.usual_seconds(LG.load_times(live_guide_ui.time_path(self.settings)), self.e_model.text(),
+                                      self.current_mode(), total)
+            usual = f"前は {LG.minutes_text(sec)} でした（{n} 回の記録）" if sec else "時間の記録は、まだありません（測り終わると残ります）"
+        except Exception:
+            usual = ""
+        g = self._flow_inputs()
+        return dict(model=self.e_model.text().strip(), mode=self.current_mode(), kind=self._easy_kind_name(),
+                    rows=rows, total=total, cond=cond, spec=spec, usual=usual, programs=list(g.get("programs") or ()))
+
+    def _easy_kind_name(self):
+        """いま選ばれている測定の種類の名前（セミ・モーター など）。種類の登録が無い型式は ""。はじめてモードの上の帯に出すだけ。"""
+        try:
+            k = self.active_kind()
+            return str(k or "") if isinstance(k, str) else str(getattr(k, "name", "") or "")
+        except Exception:
+            return ""
 
     def _safe_ng_items(self, ng):
         try:

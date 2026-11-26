@@ -27,10 +27,12 @@ class TestEasyFixes(unittest.TestCase):
         dlg._start_flow("measure")
         host.finished, host.ng = True, 8
         host.ng_items = [(f"ピッチ誤差 {i}番目", f"+{i}.5 秒") for i in range(1, 9)]
-        dlg._enter(F.INDEX["result"])
+        dlg._enter(F.INDEX["summary"])
         self.app.processEvents()
-        sc = dlg._extra_widgets["ng"]
-        self.assertGreaterEqual(sc.height(), 100)                       # 1行5ピクセルに潰れない
+        rows = [c for c in dlg.v_summary.cell_labels if c.text().startswith("ピッチ誤差")]
+        self.assertEqual(len(rows), 8)
+        for c in rows:
+            self.assertGreaterEqual(c.height(), 14)                     # 1行5ピクセルに潰れない
         host.saved = True
         dlg.close()
 

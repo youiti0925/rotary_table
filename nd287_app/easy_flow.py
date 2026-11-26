@@ -68,6 +68,9 @@ STEPS = [
     dict(id="params_manual", ch=2, kind="machine", title="機械で、パラメータを打つ",
          lines=["操作盤で、番号と値を1つずつ打ちます。", "打つ一覧は、下のボタンで見られます。"], art="params_manual",
          button="打つ一覧を見る…"),
+    dict(id="axis_on", ch=2, kind="machine", title="使う軸の「軸取り外し」を、有効にする",
+         lines=["操作盤の「軸取り外し」の列で、製品をつないだ軸のスイッチを、有効の向きにします。",
+                "ほかの軸のスイッチは、そのままにします。"], art="axis_detach"),
     dict(id="cycle_power", ch=2, fl={"program": 1}, kind="machine", title="電源を入れ直す",
          lines=["「切」を押して、画面が消えたら「入」を押します。"], part="power", zoom="power_cycle", detect="cycled"),
     dict(id="estop_release", ch=2, fl={"program": 1}, kind="machine", title="非常停止をもどす",
@@ -76,9 +79,9 @@ STEPS = [
          lines=["操作盤で、プログラムを入れます。", "もう入っていれば、そのまま使えます。"], art="prog_manual"),
     dict(id="dial_ref", ch=2, kind="machine", title="つまみを原点復帰に合わせる",
          lines=["電源のあとは、原点へもどします。"], part="dial", zoom="dial", to="原点復帰", detect="aut_ref"),
-    dict(id="jog_origin", ch=2, kind="machine", title="「＋送り」を押し続ける",
-         lines=["軸選択のつまみを、測る軸（R＝回転、T＝傾斜の印）に合わせます。",
-                "「＋送り」を押し続けると、テーブルが回って原点で止まります。"], part="jog", zoom="jog"),
+    dict(id="jog_origin", ch=2, kind="machine", title="測る軸を、原点にもどす",
+         lines=["軸選択のつまみを、製品をつないだ軸に合わせます。",
+                "「＋送り」のボタンを、テーブルが止まるまで押し続けます。"], part="jog", zoom="jog"),
     dict(id="prog_done", ch=None, fl={"program": 2}, kind="info", title="入りました",
          lines=["機械に入れ終わりました。"], art="auto_done", button="ホームへ"),
     dict(id="fields", ch=3, kind="input", title="機番・名前・温度を入れる",
@@ -97,8 +100,10 @@ STEPS = [
     dict(id="start2", ch=4, kind="machine", title="もう一度、緑の起動ボタンを押す",
          lines=["ここから測りはじめます。"], part="start", zoom="start_again", detect="running"),
     dict(id="measuring", ch=4, kind="run", title="測っています",
-         lines=["終わるまで、機械にさわらないでください。"], art="measure"),
-    dict(id="result", ch=5, kind="pc", title="測り終わりました",
+         lines=["終わるまで、機械と測定器にさわらないでください。"], art="measure"),
+    dict(id="summary", ch=5, kind="pc", title="こういう結果でした",
+         lines=[], art="verdict", button="保存へ進む ▶"),
+    dict(id="result", ch=5, kind="pc", title="名前を決めて、保存する",
          lines=[], art="verdict", button="保存する"),
     dict(id="rz_return", ch=5, kind="pc", title="フルクロにもどしますか？",
          lines=["セミクロで測り終わりました。", "もどす・もどさないは、どちらでも選べます。"], art="renzoku"),
@@ -129,6 +134,102 @@ for _s in STEPS:                      # 各手順が、どの流れの何章目�
     if _s["id"] == "home":
         _s["fl"]["home"] = 0
 INDEX = {s["id"]: i for i, s in enumerate(STEPS)}
+
+
+# ------------------------------------------------------------------ 何のためにやるか（各手順に一行。2026-11-26 利用者
+# 「何のためか説明できることをしてほしい」）。アプリの決まりと、制御装置の一般的な決まりから書けることだけ。
+# 実機で確かめていない所は docs/はじめてモード_測る画面の作り直し_20261126.md に一覧。
+WHY = {
+    "intro": "LAN でつなぐと、PC が製品の設定と測定プログラムを機械に入れ、機械の様子（非常停止・操作モード）を読めます。表示器は、測った角度を PC に送ります。",
+    "prog_intro": "測定は、機械に入れたプログラムが、軸を決まった角度ずつ動かして行います。",
+    "choose": "ふつうは両方「自動」です。「手」を選ぶのは、機械にもう入っているときや、自分で入れたいときだけです。",
+    "power": "電源が入っていないと、PC から機械が見えません。",
+    "estop": "非常停止がかかったままでは、機械は動きません。",
+    "dial_mdi": "製品の設定（パラメータ）を機械に書く準備です。書くときは、このモードにしておきます。",
+    "estop_press": "書いているあいだに機械が動かないようにするためです。設定は、非常停止を押した状態で書く決まりです。",
+    "cond_check": "何度ごとに何か所測るか（測り方）は、型式ごとに決まっています。登録してあれば、型式を入れるだけで毎回同じ測り方になります。",
+    "rz_plan": "同じ製品を、位置の読み方を変えて2回測るためです。順番を先に決めておくと、機械に書く回数が少なくてすみます。",
+    "machine_in": "製品ごとにモーターや減速比が違います。機械の設定をその製品用に書きかえ、測るための動き（測定プログラム）を入れます。",
+    "params_manual": "製品に合った設定が機械に入っていないと、指令した角度どおりに動きません。",
+    "cycle_power": "書いた設定の中には、電源を入れ直すまで効かないものがあります。",
+    "estop_release": "このあと軸を動かすので、非常停止をもどします。",
+    "prog_manual": "測定は、機械に入っているプログラムが、軸を決まった角度ずつ動かして行います。",
+    "dial_ref": "設定を書いて電源を入れ直したあとは、軸の原点（角度を数える出発点）を決め直します。「原点復帰」は、そのための手で動かすモードです。",
+    "axis_on": "「取り外し」（その軸を使わない）のままだと、その軸は使えず、動きません。使う軸だけ、有効にします。",
+    "jog_origin": "軸選択のつまみと「＋送り」は、人が手で軸を動かすときだけ使います。この操作盤は6つの軸で「＋送り」を1組だけ共用しているので、"
+                  "動かす軸をつまみで選びます。測定が始まると、プログラムが軸を動かすので、どちらも使いません。",
+    "fields": "機番は保存するファイルの名前に、温度はバックラッシの規格を決めるのに、名前はだれが測ったかの記録に使います。",
+    "dial_mem": "メモリ運転は、機械に入れたプログラムを動かすモードです。測定プログラムは、このモードで動かします。",
+    "prog_select": "機械には、プログラムがいくつも入っています。今回動かす測定プログラムを、番号で選びます。",
+    "override": "このつまみは、軸が移動する速さの割合です。低いと、1か所ごとの移動に時間がかかります。",
+    "start1": "PC は、取込を始めたあとに来た値だけを受け取ります。だから PC の用意が先、機械の起動があとです。"
+              "1回目の起動では、機械は歯車のすき間を片側に寄せる動きをして、いったん止まります（まだ測りません）。",
+    "counter0": "測るのは、最初の位置から見た角度のずれです。機械が止まったこの位置を 0 にして、基準にします。",
+    "start2": "ここから機械が決まった角度ずつ動き、止まるたびに、表示器の値が PC に入ります。",
+    "measuring": "測っているのは、1度の 3600 分の1（秒）の小さなずれです。テーブルや測定器にさわると、そのゆれが値に入ります。",
+    "summary": "保存する前に、測った結果を見ます。外れた所があれば、保存せずに測り直すこともできます。",
+    "result": "保存すると、検査の記録として残り、あとから見る・印刷することができます。名前は「機番＋末尾の記号」です。",
+    "rz_return": "このあとフルクロで使う製品なら、機械の設定をフルクロにもどしておきます。",
+    "open_past": "保存した結果は、型式や機番でさがして、いつでも見直せます。",
+    "cond_kind": "測るもの（分割・再現性）と、回転か傾斜かで、入れる値が変わります。",
+    "cond_div": "分割は、テーブルを同じ角度ずつ回して、止まった角度のずれを測ります。刻みで、測る所の数が決まります。",
+    "cond_rep": "再現性は、同じ角度に何回も止めて、止まる位置のばらつきを測ります。",
+    "cond_reg": "登録すると、次から同じ型式を入れただけで、この値が自動で入ります（人による違いが出ません）。",
+}
+for _s in STEPS:
+    _s.setdefault("why", WHY.get(_s["id"], ""))
+
+KIND_MARK = {"回転": "R", "傾斜": "T"}      # 操作盤の軸選択のつまみの上の、手書きの印
+
+# 「軸取り外し」のスイッチの、有効（軸を使う）の向き。23号機の写真（2026-11-26）で、1つだけ下向きの軸があった。
+# ★利用者に確かめ中（確かめたら、ここと docs を直す）。
+DETACH_ON_SIDE = "下"
+
+
+def detach_lines(axes=()):
+    """「軸取り外し」を有効にする手順の文。axes=[(種別, 軸の文字)]（アプリが決めた軸。分からなければ空）。戻り値 (題, 行)。"""
+    axes = [(str(k or ""), str(a or "").upper()) for k, a in (axes or []) if a]
+    side = DETACH_ON_SIDE
+    if not axes:
+        return ("使う軸の「軸取り外し」を、有効にする",
+                [f"操作盤の「軸取り外し」の列で、製品をつないだ軸のスイッチを、{side}向き（有効）にします。",
+                 "ほかの軸のスイッチは、そのままにします。"])
+    names = "・".join(f"{a}軸" for _k, a in axes)
+    what = "　".join(f"「{a}軸」{('（' + k + '）') if k else ''}" for k, a in axes)
+    return (f"{names}の「軸取り外し」を、有効にする",
+            [f"操作盤の「軸取り外し」の列の {what} のスイッチを、{side}向き（有効）にします。",
+             "軸は、アプリがこの製品に決めました。ほかの軸は、そのままにします。"])
+
+
+def origin_axes(axes=(), ref_axes=None):
+    """原点にもどす軸 [(種別, 軸の文字)]。決め直しが要ると分かっている軸があれば、その軸だけ。"""
+    axes = [(str(k or ""), str(a or "").upper()) for k, a in (axes or []) if a]
+    if ref_axes:
+        want = {str(a).upper() for a in ref_axes if a}
+        hit = [x for x in axes if x[1] in want]
+        axes = hit or axes
+    return axes
+
+
+def origin_lines(axes=(), ref_axes=None):
+    """原点にもどす手順の文。axes=[(種別, 軸の文字)]（アプリが決めた軸。分からなければ空）。
+    ref_axes=原点の決め直しが要ると分かっている軸の文字（None＝分からない → 決めた軸を全部出す）。
+    戻り値 (題, 行のリスト)。軸の名前は、アプリが決めたものをそのまま出す（人に探させない）。"""
+    axes = origin_axes(axes, ref_axes)
+    if not axes:
+        return ("測る軸を、原点にもどす",
+                ["軸選択のつまみを、製品をつないだ軸に合わせます（つまみの上の手書きの印は、R＝回転・T＝傾斜）。",
+                 "「＋送り」のボタンを、テーブルが止まるまで押し続けます。"])
+    if len(axes) == 1:
+        k, a = axes[0]
+        return (f"{a}軸を、原点にもどす",
+                [f"軸選択のつまみを「{a}軸」に合わせます（この製品{('（' + k + '）') if k else ''}をつないだ軸。アプリが決めました）。",
+                 "「＋送り」のボタンを、テーブルが止まるまで押し続けます。"])
+    names = "・".join(f"{a}軸" for _k, a in axes)
+    lines = [f"{'①②③④'[i]} 軸選択のつまみを「{a}軸」{('（' + k + '）') if k else ''}に合わせて、「＋送り」を止まるまで押し続けます。"
+             for i, (k, a) in enumerate(axes[:4])]
+    lines.append("軸は、アプリが決めたものです。1つずつ行います。")
+    return (f"{names}を、原点にもどす", lines)
 
 
 def step(step_id):
@@ -201,8 +302,10 @@ def needed(step_id, st, ctx):
     s = step(step_id)
     d = s.get("detect")
     if step_id in ("home", "prog_intro", "prog_done", "open_past", "view_result", "output", "alarm_look", "choose",
-                   "cond_kind", "cond_reg", "cond_done"):
+                   "cond_kind", "cond_done"):
         return True
+    if step_id == "cond_reg":                        # 「今回だけ手で入れる」（登録しない）ときは、登録の画面を出さない
+        return not ctx.get("cond_once_flow")
     ck = ctx.get("cond_kind") or ""
     if step_id == "cond_div":                        # 分割だけ・両方のとき
         return ck in ("division", "one")
@@ -216,10 +319,10 @@ def needed(step_id, st, ctx):
     if step_id == "cond_check" and (ctx.get("rz_pos") or (ctx.get("rz_unit") or 1) >= 2 or ctx.get("rz_return_mode")):
         return False                                  # 型式・種類は最初の1台の最初に決めた。2つ目の工程・載せ替えでは聞き直さない
     if ctx.get("rz_return_mode") and step_id in ("fields", "dial_mem", "prog_select", "override", "start1", "counter0",
-                                                  "start2", "measuring", "result", "prog_manual"):
+                                                  "start2", "measuring", "summary", "result", "prog_manual", "axis_on"):
         return False                                  # フルへもどすだけ（測らない）
     if ctx.get("rz_skip_write") and step_id in ("power", "estop", "dial_mdi", "estop_press", "machine_in", "params_manual",
-                                                "cycle_power", "estop_release", "prog_manual", "dial_ref", "jog_origin"):
+                                                "cycle_power", "estop_release", "prog_manual", "dial_ref", "jog_origin", "axis_on"):
         return False
     params, prog = ctx.get("params") or "auto", ctx.get("prog") or "auto"
     if step_id == "params_manual":                   # パラメータは手で打つ（アプリは番号と値の一覧を見せるだけ）
@@ -242,10 +345,13 @@ def needed(step_id, st, ctx):
     origin = bool(ctx.get("powered_on") or ctx.get("cycled") or ctx.get("cycled_in_wizard"))
     if step_id == "cycle_power":
         return bool(st["pw"] or ctx.get("cycled_in_wizard")) and not ctx.get("cycled")
+    # 原点にもどす（軸選択を合わせて＋送り）は、ふだんは要らない（利用者 2026-11-26）。
+    # 出すのは、書いた結果として原点の決め直しが要ると分かっているときだけ（ctx["ref_needed"]。機械に入れる画面が知らせる）。
+    # 手で動かすやり方は、「？ことば」のカード（hand_move）で見られる。
     if step_id == "dial_ref":
-        return origin and not (st["online"] and is_done(d, st))
+        return bool(ctx.get("ref_needed")) and origin and not (st["online"] and is_done(d, st))
     if step_id == "jog_origin":
-        return origin
+        return bool(ctx.get("ref_needed")) and origin
     if step_id in ("counter0", "start2"):
         return bool(ctx.get("counter_reset", True))
     if step_id == "finish":
@@ -265,8 +371,8 @@ def done_now(step_id, st, ctx, track=None):
         return bool(d) and is_done(d, st, track)
     if step_id == "choose":
         return bool(ctx.get("params")) and bool(ctx.get("prog"))
-    if step_id == "cond_check":
-        return not ctx.get("cond_missing") and not ctx.get("kind_missing")
+    if step_id == "cond_check":                       # 登録が無い型式は、「登録する」か「今回だけ手で入れる」を済ませてから
+        return not ctx.get("cond_missing") and not ctx.get("kind_missing") and not ctx.get("cond_unreg")
     if step_id == "rz_plan":
         return bool(ctx.get("rz_order")) and not ctx.get("rz_problems")
     if step_id == "rz_return":
@@ -283,6 +389,8 @@ def done_now(step_id, st, ctx, track=None):
         return not ctx.get("missing")
     if step_id == "measuring":
         return bool(ctx.get("finished"))
+    if step_id == "summary":
+        return True
     if step_id == "result":
         return bool(ctx.get("saved"))
     if step_id == "open_past":

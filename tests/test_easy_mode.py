@@ -83,11 +83,15 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(ids[:4], ["intro", "choose", "power", "estop"])
         ids = self.ids(F.OFFLINE, {"powered_on": True})
         self.assertEqual(ids[:4], ["intro", "choose", "power", "dial_mdi"])
-        self.assertIn("jog_origin", ids)
+        self.assertNotIn("jog_origin", ids)                  # 利用者 2026-11-26: 軸選択＋送り（原点へもどす）は、ふだんは要らない
+        self.assertIn("jog_origin", self.ids(F.OFFLINE, {"powered_on": True, "ref_needed": True}))
+        self.assertIn("axis_on", ids)                        # 軸取り外しを有効にする手順は、必ず出す
 
     def test_origin_return_only_after_power(self):
         self.assertNotIn("jog_origin", self.ids(S()))
-        self.assertIn("jog_origin", self.ids(S(), {"cycled_in_wizard": True}))
+        self.assertNotIn("jog_origin", self.ids(S(), {"cycled_in_wizard": True}))             # 入れ直しただけでは出さない
+        self.assertNotIn("jog_origin", self.ids(S(), {"ref_needed": True}))                    # 電源を入れ直していなければ出さない
+        self.assertIn("jog_origin", self.ids(S(), {"cycled_in_wizard": True, "ref_needed": True}))   # 原点の決め直しが要ると分かったときだけ
 
     def test_cycle_power_only_when_machine_asks(self):
         self.assertNotIn("cycle_power", self.ids(S()))
@@ -440,6 +444,9 @@ class TestDialog(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(poller.log, ["pause", "resume"])
         self.assertIsNone(dlg._wiz)
+        self.assertEqual(self.sid(dlg), "axis_on")         # 使う軸の「軸取り外し」を有効にする（人が「やりました」）
+        dlg.b_manual.click() if not dlg.b_next.isEnabled() else None
+        dlg._next()
         self.assertEqual(self.sid(dlg), "estop_release")   # 書き終えたら、非常停止をもどす（プログラム・運転は解除してから）
         self.assertFalse(dlg.b_next.isEnabled())
         poller.st = S(aut=0, emergency=0)
@@ -479,7 +486,10 @@ class TestDialog(unittest.TestCase):
         self.assertFalse(dlg.b_next.isEnabled())
         host.capturing, host.finished = False, True
         dlg._after_measuring()
-        self.assertEqual(self.sid(dlg), "result")
+        self.assertEqual(self.sid(dlg), "summary")           # まず「こういう結果でした」
+        self.assertTrue(dlg.b_next.isEnabled())
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "result")            # 保存は次の画面
         self.assertFalse(dlg.b_next.isEnabled())
         dlg._save()
         self.assertEqual(host.calls[-1], "save")
@@ -633,6 +643,9 @@ class TestDialog(unittest.TestCase):
         host.easy_param_list = lambda: dlg._param_list_calls.append(1)
         dlg._param_list()
         self.assertEqual(dlg._param_list_calls, [1])
+        dlg._next()
+        self.assertEqual(self.sid(dlg), "axis_on")           # 使う軸の「軸取り外し」を有効にする（やりました で進む）
+        self.assertEqual(dlg.b_next.text(), "やりました ▶")
         dlg._next()
         self.assertEqual(self.sid(dlg), "estop_release")     # 打ち終えたら、非常停止をもどしてから、プログラム
         poller.st = S(aut=0, emergency=0)
@@ -848,19 +861,20 @@ class TestDialog(unittest.TestCase):
         dlg.close()
 
     def test_result_lists_the_ng_items(self):
+        """外れた所は「こういう結果でした」の画面に出す（保存の画面は、数だけ）。"""
         dlg, host, poller = self.make(S(aut=0, emergency=0))
         host.finished = True
         host.ng = 2
         host.ng_items = [("ホイール CW 精度PP", "12.3"), ("総合バックラッシ", "8.1")]
+        dlg._enter(F.INDEX["summary"])
+        self.assertFalse(dlg.wide.isHidden())
+        self.assertTrue(dlg.right_scroll.isHidden())
+        self.assertIn("2 か所", dlg.v_summary.lbl_verdict.text())
+        texts = [t for t, red in dlg.v_summary.cells if red]
+        self.assertTrue(any("ホイール CW 精度PP" in t and "12.3" in t for t in texts))
         dlg._enter(F.INDEX["result"])
         self.assertIn("2", dlg.lbl_lines.text())
-        box = dlg.extra.itemAt(0).widget()                     # 外れた所は、1行ずつの部品（値は右、折り返さない）
-        self.assertEqual(box.objectName(), "ng_rows")
-        from PySide6 import QtWidgets
-        texts = [w.text() for w in box.findChildren(QtWidgets.QLabel)]
-        self.assertIn("・ホイール CW 精度PP", texts)
-        self.assertIn("12.3", texts)
-        self.assertFalse(any(w.wordWrap() for w in box.findChildren(QtWidgets.QLabel) if w.text() in ("12.3", "8.1")))
+        self.assertTrue(dlg.wide.isHidden())
         host.saved = True
         dlg.close()
 
@@ -871,18 +885,20 @@ class TestDialog(unittest.TestCase):
         host.finished = True
         host.ng = 1
         host.ng_items = [("ホイール CW 単一誤差", "6.9")]
-        dlg._enter(F.INDEX["result"])
+        dlg._enter(F.INDEX["summary"])
         opened = []
         orig = better_app.open_result
         better_app.open_result = lambda h: opened.append(h)
         try:
-            dlg._extra_widgets["read"].click()
+            self.assertFalse(dlg.v_summary.b_read.isHidden())
+            dlg.v_summary.b_read.click()
         finally:
             better_app.open_result = orig
         self.assertEqual(opened, [host])
         host.ng, host.ng_items = 0, []
-        dlg._enter(F.INDEX["result"])
-        self.assertNotIn("read", dlg._extra_widgets)
+        dlg._enter(F.INDEX["summary"])
+        dlg._refresh()
+        self.assertEqual(dlg.v_summary.b_read.text(), "グラフの上で、くわしく読む")   # 外れが無くても読める（赤くはしない）
         host.saved = True
         dlg.close()
 
@@ -894,14 +910,15 @@ class TestDialog(unittest.TestCase):
         host.ng_items = [("ホイール CCW 単一誤差", "-3.9″"), ("ウォーム CW 傾き", "+5.2″"),
                          ("総合バックラッシ", "MIN -0.4\"　規格 ≧5.0\"　NG")]
         dlg.resize(1024, 768)
-        dlg._enter(F.INDEX["result"])
+        dlg._enter(F.INDEX["summary"])
         self._wait(200)
-        box = dlg._extra_widgets["ng"]
-        for lb in box.findChildren(QtWidgets.QLabel):
-            if lb.text().startswith("・"):
-                self.assertGreaterEqual(lb.width(), 150, (lb.text(), lb.width()))        # 項目名の欄が細くならない
-                if lb.wordWrap() and lb.text():
-                    self.assertGreaterEqual(lb.height(), lb.heightForWidth(lb.width()) - 2)   # 切れない
+        names = [c for c in dlg.v_summary.cell_labels if any(c.text().startswith(n) for n, _v in host.ng_items)]
+        self.assertEqual(len(names), 3)
+        for lb in names:
+            self.assertGreaterEqual(lb.width(), 150, (lb.text(), lb.width()))            # 項目名の欄が細くならない
+        for lb in dlg.v_summary.cell_labels:
+            if lb.wordWrap() and lb.text():
+                self.assertGreaterEqual(lb.height(), lb.heightForWidth(lb.width()) - 2)   # 切れない
         host.saved = True
         dlg.close()
 
@@ -919,8 +936,12 @@ class TestDialog(unittest.TestCase):
         host.finished = True
         dlg._enter(F.INDEX["measuring"])                      # 測り終わっている: 1.2 秒後に結果へ
         self._wait(1700)
+        self.assertEqual(self.sid(dlg), "summary")            # まず「こういう結果でした」
+        dlg._next()
         self.assertEqual(self.sid(dlg), "result")
         host.saved = True                                     # 保存した（保存前なら、いまの確認がそのまま働く）
+        dlg._back()
+        self.assertEqual(self.sid(dlg), "summary")            # 保存の画面 → 結果の画面
         dlg._back()
         self.assertEqual(self.sid(dlg), "start2")             # 「測っています」には入らない
         self._wait(1700)
@@ -939,7 +960,7 @@ class TestDialog(unittest.TestCase):
         dlg._yesno = lambda text, *a, **k: (asked.append(text), False)[1]
         dlg._back()
         self.assertTrue(asked)
-        self.assertEqual(self.sid(dlg), "result")
+        self.assertEqual(self.sid(dlg), "summary")
         dlg.close()
 
     def test_power_step_has_an_offline_fallback_and_later_steps_follow(self):
@@ -994,7 +1015,7 @@ class TestDialog(unittest.TestCase):
                 dlg._enter(F.INDEX[sid])
                 self._wait(100)
                 top = dlg.lbl_who.mapTo(dlg.right_w, QtCore.QPoint(0, 0)).y() if dlg.lbl_who.isVisible() else                     dlg.lbl_title.mapTo(dlg.right_w, QtCore.QPoint(0, 0)).y()
-                kids = [x for x in (dlg.lbl_who, dlg.lbl_title, dlg.lbl_lines, dlg.lbl_watch, dlg.b_manual, dlg.v_map) if x.isVisible()]
+                kids = [x for x in (dlg.lbl_who, dlg.lbl_title, dlg.lbl_lines, dlg.lbl_why, dlg.lbl_watch, dlg.b_manual, dlg.v_map) if x.isVisible()]
                 bottom = max(x.mapTo(dlg.right_w, QtCore.QPoint(0, x.height())).y() for x in kids)
                 gap_top, gap_bot = top, dlg.right_w.height() - bottom
                 self.assertLess(abs(gap_top - gap_bot), 12, (w, h, sid, gap_top, gap_bot))   # 上下の余白が同じ（まん中）

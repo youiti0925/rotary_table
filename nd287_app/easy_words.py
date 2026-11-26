@@ -39,6 +39,10 @@ CARDS = {
     "verdict": dict(title="合否の見方", art="verdict",
                     lines=["右の表の赤い字が、規格から外れた所です。", "規格は、型式と温度で決まります。",
                            "規格が画面に無いときは、アプリは「合格」と言いません。"]),
+    "hand_move": dict(title="手で軸を動かしたいとき（ふだんは要りません）", art="hand_move",
+                      lines=["手動送り: 操作モードを「手動送り」にして、軸選択のつまみを動かす軸に合わせ、「＋送り」「－送り」を押します（押している間だけ動きます）。",
+                             "ハンドル: 操作モードを「ハンドル」にして、軸選択を動かす軸に合わせ、ハンドルを回します。",
+                             "測定のときは、プログラムが軸を動かすので、どちらも使いません。"]),
     "saved": dict(title="保存すると", art="folder",
                   lines=["測った値が、機番の名前のファイルになります。", "あとで「結果を見る」から開けます。", "印刷や PDF にもできます。"]),
 }
@@ -47,6 +51,8 @@ CARDS = {
 FOR_STEP = {
     "start1": ("capture",), "counter0": ("capture",), "start2": ("capture", "value_in"),
     "measuring": ("value_in", "capture"),
+    "axis_on": ("hand_move",), "jog_origin": ("hand_move",), "dial_ref": ("hand_move",),
+    "summary": ("verdict", "graph", "accuracy", "pp", "single", "adjacent", "tilt", "main", "backlash", "repeat"),
     "result": ("verdict", "graph", "accuracy", "pp", "single", "adjacent", "tilt", "main", "backlash", "repeat"),
     "view_result": ("verdict", "graph", "accuracy", "tilt_big"),
     "finish": ("saved",), "output": ("saved",),

@@ -12,7 +12,7 @@
 """
 from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
-from . import easy_art, easy_flow, easy_photo, easy_words, flow_guide
+from . import easy_art, easy_flow, easy_live, easy_photo, easy_words, flow_guide
 from . import kind_runtime as KR
 from . import renzoku as RZ
 from .easy_renzoku import RenzokuMixin, RZ_CTX_RESET
@@ -31,6 +31,10 @@ QSS = """
 QDialog#easy { background:#EEF1F4; }
 QLabel#title { font-size:26px; font-weight:900; color:#17212B; }
 QLabel#line { font-size:17px; color:#17212B; }
+QLabel#why { font-size:13px; color:#3D4A57; background:#F1F5FA; border-left:4px solid #1560D4; border-radius:6px; padding:7px 10px; }
+QFrame#status { background:#FFFFFF; border:1px solid #D5DBE1; border-radius:10px; }
+QLabel#chiphead { font-size:11px; font-weight:700; color:#5A6876; }
+QLabel#chip { font-size:13px; font-weight:800; border-radius:8px; padding:2px 8px; }
 QLabel#who { font-size:13px; font-weight:bold; border-radius:11px; padding:3px 14px; }
 QLabel#watch { font-size:16px; font-weight:bold; border-radius:10px; padding:10px 14px; }
 QFrame#art { background:#F4F6F8; border-radius:14px; }
@@ -83,14 +87,33 @@ class SvgView(QtWidgets.QWidget):
             cache[key] = QtGui.QPixmap.fromImage(img.scaled(1400, 1400, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         self._pix = cache[key]
         self._svg = ""
+        self._below = None
         self.update()
         return True
+
+    def set_below(self, svg):
+        """写真の下に、絵も出す（写真＝実物の場所、絵＝どれをどちらへ）。写真を出したあとに呼ぶ。"""
+        if getattr(self, "_below_svg", None) != svg or getattr(self, "_below", None) is None:
+            self._below_svg = svg
+            self._below = QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode("utf-8")), self)
+        self.update()
 
     def paintEvent(self, _e):
         pix = getattr(self, "_pix", None)
         if pix is not None:
             p = QtGui.QPainter(self)
             p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+            below = getattr(self, "_below", None)
+            if below is not None and below.isValid() and not below.defaultSize().isEmpty():
+                sc = pix.scaled(self.width(), int(self.height() * 0.5), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                p.drawPixmap((self.width() - sc.width()) // 2, 0, sc)
+                p.setRenderHint(QtGui.QPainter.Antialiasing)
+                top = sc.height() + 6
+                size = below.defaultSize()
+                k = min(self.width() / size.width(), (self.height() - top) / size.height())
+                w, h = size.width() * k, size.height() * k
+                below.render(p, QtCore.QRectF((self.width() - w) / 2, top, w, h))
+                return
             sc = pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             p.drawPixmap((self.width() - sc.width()) // 2, (self.height() - sc.height()) // 2, sc)
             return
@@ -422,6 +445,14 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         root.setSpacing(12)
         self.bar = ChapterBar()
         root.addWidget(self.bar)
+        self.status = QtWidgets.QFrame()             # いまの様子（製品・測り方・機械・軸・表示器）。どの手順でも上に出す（読むだけ）
+        self.status.setObjectName("status")
+        self.status_lay = QtWidgets.QHBoxLayout(self.status)
+        self.status_lay.setContentsMargins(10, 4, 10, 4)
+        self.status_lay.setSpacing(6)
+        self._status_key = None
+        self.status.setVisible(False)
+        root.addWidget(self.status)
         mid = QtWidgets.QHBoxLayout()
         mid.setSpacing(22)
         self.art = QtWidgets.QFrame()
@@ -432,10 +463,18 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.v_map = SvgView()
         self.v_main = SvgView()
         al.addWidget(self.v_main, 1)
+        self.lbl_plan = QtWidgets.QLabel("")           # 「これから測る中身」（登録から読み込んだ測り方・点数・規格・見込みの時間）。絵の代わりに出す
+        self.lbl_plan.setObjectName("plan")
+        self.lbl_plan.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_plan.setWordWrap(True)
+        self.lbl_plan.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        self.lbl_plan.setStyleSheet("background:#FFFFFF; border:1px solid #D5DBE1; border-radius:12px; padding:14px 18px; color:#17212B;")
+        self.lbl_plan.setVisible(False)
+        al.addWidget(self.lbl_plan, 1)
         self.b_photo = QtWidgets.QPushButton("絵 ／ 写真")
         self.b_photo.setCheckable(True)
         self.b_photo.setCursor(QtCore.Qt.PointingHandCursor)
-        self.b_photo.setStyleSheet("QPushButton{background:#FFFFFF;border:2px solid #C5CCD3;border-radius:10px;padding:6px 12px;font-weight:700;}"
+        self.b_photo.setStyleSheet("QPushButton{background:#FFFFFF;border:2px solid #C5CCD3;border-radius:10px;padding:6px 12px;font-weight:700;font-size:13px;}"
                                    "QPushButton:checked{background:#E3EEFF;border-color:#1560D4;}")
         self.b_photo.clicked.connect(self._toggle_photo)
         self.b_photo.setVisible(False)
@@ -477,6 +516,10 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.lbl_lines.setObjectName("line")
         self.lbl_lines.setWordWrap(True)
         right.addWidget(self.lbl_lines)
+        self.lbl_why = QtWidgets.QLabel("")            # 何のためにやるか（各手順に一行。easy_flow.WHY）
+        self.lbl_why.setObjectName("why")
+        self.lbl_why.setWordWrap(True)
+        right.addWidget(self.lbl_why)
         self.extra = QtWidgets.QVBoxLayout()
         self.extra.setSpacing(8)
         right.addLayout(self.extra)
@@ -534,6 +577,14 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         el.insertWidget(0, self.lbl_rz_in)
         self.embed.setVisible(False)
         mid.addWidget(self.embed, 1)
+        self.wide = QtWidgets.QWidget()            # 「測っています」「こういう結果でした」: 横いっぱいを使う（本物のグラフと、いまの状況）
+        self.wide_lay = QtWidgets.QVBoxLayout(self.wide)
+        self.wide_lay.setContentsMargins(0, 0, 0, 0)
+        self.wide_lay.setSpacing(0)
+        self.v_measure = None                        # 要るときに作る（easy_measure_ui）
+        self.v_summary = None
+        self.wide.setVisible(False)
+        mid.addWidget(self.wide, 1)
         self.home = QtWidgets.QWidget()               # 入り口: 絵のタイルから選ぶ
         hg = QtWidgets.QGridLayout(self.home)
         hg.setContentsMargins(0, 0, 0, 0)
@@ -591,9 +642,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         root.addLayout(foot)
         self.resize(1100, 700)
         scr = QtWidgets.QApplication.primaryScreen()
-        if scr is not None:                          # 小さい画面（1024x768・1366x768）に収める
+        if scr is not None:                          # 小さい画面（1024x768・1366x768）に収める。広い画面では横を使う（グラフと状況を並べるため）
             g = scr.availableGeometry()
-            self.resize(min(1100, g.width() - 20), min(700, g.height() - 40))
+            self.resize(min(1260, g.width() - 20), min(720, g.height() - 40))
         self.setMinimumSize(900, 580)
 
     def resizeEvent(self, e):
@@ -632,7 +683,35 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             c["kind_missing"] = any((not a["state"].get("kind")) or bool(a["state"].get("error")) for a in axes)
         except Exception:
             c["kind_missing"] = False
+        c["cond_unreg"] = bool(self._cond_lacking()) and self.ctx.get("cond_once") != self._model_text()
         return self._rz_ctx(c)
+
+    def _model_text(self):
+        try:
+            return self.host.e_model.text().strip()
+        except Exception:
+            return ""
+
+    def _cond_lacking(self):
+        """いまの型式・測り方で、登録が無いもの（["分割", "再現性"] のうち）。種類別の登録がある型式は、そちらで決まるので空。"""
+        try:
+            st = self.host.easy_cond_state()
+        except Exception:
+            return []
+        if not st.get("model"):
+            return []
+        try:
+            if self._kind_axes():
+                return []
+        except Exception:
+            pass
+        mode = str(st.get("mode") or "")
+        out = []
+        if "分割" in mode and st.get("div") not in ("登録", "会社の一覧"):
+            out.append("分割")
+        if "再現" in mode and st.get("rep") != "登録":
+            out.append("再現性")
+        return out
 
     def _first(self):
         self.st = self.poller.state() if self.poller else easy_flow.OFFLINE
@@ -681,8 +760,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         if flow == "measure":
             self.rz, self.rz_last_machine = None, None
             self.ctx.update(RZ_CTX_RESET)
-            self.ctx.update(handoff=False, skip_machine=False, offline_go=False, params="auto", prog="auto")   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
+            self.ctx.update(handoff=False, skip_machine=False, offline_go=False, params="auto", prog="auto", axes=[], ref_axes=[], ref_needed=False)   # 初めから「自動・自動」が選ばれている（人に決めさせない。違うときだけ押し直す）
         if flow == "cond":
+            self.ctx["cond_once_flow"] = False
             self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
         self._enter(j)
 
@@ -725,6 +805,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 self._notice = f"測り方を入れられませんでした: {e}"
         if s["id"] == "cond_done" and self.ctx.get("cond_return") is not None:      # 測るの流れから来たとき: そこへもどる
             back = self.ctx.pop("cond_return")
+            self.ctx["cond_once_flow"] = False
             self.flow = "measure"
             self.history.append(self.i)
             self._enter(back)
@@ -744,7 +825,10 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         if c.get("capturing") and not c.get("finished"):
             self._open_pause()                          # 測っている途中: 黙って前へもどらない（取込が続いたままになるため）
             return
-        if STEPS[self.i]["id"] in ("result", "finish") and not self._unsaved_ok():
+        if STEPS[self.i]["id"] == "result" and self.history and STEPS[self.history[-1]]["id"] == "summary":
+            self._enter(self.history.pop())             # 保存の画面 → 結果の画面へは、聞かずにもどる（まだ何も捨てない）
+            return
+        if STEPS[self.i]["id"] in ("summary", "result", "finish") and not self._unsaved_ok():
             return
         if self._wiz is not None and not self._close_wizard():
             return
@@ -922,10 +1006,13 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 title = f"{flow_guide._o(progs[:1])} を呼び出す"
         if sid == "result":
             ng, spec = c.get("ng", 0), c.get("has_spec", False)
-            lines = ([f"外れた所が {ng} か所あります。"] if ng else
+            lines = ([f"外れた所が {ng} か所あります（前の画面で見られます）。このまま保存することも、もどって測り直すこともできます。"] if ng else
                      ["ぜんぶ規格の中です。"] if spec else
                      ["規格は画面に出ていません。値を見て、保存します。"])
-            title = "測り終わりました"
+        if sid == "jog_origin":
+            title, lines = easy_flow.origin_lines(self.ctx.get("axes") or (), self.ctx.get("ref_axes"))
+        if sid == "axis_on":
+            title, lines = easy_flow.detach_lines(self.ctx.get("axes") or ())
         if sid == "view_result":
             ng, spec = c.get("view_ng", 0), c.get("view_spec", False)
             title = "規格から外れた所があります" if ng else ("ぜんぶ規格の中です" if spec else "結果")
@@ -951,10 +1038,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.lbl_title.setText(title)
         self.lbl_lines.setText("\n".join(lines))
         self.lbl_lines.setVisible(bool(lines))
-        if sid == "result" and c.get("ng"):
-            self._ng_rows(c.get("ng_items") or [])
-        if sid == "view_result" and c.get("view_ng"):
-            self._ng_rows(c.get("view_ng_items") or [])
+        why = s.get("why") or ""
+        self.lbl_why.setText(("なぜ: " + why) if why else "")
+        self.lbl_why.setVisible(bool(why))
         if sid == "machine_in":
             self._open_wizard_inside()
         elif sid == "rz_plan":
@@ -972,13 +1058,24 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         elif sid == "cond_reg":
             self._build_cond_reg()
         elif sid == "cond_done":
-            lines = list(self.ctx.get("cond_msgs") or []) + ["次から、この型式を入れると自動で入ります。"]
+            if self.ctx.get("cond_once_flow"):
+                self.ctx["cond_once"] = self._model_text()
+                lines = ["今回だけ、この値で測ります。", "登録はしていません（次に同じ型式を測るときは、また聞きます）。"]
+            else:
+                lines = list(self.ctx.get("cond_msgs") or []) + ["次から、この型式を入れると自動で入ります。"]
             self.lbl_lines.setText("\n".join(lines))
         elif sid == "params_manual":
             self._extra_widgets["act"] = self._act_button("打つ一覧を見る…", self._param_list)
             self._small_note("機械の操作は、まだ実機で確かめていません。")
         elif sid == "prog_manual":
             self._small_note("機械の操作は、まだ実機で確かめていません。")
+        elif sid == "axis_on":
+            hb = QtWidgets.QPushButton("手で軸を動かしたいとき（ふだんは要りません）…")
+            hb.setObjectName("sub")
+            hb.setCursor(QtCore.Qt.PointingHandCursor)
+            hb.clicked.connect(lambda _c=False: self._open_words(("hand_move",)))
+            self.extra.addWidget(hb)
+            self._extra_widgets["hand_move"] = hb
         elif sid == "finish":
             if c.get("saved_path"):
                 el = ElideLabel(c["saved_path"])
@@ -1005,32 +1102,76 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             b = self._act_button("保存する", self._save)
             self._extra_widgets["act"] = b
             QtCore.QTimer.singleShot(0, lambda bb=b: self._show_button(bb))      # 「保存する」が下に隠れて、止まって見えないように
-            if c.get("ng"):
-                r = QtWidgets.QPushButton("もう一度測る")
-                r.setObjectName("sub")
-                r.setCursor(QtCore.Qt.PointingHandCursor)
-                r.clicked.connect(self._remeasure)
-                g = QtWidgets.QPushButton("どこが外れたかを見る")        # 結果を読む（better_app.py。読むだけ）
-                g.setObjectName("sub")
-                g.setCursor(QtCore.Qt.PointingHandCursor)
-                g.clicked.connect(self._read_result)
-                both = QtWidgets.QWidget()                              # 2つを横に並べる（縦に足すと、下が切れた。会社PC 150%）
-                both.setStyleSheet("background:transparent;")
-                bh = QtWidgets.QHBoxLayout(both)
-                bh.setContentsMargins(0, 0, 0, 0)
-                bh.setSpacing(18)
-                bh.addWidget(r)
-                bh.addWidget(g)
-                bh.addStretch(1)
-                self.extra.addWidget(both)
-                self._extra_widgets["read"] = g
         elif sid == "measuring":
-            pg = QtWidgets.QProgressBar()
-            pg.setObjectName("pbar")
-            pg.setTextVisible(False)
-            self.extra.addWidget(pg)
-            self._extra_widgets["pg"] = pg
+            self._show_wide("measure")
+        elif sid in ("summary", "view_result"):
+            self._show_wide("summary")
         self._refresh()
+
+    # ------------------------------------------------------------ 横いっぱいの画面（測っています／こういう結果でした）
+    def _show_wide(self, which):
+        """本物のグラフの画面を用意する（はじめて要るときに作る。作れなければ、今までの絵と文のまま＝止まらない）。"""
+        try:
+            from . import easy_measure_ui as MU
+            if which == "measure" and self.v_measure is None:
+                self.v_measure = MU.MeasureView(self.wide)
+                self.wide_lay.addWidget(self.v_measure)
+            if which == "summary" and self.v_summary is None:
+                self.v_summary = MU.SummaryView(self.wide)
+                self.v_summary.card_requested.connect(lambda cid: self._open_words((cid,)))
+                self.v_summary.read_requested.connect(self._read_result)
+                self.v_summary.remeasure_requested.connect(self._remeasure_asked)
+                self.wide_lay.addWidget(self.v_summary)
+        except Exception as e:
+            self._notice = f"グラフの画面を出せませんでした: {e}"
+            return
+        if self.v_measure is not None:
+            self.v_measure.setVisible(which == "measure")
+        if self.v_summary is not None:
+            self.v_summary.setVisible(which == "summary")
+
+    def _wide_on(self, sid):
+        if sid == "measuring":
+            return self.v_measure is not None
+        if sid in ("summary", "view_result"):
+            return self.v_summary is not None
+        return False
+
+    def _remeasure_asked(self):
+        """結果の画面の「もう一度測る」。測った値は消えるので、確かめる。"""
+        if self._unsaved() and not self._yesno("いま測った値は保存されていません。消して、もう一度測りますか？", "消して測り直す", "やめる"):
+            return
+        self._remeasure()
+
+    def _update_status(self, c, st):
+        """上の「いまの様子」の帯。変わったときだけ作り直す。"""
+        try:
+            chips = easy_live.status_chips(c, st, self.ctx)
+        except Exception:
+            chips = []
+        key = repr(chips)
+        if key == self._status_key:
+            return
+        self._status_key = key
+        lay = self.status_lay
+        while lay.count():
+            it = lay.takeAt(0)
+            wd = it.widget()
+            if wd is not None:
+                wd.setParent(None)
+                wd.deleteLater()
+        tones = {"ok": ("#E3F4EA", "#16864C"), "stop": ("#FBE9E7", "#C8362B"), "wait": ("#FFF3CF", "#7A5200"), "plain": ("#EEF1F4", "#17212B")}
+        for head, text, tone in chips:
+            h = QtWidgets.QLabel(head)
+            h.setObjectName("chiphead")
+            v = QtWidgets.QLabel(text)
+            v.setObjectName("chip")
+            bg, fg = tones.get(tone, tones["plain"])
+            v.setStyleSheet(f"background:{bg}; color:{fg};")
+            lay.addWidget(h)
+            lay.addWidget(v)
+            lay.addSpacing(6)
+        lay.addStretch(1)
 
     def _read_result(self):
         from . import better_app
@@ -1127,18 +1268,36 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             st = self.host.easy_cond_state()
         except Exception:
             st = {}
+        lack = self._cond_lacking()
+        once = self.ctx.get("cond_once") == st.get("model")
         if st.get("model") and not self._kind_axes():
             have = [n for n, k in (("分割", st.get("div")), ("再現性", st.get("rep"))) if k in ("登録", "会社の一覧")]
-            lb = QtWidgets.QLabel(("登録から自動で入りました: " + "・".join(have)) if have else
-                                  "この型式は、まだ測り方が登録されていません。下のボタンで決めて登録できます。")
+            if lack and once:
+                text, color = "今回だけ、手で入れた値で測ります（登録していません）。", "#7A5200"
+            elif lack:
+                text, color = ("この型式は、" + "・".join(lack) + "の測り方が、まだ登録されていません。"
+                               "登録するか、今回だけ手で入れるかを選んでください。"), "#B02A20"
+            else:
+                text, color = "登録から読み込みました（左に中身が出ています）: " + "・".join(have), "#16864C"
+            lb = QtWidgets.QLabel(text)
             lb.setWordWrap(True)
-            lb.setStyleSheet("font-size:14px; font-weight:700; color:" + ("#16864C" if have else "#B02A20") + ";")
+            lb.setStyleSheet(f"font-size:14px; font-weight:700; color:{color};")
             self.extra.addWidget(lb)
-        r = QtWidgets.QPushButton("測り方を決める・登録する…")
-        r.setObjectName("sub")
-        r.setCursor(QtCore.Qt.PointingHandCursor)
-        r.clicked.connect(self._cond_from_check)
-        self.extra.addWidget(r)
+            self._extra_widgets["cond_note"] = lb
+        if lack and not once:                           # 登録が無いときは、登録の画面へ進むのが普通の道。横に「今回だけ」
+            self._extra_widgets["act"] = self._act_button("登録する（次から自動で入ります）", self._cond_from_check)
+            o = QtWidgets.QPushButton("今回だけ手で入れる（登録しません）")
+            o.setObjectName("fallback")
+            o.setCursor(QtCore.Qt.PointingHandCursor)
+            o.clicked.connect(self._cond_once_from_check)
+            self.extra.addWidget(o)
+            self._extra_widgets["once"] = o
+        else:
+            r = QtWidgets.QPushButton("測り方を変える・登録し直す…")
+            r.setObjectName("sub")
+            r.setCursor(QtCore.Qt.PointingHandCursor)
+            r.clicked.connect(self._cond_from_check)
+            self.extra.addWidget(r)
         if hasattr(self.host, "easy_open_kind_conditions"):
             # モーター・駆動装置・フルクロの3種類をまとめて登録する画面（専用 Excel にも保存）。型式を渡して開く
             k = QtWidgets.QPushButton("種類別（モーター・駆動装置・フルクロ）にまとめて登録…")
@@ -1161,8 +1320,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             self.extra.addWidget(lb)
             panel = h.make_suffix_panel(self)
             panel.as_dialog = True
+            panel.setTitle("機番の末尾を選び直す（ここを押すと、表が別の窓で大きく開きます）")
             panel.blockSignals(True)
-            panel.setChecked(False)                 # 表はこの狭い札の中には広げない（押すと別の窓で大きく開く）
+            panel.setChecked(False)                 # 表はこの札の中には広げない（押すと別の窓で大きく開く）
             panel.blockSignals(False)
             panel.picker.setVisible(False)
 
@@ -1174,7 +1334,14 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                     _p.picker.setVisible(False)
                     h._open_suffix_dialog(True)
             panel.toggled.connect(_open)
+            panel.setVisible(False)                 # 小さい見出しのチェックではなく、はっきりしたボタンで開く（下）
             self.extra.addWidget(panel)
+            ob = QtWidgets.QPushButton("末尾の記号を選び直す…（社内の表が開きます。自動で選んだものでよければ、押さなくて大丈夫です）")
+            ob.setObjectName("fallback")
+            ob.setCursor(QtCore.Qt.PointingHandCursor)
+            ob.clicked.connect(lambda _c=False: h._open_suffix_dialog(True))
+            self.extra.addWidget(ob)
+            self._extra_widgets["suffix_open"] = ob
             self._save_name_lbl, self._suffix_panel = lb, panel
 
             h.register_save_name_label(lb)         # 末尾・機番が変わるたび、ホストが一斉に更新する（表の選択と必ず一致）
@@ -1291,9 +1458,14 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self._fill_kind_box()
         self._refresh()
 
-    def _cond_from_check(self):
+    def _cond_once_from_check(self):
+        """今回だけ手で入れる（登録しない）。値を入れる画面だけ通って、ここにもどる。"""
+        self._cond_from_check(once=True)
+
+    def _cond_from_check(self, _checked=False, once=False):
         """測るの流れの途中から、測り方の流れへ。終わったら、ここにもどる。"""
         self.ctx["cond_return"] = self.i
+        self.ctx["cond_once_flow"] = bool(once)
         self.ctx.update(cond_kind="one", cond_tilt=self._default_tilt(), cond_registered=False, cond_msgs=[])
         self.flow = "cond"
         self.history.append(self.i)
@@ -1939,7 +2111,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         c = self._all_ctx()
         st = self.st
         if sid == "home":                            # 入り口: 絵のタイルだけ
-            for w in (self.right_scroll, self.art_wrap, self.embed, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
+            for w in (self.right_scroll, self.art_wrap, self.embed, self.wide, self.status, self.b_next, self.b_back, self.b_pause, self.b_words, self.b_alarm, self.b_skip, self.lbl_count, self.bar):
                 w.setVisible(False)
             self.home.setVisible(True)
             self.b_back.setEnabled(False)
@@ -1953,9 +2125,13 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.b_words.setVisible(True)
         self._update_alarm_button()
         inside = sid == "machine_in" and self._wiz is not None
-        self.right_scroll.setVisible(not inside)
-        self.art_wrap.setVisible(not inside and sid != "result")      # 結果の段は、機番の末尾の表を広く見せるため、左の絵を外す
+        wide = self._wide_on(sid)                    # 測っています／こういう結果でした: 横いっぱい（本物のグラフ）
+        self._update_status(c, st)
+        self.status.setVisible(True)
+        self.right_scroll.setVisible(not inside and not wide)
+        self.art_wrap.setVisible(not inside and not wide and sid != "result")      # 保存の段は、機番の末尾の表を広く見せるため、左の絵を外す
         self.embed.setVisible(inside)
+        self.wide.setVisible(wide)
         self.b_skip.setVisible(sid == "machine_in" and not c.get("handoff") and self.flow == "measure")
         self.b_next.setVisible(not inside)
         self.lbl_count.setVisible(not inside)
@@ -1975,13 +2151,23 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         if sid == "measuring":
             cur, total = c.get("count") or (0, 0)
             wl = ("wait", f"{cur} ／ {total} か所" if total else "値を待っています…")
-            pg = self._extra_widgets.get("pg")
-            if pg is not None:
-                pg.setMaximum(max(1, total))
-                pg.setValue(cur)
+            if wide:
+                try:
+                    self.v_measure.refresh(self.host, c)
+                except Exception as e:
+                    self._notice = f"グラフを描けませんでした: {e}"
             if c.get("finished") and not self._pending_next:
                 self._pending_next = True
                 QtCore.QTimer.singleShot(1200, self._after_measuring)
+        if wide and sid in ("summary", "view_result"):
+            try:
+                if sid == "summary":
+                    self.v_summary.refresh(self.host, c.get("ng", 0), c.get("has_spec", False), c.get("ng_items") or [])
+                else:
+                    self.v_summary.refresh(self.host, c.get("view_ng", 0), c.get("view_spec", False),
+                                           c.get("view_ng_items") or [], can_remeasure=False)
+            except Exception as e:
+                self._notice = f"結果を出せませんでした: {e}"
         if sid == "start1" and not c.get("capturing") and not self._notice:
             wl = ("wait", "PC の取込を始めています…")
         if wl:
@@ -2014,6 +2200,8 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             enabled = bool(done)
         elif sid == "measuring":
             label, enabled = "測り終わるまで待ちます", False
+        elif sid == "summary":
+            label, go, enabled = "保存へ進む ▶", True, True
         elif sid == "finish":
             label, go, enabled = ("次の測定へ ▶" if c.get("next_mode") else "ホームへ"), True, True
             if self.rz is not None and not self.ctx.get("rz_return_mode"):
@@ -2112,8 +2300,65 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self.show_photo = self.b_photo.isChecked()
         self._refresh()
 
+    def _plan_html(self):
+        """これから測る中身（host.easy_plan。読むだけ）。出せなければ ""（絵のまま）。"""
+        try:
+            p = self.host.easy_plan()
+        except Exception:
+            return ""
+        if not p or not p.get("model") or not p.get("rows"):
+            return ""
+        try:
+            cs = self.host.easy_cond_state()
+        except Exception:
+            cs = {}
+        mode = str(p.get("mode") or "")
+        src = []
+        if "分割" in mode:
+            src.append(("分割", cs.get("div")))
+        if "再現" in mode:
+            src.append(("再現性", cs.get("rep")))
+        kinds = bool(p.get("kind"))
+        src_html = ""
+        for name, where in src:
+            if kinds:
+                src_html += f'<span style="color:#16864C;">✓ {name}: 種類別の登録（{p["kind"]}）から読み込みました</span><br>'
+            elif where in ("登録", "会社の一覧"):
+                src_html += f'<span style="color:#16864C;">✓ {name}: {"あなたの登録" if where == "登録" else "会社の一覧"}から読み込みました</span><br>'
+            elif self.ctx.get("cond_once") == p.get("model"):
+                src_html += f'<span style="color:#7A5200;">● {name}: 今回だけ、手で入れた値です（登録していません）</span><br>'
+            else:
+                src_html += f'<span style="color:#C8362B;">✕ {name}: この型式は、まだ登録がありません</span><br>'
+        rows = "".join(f'<tr><td style="padding:1px 18px 1px 0;">{label}</td><td align="right"><b>{n}</b> 点</td></tr>' for label, n in p["rows"])
+        k = getattr(self, "_scale_key", 1.0) or 1.0
+        f1, f2, f3 = int(23 * k), int(17 * k), int(14 * k)
+        html = (f'<div style="font-size:{f3}px; color:#5A6876; font-weight:700;">これから測る中身</div>'
+                f'<div style="font-size:{f1}px; font-weight:900;">{p["model"]}　{mode}</div>'
+                f'<div style="font-size:{f3}px; margin-top:4px;">{src_html}</div>'
+                f'<table style="font-size:{f2}px; margin-top:6px;">{rows}'
+                f'<tr><td style="padding-top:3px;"><b>全部で</b></td><td align="right" style="padding-top:3px;"><b>{p["total"]}</b> 点</td></tr></table>'
+                f'<div style="font-size:{f3}px; color:#5A6876;">{p.get("usual", "")}</div>')
+        if p.get("cond"):
+            html += f'<div style="font-size:{f3}px; margin-top:8px;"><b>測り方</b><br>' + "<br>".join(p["cond"]) + "</div>"
+        if p.get("spec"):
+            html += f'<div style="font-size:{f3}px; margin-top:8px;"><b>規格（これを超えると赤い字）</b><br>' + "<br>".join(p["spec"]) + "</div>"
+        if p.get("programs"):
+            html += (f'<div style="font-size:{f3}px; margin-top:8px;"><b>機械で動かすプログラム</b>　'
+                     + "・".join(flow_guide._o((n,)) for n in p["programs"]) + "</div>")
+        return html
+
     def _set_art(self, s, st, c, done, ph):
         """絵を出し、同じ内容の写真が `写真` フォルダにあれば、写真に切り替えられるようにする（無ければ絵のまま）。"""
+        plan = self._plan_html() if s["id"] in ("fields", "cond_check") else ""
+        if plan != getattr(self, "_plan_shown", None):
+            self._plan_shown = plan
+            self.lbl_plan.setText(plan)
+        self.lbl_plan.setVisible(bool(plan))
+        self.v_main.setVisible(not plan)
+        if plan:
+            self.v_map.setVisible(False)
+            self.b_photo.setVisible(False)
+            return
         self._set_art_svg(s, st, c, done, ph)
         path = None
         try:
@@ -2128,6 +2373,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                     self.b_photo.setVisible(False)
                 if s.get("part"):
                     self.v_map.setVisible(True)          # 操作盤の全体の絵（どこを触るか）は、写真のときも残す
+                if s.get("art") == "axis_detach":        # 写真は実物の場所、絵は「どの軸をどちらへ」。両方出す（写真のスイッチの向きは、撮ったときのもの）
+                    ax = [a for _k, a in (self.ctx.get("axes") or []) if a]
+                    self.v_main.set_below(easy_art.axis_detach("".join(str(a)[:1] for a in ax), self.manual, ph, on_side=easy_flow.DETACH_ON_SIDE, wide=True))
 
     def _set_art_svg(self, s, st, c, done, ph):
         sid = s["id"]
@@ -2159,7 +2407,8 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 progs = c.get("programs") or ()
                 svg = A.keys(self.manual, flow_guide._o(progs[:1]) or "O0100")
             elif z == "jog":
-                svg = A.jog(self.manual, ph)
+                oa = easy_flow.origin_axes(self.ctx.get("axes") or (), self.ctx.get("ref_axes"))
+                svg = A.jog(self.manual, ph, axis=oa[0][1] if oa else "")
             else:
                 svg = A.blank()
             self.v_main.set_svg(svg)
@@ -2186,6 +2435,9 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             svg = A.cond_dial(marks=self._cond_marks())
         elif art == "cond_reg":
             svg = A.cond_drawer()
+        elif art == "axis_detach":
+            ax = [a for _k, a in (self.ctx.get("axes") or []) if a]
+            svg = A.axis_detach("".join(str(a)[:1] for a in ax), self.manual, ph, on_side=easy_flow.DETACH_ON_SIDE)
         elif art == "params_manual":
             svg = A.params_manual()
         elif art == "prog_manual":
@@ -2255,7 +2507,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
     def _after_measuring(self):
         self._pending_next = False
         if STEPS[self.i]["id"] == "measuring" and self._hctx().get("finished"):
-            j = INDEX["result"]
+            j = INDEX["summary"]
             self.history.append(self.i)
             self._enter(j)
 
@@ -2320,6 +2572,10 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
         self._rz_after_wizard(res)
         if res.get("unit"):
             self.ctx["unit"] = res["unit"]
+        if res.get("axes"):                                # アプリが決めた軸（原点にもどす手順・上の帯に、そのまま出す）
+            self.ctx["axes"] = list(res["axes"])
+            self.ctx["ref_axes"] = list(res.get("ref_axes") or [])
+        self.ctx["ref_needed"] = bool(res.get("ref_needed"))
         if res.get("program_manual"):                      # 測定プログラムを送らなかったときは、機械で用意する
             self.ctx["prog"] = "manual"
         if res.get("program_handoff"):                     # 送ったとき: 型式・測り方を、送ったプログラムに合わせる

@@ -196,22 +196,75 @@ def keys(done, program="O0100"):
     return _zoom_frame(body, "押すキーの順番", bg=DARK)
 
 
-def jog(done, phase=0.0):
-    """軸選択のつまみ（R＝回転・T＝傾斜の印）と、「＋送り」「－送り」のボタン（23号機の操作盤の写真に合わせた。11/26）。"""
+def jog(done, phase=0.0, axis="", caption=None):
+    """軸選択のつまみ（X〜C 軸。上に R＝回転・T＝傾斜の手書きの印）と、「＋送り」「－送り」のボタン（23号機の操作盤の写真に合わせた。11/26）。
+    axis＝アプリが決めた軸の文字。渡すと、つまみがその軸を指し、その字が光る（人に探させない）。"""
+    letters = "XYZABC"
+    axis = str(axis or "").upper()[:1]
+    pick = letters.index(axis) if (axis and axis in letters) else None
     ticks = ""
-    for i, a in enumerate("XYZABC"):
+    for i, a in enumerate(letters):
         x, y = _pol(80, 120, 52, -75 + i * 30)
         tx, ty = _pol(80, 120, 74, -75 + i * 30)
-        ticks += f'<line x1="80" y1="120" x2="{x:.1f}" y2="{y:.1f}" stroke="{PANEL_EDGE}" stroke-width="2"/>' + _t(tx, ty + 5, 13, a)
+        on = pick == i
+        ticks += f'<line x1="80" y1="120" x2="{x:.1f}" y2="{y:.1f}" stroke="{HERE if on else PANEL_EDGE}" stroke-width="{4 if on else 2}"/>'
+        if on:
+            ticks += f'<circle cx="{tx:.1f}" cy="{ty:.1f}" r="13" fill="{HERE}"/>'
+        ticks += _t(tx, ty + 5, 13, a)
+    ang = -75 + (pick if pick is not None else 0) * 30
+    px, py = _pol(80, 120, 28, ang)
     body = (ticks + f'<circle cx="80" cy="120" r="30" fill="{DARK}"/>'
-            + f'<line x1="80" y1="120" x2="{_pol(80, 120, 28, -75)[0]:.1f}" y2="{_pol(80, 120, 28, -75)[1]:.1f}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>'
-            + _t(80, 182, 13, "軸選択（R/T の印）")
+            + f'<line x1="80" y1="120" x2="{px:.1f}" y2="{py:.1f}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>'
+            + _t(80, 182, 13, f"軸選択 →「{axis}軸」" if pick is not None else "軸選択（R/T の印）")
             + f'<circle cx="200" cy="96" r="26" fill="{HERE if not done else DARK}" stroke="{INK}" stroke-width="3"/>' + _t(200, 152, 14, "＋送り")
             + (_ring(200, 96, 36, phase) if not done else "")
             + f'<circle cx="262" cy="96" r="22" fill="{DARK}" stroke="{INK}" stroke-width="3"/>' + _t(262, 152, 14, "－送り")
-            + _t(150, 236, 15, "「＋送り」を押し続ける")
-            + _t(150, 270, 13, "原点にもどりました" if done else "止まるまで離さない"))
+            + _t(150, 236, 15, caption[0] if caption else "「＋送り」を押し続ける")
+            + _t(150, 270, 13, caption[1] if caption else ("原点にもどりました" if done else "止まるまで離さない")))
     return _zoom_frame(body, "軸を選んで、＋送りを押し続けて原点へもどす")
+
+
+def axis_detach(axis="", done=False, phase=0.0, on_side="下", wide=False):
+    """「軸取り外し」のスイッチの列（X〜C 軸。23号機の操作盤の写真に合わせた。11/26）。
+    axis＝アプリが決めた軸の文字（渡すと、そのスイッチが光り、有効の向きに倒れている。2軸の製品は "ZX" のように2文字）。
+    on_side＝有効の向き（"下" か "上"）。"""
+    letters = "XYZABC"
+    axes = [a for a in str(axis or "").upper() if a in letters]      # 2軸の製品は "ZX" のように2文字
+    picks = {letters.index(a) for a in axes}
+    sign = 1 if on_side == "下" else -1
+    body = (f'<line x1="22" y1="96" x2="278" y2="96" stroke="{INK}" stroke-width="2"/>'
+            f'<line x1="22" y1="96" x2="22" y2="104" stroke="{INK}" stroke-width="2"/>'
+            f'<line x1="278" y1="96" x2="278" y2="104" stroke="{INK}" stroke-width="2"/>'
+            + _t(150, 86, 16, "軸取り外し"))
+    for i, a in enumerate(letters):
+        x = 38 + i * 45
+        on = i in picks
+        d = sign if on else -sign                       # 選んだ軸だけ、有効の向き
+        body += _t(x, 120, 13, f"{a}軸", fill="#2A1E00" if on else INK)
+        if on:
+            body += f'<rect x="{x - 21}" y="104" width="42" height="128" rx="10" fill="{HERE}" opacity=".35"/>'
+        body += (f'<circle cx="{x}" cy="178" r="14" fill="#DADFE4" stroke="{PANEL_EDGE}" stroke-width="3"/>'
+                 f'<line x1="{x}" y1="178" x2="{x}" y2="{178 + d * 28}" stroke="{HERE if on else "#7B848D"}" stroke-width="8" stroke-linecap="round"/>'
+                 f'<circle cx="{x}" cy="{178 + d * 30}" r="8" fill="{HERE if on else "#EEF1F4"}" stroke="{INK}" stroke-width="2"/>')
+        if on and not done:
+            body += _ring(x, 178 + d * 30, 16, phase)
+    if picks:
+        names = "・".join(f"{a}軸" for a in axes)
+        body += _t(150, 256, 15, f"「{names}」だけ、{on_side}へ倒す（有効）")
+        body += _t(150, 280, 12, "ほかの軸は、そのまま")
+    else:
+        body += _t(150, 256, 15, f"製品をつないだ軸を、{on_side}へ倒す（有効）")
+        body += _t(150, 280, 12, "ほかの軸は、そのまま")
+    if wide:                                            # 写真の下に置く、横長の形（上下の空きを詰める）
+        return _svg(520, 240, f'<rect width="520" height="240" rx="16" fill="#B4BAC1"/><g transform="translate(110,-58)">{body}</g>',
+                    "軸取り外しのスイッチ。使う軸だけ有効にする")
+    return _zoom_frame(body, "軸取り外しのスイッチ。使う軸だけ有効にする")
+
+
+def hand_move():
+    """手で軸を動かすとき（ふだんは要らない）: 軸選択のつまみと、＋送り・－送り。"""
+    return jog(True, 0.0, caption=("手で動かすときだけ使います", "測定のときは使いません"))
+
 
 def counter(done, phase=0.0):
     """角度の表示器（HEIDENHAIN ND287）。画面の下の4つのボタンのうち、右はしが「ゼロセット」（会社の実物の写真に合わせた。11/26）。"""

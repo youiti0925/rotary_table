@@ -477,6 +477,9 @@ class TestEasyStep(TestHost):
     def test_model_without_kinds_is_unchanged(self):
         dlg, F = self.open_step("NO-KINDS")
         self.assertEqual(dlg._kind_btns if hasattr(dlg, "_kind_btns") else {}, {})
+        # 登録が無い型式は、登録するか「今回だけ手で入れる」を済ませるまで進めない（2026-11-26 利用者）
+        self.assertFalse(F.done_now("cond_check", dlg.st, dlg._all_ctx()))
+        dlg.ctx["cond_once"] = "NO-KINDS"
         self.assertTrue(F.done_now("cond_check", dlg.st, dlg._all_ctx()))
 
     def test_result_step_has_suffix_table_sharing_selection(self):

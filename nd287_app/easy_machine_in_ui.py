@@ -499,6 +499,12 @@ class MachineInPanel(QtWidgets.QWidget):
                "unit": self.unit, "program_manual": not self.prog_sent, "panel": True,
                "semi_written": any(self.semi_on(i) for i in range(len(self.products))),       # 連続測定: 実際にセミクロの値で書いたか
                "has_full_product": any(o.get("full") for o in self.semi_opts)}
+        try:                                                  # アプリが決めた軸（種別, 軸の文字）。はじめてモードの「原点にもどす」と上の帯が、そのまま出す
+            out["axes"] = [(str(r.get("kind") or ""), str(r.get("axis") or "")) for r in (self.rows or []) if r.get("axis")]
+            out["ref_axes"] = [a for a in (self.ref_axes or []) if a]
+            out["ref_needed"] = bool(self.ref_axes)             # 書いた結果として、原点の決め直しが要る（APZ が変わる／DS0300 が出た）
+        except Exception:
+            pass
         if self.prog_sent and self.prog_plan:                 # 送ったプログラムに合わせて、測定の画面の型式・測り方を入れる
             out["program_handoff"] = WP.handoff(self._masters(), self._model(), self.prog_plan)
         return out

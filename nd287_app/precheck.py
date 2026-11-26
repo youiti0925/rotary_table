@@ -20,7 +20,7 @@ def checks(*, nd_ok, nd_dummy, missing, model, has_conditions, same_saved=None, 
     """
     out = []
     if nd_dummy:
-        out.append(dict(level="note", text="表示器は練習用です（本物の値は入りません）。"))
+        out.append(dict(level="note", text="表示器はダミーです（本物の値は入りません）。"))
     elif nd_ok:
         out.append(dict(level="ok", text="表示器とつながっています。"))
     else:

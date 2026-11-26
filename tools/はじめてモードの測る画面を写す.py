@@ -28,7 +28,10 @@ lines = []
 
 def say(s):
     lines.append(str(s))
-    print(s)
+    try:
+        print(s)
+    except UnicodeEncodeError:                                   # 会社PCの黒い画面（cp932）は「✕」などを出せない。結果.txt には全部残る
+        print(str(s).encode("cp932", "replace").decode("cp932"))
 
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

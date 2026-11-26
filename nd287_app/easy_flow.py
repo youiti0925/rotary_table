@@ -195,9 +195,9 @@ def detach_lines(axes=()):
                 [f"操作盤の「軸取り外し」の列で、製品をつないだ軸のスイッチを、{side}向き（有効）にします。",
                  "ほかの軸のスイッチは、そのままにします。"])
     names = "・".join(f"{a}軸" for _k, a in axes)
-    what = "　".join(f"「{a}軸」{('（' + k + '）') if k else ''}" for k, a in axes)
+    what = "と".join(f"「{a}軸」{('（' + k + '）') if k else ''}" for k, a in axes)
     return (f"{names}の「軸取り外し」を、有効にする",
-            [f"操作盤の「軸取り外し」の列の {what} のスイッチを、{side}向き（有効）にします。",
+            [f"操作盤の「軸取り外し」の列の{what}のスイッチを、{side}向き（有効）にします。",
              "軸は、アプリがこの製品に決めました。ほかの軸は、そのままにします。"])
 
 

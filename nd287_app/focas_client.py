@@ -232,6 +232,9 @@ class FocasClient:
         return self._proc.pid if self._proc is not None else None
 
     def start(self):
+        if os.environ.get("ND287_PRACTICE_DIR"):          # 練習モードでは機械につながない
+            from .practice import refuse_machine
+            raise refuse_machine()
         with self._lock:
             self._check_aborted()
             if self.alive:

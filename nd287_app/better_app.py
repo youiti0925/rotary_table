@@ -14,7 +14,7 @@ gui.py には「ボタン1つ」と attach() の1行だけを足し、中身は�
 """
 from __future__ import annotations
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtWidgets
 
 from . import main_top, result_guide as RG
 
@@ -36,11 +36,29 @@ class Better(QtCore.QObject):
             self.act_growth = menu.addAction("登録の育ち具合…")
             self.act_growth.setToolTip("何が何件登録されていて、それで何が自動になっているか・次に何を登録すると楽になるか")
             self.act_growth.triggered.connect(self.open_growth)
+            from . import practice
+            if not practice.active():                  # 練習モード（本番を汚さない別の窓）を開く
+                self.act_practice = menu.addAction("練習モードで開く…")
+                self.act_practice.setToolTip("本番の設定・マスタ・測定データ・機械に触れない練習用の窓を、別に開きます")
+                self.act_practice.triggered.connect(lambda _c=False: practice.launch(None))
+        self._mark_practice()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.tick)
         self.timer.start()
         self.tick()
+
+    def _mark_practice(self):
+        """練習モードなら、窓の題名と下の帯に、はっきり出す。"""
+        from . import practice
+        if not practice.active():
+            return
+        w = self.win
+        w.setWindowTitle("【練習モード】ND287 分割測定 — 本番の設定・データ・機械には触れません")
+        lab = QtWidgets.QLabel("  練習モード（保存・登録は練習の場所へ。機械にはつなぎません）  ")
+        lab.setStyleSheet("background:#FDE68A; color:#7C2D12; font-weight:bold; padding:2px 8px; border-radius:4px;")
+        w.statusBar().insertPermanentWidget(0, lab)
+        self.practice_label = lab
 
     # 1秒ごと。状態を読むだけ
     def tick(self):

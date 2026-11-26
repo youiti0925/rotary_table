@@ -29,6 +29,12 @@ def main():
         from .cli_write import main as cli_main
         rest = [a for a in sys.argv[1:] if a != "--cli-write"]
         sys.exit(cli_main(rest))
+    practice = "--practice" in sys.argv[1:]
+    if practice:                    # 練習モード: 本番の設定・マスタ・測定データ・機械を汚さない（practice.py）
+        sys.argv = [a for a in sys.argv if a != "--practice"]
+        from .practice import prepare
+        from .settings import app_dir as _real_dir
+        prepare(_real_dir())
     ap = argparse.ArgumentParser(description="ND287 分割測定アプリ")
     ap.add_argument(
         "--port",
@@ -51,7 +57,7 @@ def main():
     baud = args.baud or settings["baudrate"]
     parity = args.parity or settings["parity"]
 
-    device = DummyDevice() if args.dummy else ND287Device(port, baud, parity)
+    device = DummyDevice() if (args.dummy or practice) else ND287Device(port, baud, parity)
 
     from .gui import run
 

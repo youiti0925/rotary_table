@@ -238,6 +238,9 @@ DEFAULTS = dict(
 
 
 def app_dir() -> Path:
+    import os
+    if os.environ.get("ND287_PRACTICE_DIR"):          # 練習モード: アプリの隣の「練習」を、アプリの場所として使う（practice.py）
+        return Path(os.environ["ND287_PRACTICE_DIR"])
     if getattr(sys, "frozen", False):  # PyInstaller製exe
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent

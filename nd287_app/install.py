@@ -24,6 +24,7 @@ from pathlib import Path
 INSTALL_DIR_NAME = "ND287分割測定"
 EXE_NAME = "nd287_bunkatsu.exe"
 SHORTCUT_NAME = "ND287分割測定.lnk"
+PRACTICE_SHORTCUT_NAME = "ND287分割測定（練習）.lnk"
 MASTER = "マスタ"
 BASIC = "BASIC"                       # 配布セットに入れる BASIC（号機ごとの基本パラメータ）
 # app\\ から写すとき別扱いにするもの（無いファイルだけ入れる。このPCで直したものを上書きしない）
@@ -214,7 +215,7 @@ def migrate(old, dst):
 # ショートカット（Windows の IShellLink を ctypes で呼ぶ。PowerShell を使わない）
 # ---------------------------------------------------------------------------
 
-def create_shortcut(lnk, target, workdir="", desc=""):
+def create_shortcut(lnk, target, workdir="", desc="", args=""):
     import ctypes
     from ctypes import HRESULT, POINTER, WINFUNCTYPE, byref, c_int, c_void_p, c_wchar_p
 
@@ -247,6 +248,8 @@ def create_shortcut(lnk, target, workdir="", desc=""):
             method(link, 9, c_wchar_p)(str(workdir))             # SetWorkingDirectory
         if desc:
             method(link, 7, c_wchar_p)(str(desc))                # SetDescription
+        if args:
+            method(link, 11, c_wchar_p)(str(args))               # SetArguments
         pf = c_void_p()
         iid_pf = guid("{0000010B-0000-0000-C000-000000000046}")          # IPersistFile
         method(link, 0, c_void_p, POINTER(c_void_p))(ctypes.addressof(iid_pf), byref(pf))  # QueryInterface
@@ -311,11 +314,13 @@ def install(src, dst=None, *, roots=None, shortcuts=True, make_shortcut=None):
         for place in shortcut_places():
             try:
                 mk(place / SHORTCUT_NAME, dst / EXE_NAME, dst, "ND287 分割測定アプリ")
+                mk(place / PRACTICE_SHORTCUT_NAME, dst / EXE_NAME, dst,
+                   "ND287 分割測定アプリ（練習モード。本番の設定・データ・機械を汚さない）", "--practice")
                 made.append(str(place))
             except Exception as e:                       # ショートカットが作れなくてもアプリは入っている
                 lines.append(f"ショートカットを作れませんでした（{place}）: {e}")
         if made:
-            lines.append("ショートカット: デスクトップ・スタートメニューの「ND287分割測定」")
+            lines.append("ショートカット: デスクトップ・スタートメニューの「ND287分割測定」と「ND287分割測定（練習）」")
     head = f"ND287 分割測定アプリを{'更新しました' if update else '入れました'}。\n場所: {dst}"
     return [head] + lines
 

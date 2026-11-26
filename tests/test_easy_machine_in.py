@@ -348,10 +348,10 @@ class TestPanel(PanelBase):
         btn = batt[0][1][0]
         self.assertEqual(btn.text(), "この機械では無視する")
         self.assertEqual(self.settings.get("alarm_ignore") or {}, {})          # 押すまでは、何も変えない
-        self.assertEqual(self.saved, [])
+        before = len(self.saved)                                               # 号機を選んだことは覚えて保存する（11/26）。無視はまだ
         btn.click()
         self.assertEqual(self.settings["alarm_ignore"], {"23": ["DS0307"]})   # 既存の設定（号機ごと）に残す
-        self.assertEqual(self.saved, [1])                                      # 既存の保存の道
+        self.assertEqual(len(self.saved), before + 1)                          # 既存の保存の道
         bands = self.band_buttons(p)
         self.assertFalse(any("電池" in b[0] for b in bands))
         self.assertTrue(any(b[0] == "無視中: DS0307" for b in bands), bands)

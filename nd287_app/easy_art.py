@@ -206,21 +206,23 @@ def jog(done, phase=0.0):
     body = (ticks + f'<circle cx="80" cy="120" r="30" fill="{DARK}"/>'
             + f'<line x1="80" y1="120" x2="{_pol(80, 120, 28, -75)[0]:.1f}" y2="{_pol(80, 120, 28, -75)[1]:.1f}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>'
             + _t(80, 182, 13, "軸選択（R/T の印）")
-            + f'<circle cx="200" cy="96" r="26" fill="{HERE if not done else DARK}" stroke="{INK}" stroke-width="3"/>' + _t(200, 140, 14, "＋送り")
+            + f'<circle cx="200" cy="96" r="26" fill="{HERE if not done else DARK}" stroke="{INK}" stroke-width="3"/>' + _t(200, 152, 14, "＋送り")
             + (_ring(200, 96, 36, phase) if not done else "")
-            + f'<circle cx="262" cy="96" r="22" fill="{DARK}" stroke="{INK}" stroke-width="3"/>' + _t(262, 140, 14, "－送り")
+            + f'<circle cx="262" cy="96" r="22" fill="{DARK}" stroke="{INK}" stroke-width="3"/>' + _t(262, 152, 14, "－送り")
             + _t(150, 236, 15, "「＋送り」を押し続ける")
             + _t(150, 270, 13, "原点にもどりました" if done else "止まるまで離さない"))
     return _zoom_frame(body, "軸を選んで、＋送りを押し続けて原点へもどす")
 
 def counter(done, phase=0.0):
-    body = (f'<rect x="24" y="50" width="252" height="150" rx="12" fill="{DARK}"/>'
-            f'<rect x="40" y="66" width="220" height="70" rx="6" fill="#0C1F14"/>'
-            + _t(250, 116, 40, "0.0000" if done else "0.0132", "end", "#7CF0A0")
-            + f'<rect x="40" y="148" width="70" height="38" rx="6" fill="{HERE}"/>' + _t(75, 173, 15, "0にする")
-            + f'<rect x="124" y="148" width="60" height="38" rx="6" fill="{KEY}"/><rect x="198" y="148" width="60" height="38" rx="6" fill="{KEY}"/>'
-            + ("" if done else _ring(75, 167, 46, phase)) + _t(150, 236, 15, "角度の表示器")
-            + _t(150, 276, 14, "0 になりました" if done else "黄色のキーを押して 0 にする"))
+    """角度の表示器（HEIDENHAIN ND287）。画面の下の4つのボタンのうち、右はしが「ゼロセット」（会社の実物の写真に合わせた。11/26）。"""
+    body = (f'<rect x="16" y="40" width="268" height="168" rx="12" fill="{DARK}"/>'
+            f'<rect x="30" y="54" width="240" height="96" rx="6" fill="#DDE6F2"/>'
+            + _t(258, 112, 30, "0°00'00.0\"" if done else "0°00'47.5\"", "end", "#1560D4")
+            + "".join(f'<rect x="{34 + k * 60}" y="128" width="54" height="18" fill="#C9D3E0"/>' for k in range(4))
+            + _t(121, 142, 10, "基準点", fill=FG) + _t(181, 142, 10, "設定", fill=FG) + _t(241, 142, 10, "ゼロセット", fill=FG)
+            + "".join(f'<rect x="{40 + k * 60}" y="162" width="42" height="34" rx="6" fill="{HERE if k == 3 else KEY}"/>' for k in range(4))
+            + ("" if done else _ring(241, 179, 32, phase)) + _t(150, 236, 15, "角度の表示器（ND287）")
+            + _t(150, 276, 14, "0 になりました" if done else "右はしの「ゼロセット」を押す"))
     return _zoom_frame(body, "角度の表示器を0にする", bg="#D9DDE1")
 
 
@@ -235,6 +237,8 @@ def scene(phase=0.0):
             f'<rect x="10" y="194" width="178" height="12" rx="6" fill="{PANEL_EDGE}"/>' + _t(99, 236, 15, "PC", fill=FG)
             + f'<path d="M188 150 C240 150 250 110 316 110" fill="none" stroke="{HERE}" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 12"/>'
             + _t(250, 98, 13, "LAN ケーブル", fill=FG)
+            + f'<circle cx="188" cy="150" r="7" fill="#1560D4"/><circle cx="316" cy="110" r="7" fill="#B45309"/>'
+            + _t(196, 178, 13, "①PC側の LAN 口", "start", fill="#1560D4") + _t(406, 30, 13, "②制御装置側の LAN 口", fill="#B45309")
             + f'<rect x="316" y="40" width="180" height="150" rx="12" fill="{PANEL}" stroke="{PANEL_EDGE}" stroke-width="3"/>'
             f'<rect x="330" y="54" width="90" height="64" rx="4" fill="#0F2A3A"/><circle cx="460" cy="150" r="16" fill="{RED}"/>'
             f'<circle cx="356" cy="150" r="14" fill="{DARK}"/><circle cx="400" cy="150" r="14" fill="{DARK}"/>' + _t(406, 216, 15, "機械（制御装置）", fill=FG)

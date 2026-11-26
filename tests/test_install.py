@@ -39,7 +39,7 @@ class Base(unittest.TestCase):
 
     def run_install(self, **kw):
         kw.setdefault("roots", [(self.home / "Documents", 4), (self.home / "Downloads", 4)])
-        kw.setdefault("make_shortcut", lambda lnk, target, wd, desc: self.links.append((lnk, target)))
+        kw.setdefault("make_shortcut", lambda lnk, target, wd, desc, args="": self.links.append((lnk, target)))
         self.last_lines = I.install(self.src, self.dst, **kw)
         return self.last_lines
 

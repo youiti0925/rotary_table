@@ -6409,6 +6409,7 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_ctrl.setToolTip("製品の必要容量を満たす制御装置だけ出します。選ぶと使う軸を自動割当。"
                                  "傾斜＋回転を両方選ぶと2軸とも載る号機、片方なら1軸でよい号機が出ます")
         self.cmb_ctrl.currentIndexChanged.connect(self._on_ctrl_changed)
+        self.cmb_ctrl.activated.connect(self._remember_ctrl)        # 人が選んだ号機は覚える（次に開いたとき初めから選ぶ）
         f2.addRow("制御装置", self.cmb_ctrl)
         self.lbl_assign = QtWidgets.QLabel("")
         self.lbl_assign.setWordWrap(True)
@@ -6487,6 +6488,9 @@ class ParamWizardDialog(QtWidgets.QDialog):
         self.cmb_motor.currentIndexChanged.connect(
             lambda _i: self.e_motor_id.setEnabled(self.cmb_motor.currentData() == "temp"))
         self.fm.addRow("仮モーターの番号", self.e_motor_id)
+        self.cmb_motor.activated.connect(lambda _i: self._remember_motor())
+        self.e_motor_id.editingFinished.connect(self._remember_motor)
+        QtCore.QTimer.singleShot(0, self._restore_last_motor)       # 前回選んだモーター（機械から決まれば、そちらが勝つ）
         self.e_motor_id2 = QtWidgets.QLineEdit()         # 2軸テーブルの2つ目の製品の仮モーターの番号
         self.e_motor_id2.setPlaceholderText("仮モーターの番号（2020）。空でも進めます")
         self.e_motor_id2.setToolTip("傾斜＋回転の2製品を選んだとき、2つ目の製品に付けた仮モーターの番号（パラメータ 2020）。"
@@ -8153,6 +8157,15 @@ class ParamWizardDialog(QtWidgets.QDialog):
                        [i for i, (c, a) in enumerate(self._cand) if str(c.unit) == prev[0]]
                 if same:
                     self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(same[0]))
+            cur = self.cmb_ctrl.currentData()
+            if (cur is None or cur < 0) and not conn_unit:
+                last = (self.settings.get("last_ctrl") or {}) if hasattr(self.settings, "get") else {}
+                lu, la = str(last.get("unit") or ""), list(last.get("axes") or [])
+                same = [i for i, (c, a) in enumerate(self._cand) if str(c.unit) == lu and list(a) == la] or \
+                       [i for i, (c, a) in enumerate(self._cand) if lu and str(c.unit) == lu]
+                if same:
+                    self.cmb_ctrl.setCurrentIndex(self.cmb_ctrl.findData(same[0]))
+                    self.lbl_need.setText(self.lbl_need.text() + f"\n前回選んだ {lu}号機を選んであります（違えば選び直せます）。")
             if conn_unit:
                 self.lbl_need.setText(self.lbl_need.text() + "\n" + self._conn_unit_note(conn_unit, conn_units))
         self._ctrl_auto_pick = len(self._cand) == 1
@@ -8162,6 +8175,41 @@ class ParamWizardDialog(QtWidgets.QDialog):
     def _on_motor_id_changed(self, *_):
         self._show_motor_info()
         self._update_candidates()
+
+    # ----- 選んだことを覚える（次に開いたとき、初めから選ばれている。選び直せる） -----
+    def _remember(self, key, value):
+        try:
+            if self.settings.get(key) != value:
+                self.settings[key] = value
+                save_settings(self.settings)
+        except Exception:
+            pass
+
+    def _remember_ctrl(self, *_):
+        idx = self.cmb_ctrl.currentData()
+        if idx is not None and 0 <= idx < len(self._cand):
+            c, a = self._cand[idx]
+            self._remember("last_ctrl", {"unit": str(c.unit), "axes": list(a)})
+
+    def _remember_motor(self, *_):
+        kind = self.cmb_motor.currentData() or ""
+        if kind:
+            self._remember("last_motor", {"kind": kind, "id": self.e_motor_id.text().strip() if kind == "temp" else ""})
+
+    def _restore_last_motor(self):
+        try:
+            last = self.settings.get("last_motor") or {}
+            if self.cmb_motor.currentData() or self._motor_by_user or not last.get("kind"):
+                return
+            i = self.cmb_motor.findData(last["kind"])
+            if i < 0:
+                return
+            self.cmb_motor.setCurrentIndex(i)
+            if last["kind"] == "temp" and last.get("id") and not self.e_motor_id.text().strip():
+                self.e_motor_id.setText(str(last["id"]))
+            self.cmb_motor.setToolTip(self.cmb_motor.toolTip().split("\n（前回")[0] + "\n（前回選んだものを入れてあります。違えば選び直せます）")
+        except RuntimeError:
+            pass
 
     def _product_capacity(self):
         sel = self._selected_files()
@@ -13467,6 +13515,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_date.setCalendarPopup(True)
         self.e_operator = QtWidgets.QLineEdit()
         self.e_operator.setPlaceholderText("測定者")
+        self.e_operator.setText(str((settings.get("last_operator") or "") if hasattr(settings, "get") else ""))   # 前回の名前（打ち直せる）
+        self.e_operator.editingFinished.connect(self._remember_operator)
         self.e_temp = QtWidgets.QLineEdit()
         self.e_temp.setPlaceholderText("23.5")
         self.e_temp.setValidator(QtGui.QDoubleValidator(-20.0, 60.0, 2))
@@ -14802,6 +14852,16 @@ class MainWindow(QtWidgets.QMainWindow):
             except RuntimeError:
                 pass
 
+    def _remember_operator(self):
+        """名前（測定者）を覚える。次に開いたとき初めから入っている（打ち直せる）。"""
+        name = self.e_operator.text().strip()
+        try:
+            if name and self.settings.get("last_operator") != name:
+                self.settings["last_operator"] = name
+                save_settings(self.settings)
+        except Exception:
+            pass
+
     def _on_kind_button(self, kind):
         self._kind_user_none = not kind
         self.measure_kind = kind or ""
@@ -14809,7 +14869,9 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 lk = dict(self.settings.get("last_kinds") or {})
                 lk[self.e_model.text().strip().upper()] = kind
-                self.settings["last_kinds"] = lk
+                if self.settings.get("last_kinds") != lk:
+                    self.settings["last_kinds"] = lk
+                    save_settings(self.settings)            # 次に開いたときも、この型式はこの種類から（選び直せる）
             except Exception:
                 pass
         self.refresh_kind_choices()

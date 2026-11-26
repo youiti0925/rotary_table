@@ -63,6 +63,9 @@ class Planner:
         w.search()
         self._pairs = {}
         out = []
+        # FANUC 以外（三菱 MELDAS など）の製品は、ここでは作れない。見つかったことは伝える（「見つからない」と言わない）
+        self.other_systems = sorted({str((f.get("meta") or {}).get("system") or "") for f in w._files
+                                     if (f.get("meta") or {}).get("system", "FANUC") != "FANUC"} - {""})
         for f in w._files:
             if not (f.get("chk") and f["chk"].isChecked()):
                 continue
@@ -965,7 +968,12 @@ class MachineInPanel(QtWidgets.QWidget):
         self._refresh_semi()
         if not self.products:
             self._render()
-            self._msg("この番号の製品データが見つかりません（FANUC の製品だけ、ここでは使えます）", RED)
+            other = list(getattr(self.planner, "other_systems", []) or [])
+            if other:
+                self._msg(f"この番号の製品は {'・'.join(other)} 用です。ここ（FANUC の製品だけ）では機械に入れられません。"
+                          "もどって「パラメータ: 自分で打つ」を選び、パラメータ表（紙）を見ながら機械で打ってください。", AMBER)
+            else:
+                self._msg("この番号の製品データが見つかりません（FANUC の製品だけ、ここでは使えます）", RED)
             return
         models = [p["model"] for p in self.products if p["model"]]
         if models and self.env.get("set_model"):
@@ -1014,7 +1022,16 @@ class MachineInPanel(QtWidgets.QWidget):
             if u == self.unit:
                 lst.setCurrentItem(it)
         lst.setFixedHeight(min(len(units), 6) * int(self._fs(40)) + 12)
-        lst.currentItemChanged.connect(lambda cur, _prev: self._apply_unit(cur.data(QtCore.Qt.UserRole), render=True) if cur else None)
+        lst.currentItemChanged.connect(lambda cur, _prev: self._pick_unit(cur.data(QtCore.Qt.UserRole)) if cur else None)
+        last = str((self.settings.get("last_ctrl") or {}).get("unit") or "") if hasattr(self.settings, "get") else ""
+        if not self.unit and last in units and not self.known_units:
+            self._apply_unit(last, render=True)                    # 前回選んだ号機を、初めから選んでおく（選び直せる）
+            for i in range(lst.count()):
+                if lst.item(i).data(QtCore.Qt.UserRole) == last:
+                    lst.blockSignals(True)
+                    lst.setCurrentRow(i)
+                    lst.blockSignals(False)
+            self._lab(f"前回選んだ {last}号機を選んであります。目の前の機械と違えば、選び直してください。", f"color:#5A6876; font-size:{self._fs(13)}px;")
         self.extra.addWidget(lst)
         self.lst_unit = lst
 
@@ -1094,6 +1111,18 @@ class MachineInPanel(QtWidgets.QWidget):
             self._msg(str(e), RED)
             return
         self.job, self._job_error = None, ""
+
+    def _pick_unit(self, unit):
+        """人が号機を選んだ。覚えておく（次に開いたとき、初めから選ばれている）。"""
+        self._apply_unit(unit, render=True)
+        try:
+            if unit and (self.settings.get("last_ctrl") or {}).get("unit") != str(unit):
+                self.settings["last_ctrl"] = {"unit": str(unit), "axes": []}
+                save = self.env.get("save_settings")
+                if save:
+                    save()
+        except Exception:
+            pass
 
     def _apply_unit(self, unit, keep_rd=False, render=False):
         """号機を替える。つないで確かめた機械は、号機が違えば確かめ直し（keep_rd は、同じ仕様の別の号機に替えるとき）。"""

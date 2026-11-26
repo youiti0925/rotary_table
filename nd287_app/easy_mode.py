@@ -2329,7 +2329,10 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
                 src_html += f'<span style="color:#7A5200;">● {name}: 今回だけ、手で入れた値です（登録していません）</span><br>'
             else:
                 src_html += f'<span style="color:#C8362B;">✕ {name}: この型式は、まだ登録がありません</span><br>'
-        rows = "".join(f'<tr><td style="padding:1px 18px 1px 0;">{label}</td><td align="right"><b>{n}</b> 点</td></tr>' for label, n in p["rows"])
+        # 向きごとの点数は2つずつ横に並べる（縦に並べると、会社PC 150% で下の「規格」の行が箱から切れた。2026-11-26）
+        cell = lambda label, n: f'<td style="padding:1px 14px 1px 0;">{label}</td><td align="right" style="padding-right:34px;"><b>{n}</b> 点</td>'
+        rr = list(p["rows"])
+        rows = "".join("<tr>" + "".join(cell(l, n) for l, n in rr[i:i + 2]) + "</tr>" for i in range(0, len(rr), 2))
         k = getattr(self, "_scale_key", 1.0) or 1.0
         f1, f2, f3 = int(23 * k), int(17 * k), int(14 * k)
         html = (f'<div style="font-size:{f3}px; color:#5A6876; font-weight:700;">これから測る中身</div>'

@@ -1089,6 +1089,7 @@ class EasyModeDialog(RenzokuMixin, QtWidgets.QDialog):
             if self.rz is not None and self.rz.is_last and not self.ctx.get("rz_return_mode"):
                 self._act_button("つぎの1台へ（載せ替え）", self._rz_next_unit)
         elif sid == "fields":
+            self.lbl_lines.setVisible(False)            # 型式と測り方は左の箱に出ている。ここで重ねて言うと、温度の欄が札の下にはみ出す（会社PCで20）
             self._build_fields()
         elif sid == "open_past":
             self._extra_widgets["act"] = self._act_button("結果をさがす…", self._open_past)

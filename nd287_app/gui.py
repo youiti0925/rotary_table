@@ -16117,7 +16117,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 for j in range(tbl.columnCount()):
                     it = tbl.item(i, j)
                     if it is not None and it.foreground().color().name().lower() == "#dc2626":
-                        name = " ".join(x for x in (first if j else "", heads[j]) if x) or first
+                        if j == 0:          # 行の名前そのものが赤い行（総合バックラッシの行など）: 見出し「項目」を名前にしない
+                            out.append((it.text() or f"{i + 1}行目", ""))
+                            continue
+                        name = " ".join(x for x in (first, heads[j]) if x) or first
                         out.append((name or f"{i + 1}行目", it.text()))
         return out
 

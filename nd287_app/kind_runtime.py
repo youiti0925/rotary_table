@@ -98,7 +98,7 @@ def problems_text(table, model=None):
     ps = [str(x).replace("rotary:", "回転:").replace("tilt:", "傾斜:") for x in K.problems_for(table, model)]
     if not ps:
         return ""
-    head = "測定条件（種類別）の表に問題があります: "
+    head = "種類別の表に問題: "                  # 短く（状態欄で、肝心の「何が」が「…」に隠れないように。11/26）
     return head + " ／ ".join(ps[:3]) + (f" ほか{len(ps) - 3}件" if len(ps) > 3 else "")
 
 

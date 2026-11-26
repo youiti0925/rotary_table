@@ -14579,8 +14579,8 @@ class MainWindow(QtWidgets.QMainWindow):
         text = KR.problems_text(self.kind_table, model or None)
         lb = getattr(self, "lbl_kind_problem", None)
         if lb is not None:
-            lb.setMaximumWidth(520)                              # 長い文で窓の幅・高さを押し広げない（全文は吹き出し）
-            lb.setText(lb.fontMetrics().elidedText(text, QtCore.Qt.ElideRight, 500))
+            lb.setMaximumWidth(680)                              # 長い文で窓の幅・高さを押し広げない（全文は吹き出し）
+            lb.setText(lb.fontMetrics().elidedText(text, QtCore.Qt.ElideRight, 660))
             lb.setToolTip("\n".join(KR.K.problems_for(self.kind_table, model or None)))
             lb.setVisible(bool(text))
         return text

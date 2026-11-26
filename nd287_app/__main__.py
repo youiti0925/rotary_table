@@ -9,6 +9,7 @@
     python -m nd287_app --dummy            # 実機なしで画面確認
     python -m nd287_app --port COM3 --baud 19200 --parity N
     nd287_bunkatsu.exe --install [--quiet]  # このPCに入れる（配布セットの インストール.bat から）
+    nd287_bunkatsu.exe --self-shots <フォルダ>   # 自分の画面を写して閉じる（練習の場所。self_shots.py）
     nd287_bunkatsu.exe --cli-write plan|write|check|status ...   # 機械へ書く（画面なし。cli_write.py）
 """
 
@@ -29,6 +30,15 @@ def main():
         from .cli_write import main as cli_main
         rest = [a for a in sys.argv[1:] if a != "--cli-write"]
         sys.exit(cli_main(rest))
+    # 入れたアプリ自身に、自分の画面を写させる（self_shots.py。練習の場所で動く。本番を書かない・機械につながない）
+    if "--self-shots" in sys.argv[1:]:
+        i = sys.argv.index("--self-shots")
+        out = sys.argv[i + 1] if len(sys.argv) > i + 1 else "画面の写真"
+        from .practice import prepare
+        from .settings import app_dir as _real_dir
+        prepare(_real_dir())
+        from .self_shots import run as shots_run
+        sys.exit(shots_run(out, load_settings()))
     practice = "--practice" in sys.argv[1:]
     if practice:                    # 練習モード: 本番の設定・マスタ・測定データ・機械を汚さない（practice.py）
         sys.argv = [a for a in sys.argv if a != "--practice"]

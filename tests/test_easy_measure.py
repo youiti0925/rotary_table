@@ -183,5 +183,16 @@ class TestRealScreens(unittest.TestCase):
         self.assertEqual(d.b_next.text(), "保存へ進む ▶")
 
 
+
+class TestSelfShotsEntry(unittest.TestCase):
+    def test_exe_has_the_self_shot_entry_and_it_runs_in_the_practice_place(self):
+        """入れたアプリ自身に画面を写させる入口。練習の場所を用意してから動く（本番を書かない）。"""
+        src = (Path(__file__).parent.parent / "nd287_app" / "__main__.py").read_text(encoding="utf-8")
+        i, j = src.index('"--self-shots" in sys.argv'), src.index('practice = "--practice"')
+        self.assertLess(i, j)
+        self.assertIn("prepare(_real_dir())", src[i:j])
+        from nd287_app import self_shots
+        self.assertTrue(callable(self_shots.run))
+
 if __name__ == "__main__":
     unittest.main()

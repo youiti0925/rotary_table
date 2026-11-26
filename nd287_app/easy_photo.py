@@ -19,7 +19,8 @@ NAMES = {
     "knob": "早送りの倍率のつまみ",
     "start": "起動のボタンと、送り停止のボタン",
     "keys": "キー（プログラムの呼び出しに使うキー・リセット）",
-    "jog": "手で動かすボタン（＋B など）",
+    "jog": "軸選択のつまみと「＋送り」「－送り」のボタン",
+    "param_sheet": "パラメータ表（紙）",
     "counter": "表示器と、0 にするキー",
     "table": "回転テーブルと測定器の取り付け",
     "alarm": "機械の画面の、アラームが出る所",
@@ -30,6 +31,7 @@ FOR_ART = {
     "power": "power", "power_cycle": "power", "estop": "estop", "estop_press": "estop", "dial": "dial",
     "knob": "knob", "start": "start", "start_again": "start", "keys": "keys", "jog": "jog",
     "counter": "counter", "scene": "scene", "table": "table", "measure": "table", "alarm": "alarm",
+    "params_manual": "param_sheet",
 }
 
 

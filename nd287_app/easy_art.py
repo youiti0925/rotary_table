@@ -55,7 +55,7 @@ def _svg(w, h, body, label):
 
 PANEL_SPOTS = {
     "power": (62, 262, 34), "dial": (190, 292, 60), "rapid": (318, 282, 34),
-    "start": (300, 362, 26), "estop": (452, 300, 44), "keys": (392, 112, 112),
+    "start": (300, 362, 26), "estop": (452, 300, 44), "keys": (392, 112, 112), "jog": (63, 340, 30),
 }
 
 
@@ -78,6 +78,7 @@ def panel(part, mode_index, phase=0.0):
   <rect x="286" y="22" width="212" height="182" rx="8" fill="{DARK}"/>{keys}
   <rect x="22" y="222" width="476" height="160" rx="10" fill="#B4BAC1" stroke="{PANEL_EDGE}"/>
   <circle cx="46" cy="262" r="13" fill="{GREEN}" stroke="{INK}"/><circle cx="80" cy="262" r="13" fill="{RED}" stroke="{INK}"/>{_t(63, 294, 10, "電源 入／切")}
+  <circle cx="46" cy="336" r="11" fill="{DARK}" stroke="{INK}"/><circle cx="80" cy="336" r="11" fill="{DARK}" stroke="{INK}"/>{_t(63, 368, 9, "＋送り　－送り")}
   <circle cx="190" cy="292" r="30" fill="{DARK}"/>{ticks}<line x1="190" y1="292" x2="{px:.1f}" y2="{py:.1f}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>{_t(190, 352, 10, "操作モード")}
   <circle cx="318" cy="282" r="20" fill="{DARK}"/><line x1="318" y1="282" x2="318" y2="266" stroke="#fff" stroke-width="4" stroke-linecap="round"/>{_t(318, 246, 10, "早送り")}
   <circle cx="378" cy="282" r="20" fill="{DARK}"/><line x1="378" y1="282" x2="390" y2="272" stroke="#fff" stroke-width="4" stroke-linecap="round"/>{_t(378, 246, 10, "送り")}
@@ -196,17 +197,21 @@ def keys(done, program="O0100"):
 
 
 def jog(done, phase=0.0):
-    cells = ""
+    """軸選択のつまみ（R＝回転・T＝傾斜の印）と、「＋送り」「－送り」のボタン（23号機の操作盤の写真に合わせた。11/26）。"""
+    ticks = ""
     for i, a in enumerate("XYZABC"):
-        x, y = 40 + (i % 3) * 78, 44 + (i // 3) * 86
-        hot = a == "B"
-        cells += (f'<rect x="{x}" y="{y}" width="64" height="64" rx="10" fill="{HERE if hot else KEY}" stroke="{KEY_EDGE}" stroke-width="2"/>'
-                  + _t(x + 32, y + 42, 24, "+" + a)
-                  + (_ring(x + 32, y + 32, 44, phase) if hot and not done else ""))
-    body = (cells + _t(150, 246, 15, "「＋B」を押し続ける")
-            + _t(150, 280, 13, "原点にもどりました" if done else "ランプがつくまで離さない"))
-    return _zoom_frame(body, "軸のボタンを押し続けて原点へもどす")
-
+        x, y = _pol(80, 120, 52, -75 + i * 30)
+        tx, ty = _pol(80, 120, 74, -75 + i * 30)
+        ticks += f'<line x1="80" y1="120" x2="{x:.1f}" y2="{y:.1f}" stroke="{PANEL_EDGE}" stroke-width="2"/>' + _t(tx, ty + 5, 13, a)
+    body = (ticks + f'<circle cx="80" cy="120" r="30" fill="{DARK}"/>'
+            + f'<line x1="80" y1="120" x2="{_pol(80, 120, 28, -75)[0]:.1f}" y2="{_pol(80, 120, 28, -75)[1]:.1f}" stroke="#fff" stroke-width="5" stroke-linecap="round"/>'
+            + _t(80, 182, 13, "軸選択（R/T の印）")
+            + f'<circle cx="200" cy="96" r="26" fill="{HERE if not done else DARK}" stroke="{INK}" stroke-width="3"/>' + _t(200, 140, 14, "＋送り")
+            + (_ring(200, 96, 36, phase) if not done else "")
+            + f'<circle cx="262" cy="96" r="22" fill="{DARK}" stroke="{INK}" stroke-width="3"/>' + _t(262, 140, 14, "－送り")
+            + _t(150, 236, 15, "「＋送り」を押し続ける")
+            + _t(150, 270, 13, "原点にもどりました" if done else "止まるまで離さない"))
+    return _zoom_frame(body, "軸を選んで、＋送りを押し続けて原点へもどす")
 
 def counter(done, phase=0.0):
     body = (f'<rect x="24" y="50" width="252" height="150" rx="12" fill="{DARK}"/>'
@@ -711,3 +716,150 @@ def renzoku(items, cur=0, back=False):
                  f'stroke-dasharray="3 10"/><path d="M122 254 L130 240 L142 252" fill="none" stroke="{HERE}" stroke-width="5" '
                  f'stroke-linecap="round" stroke-linejoin="round"/>' + _t(260, 296, 13, "最後に、フルへもどすか選びます", fill="#8A6A00"))
     return _wide(body, "連続して測る")
+
+
+# ------------------------------------------------------------------ ことばの説明: 中身ごとの絵（11/26。どのカードも同じ折れ線だった）
+
+BLUE = "#1560D4"
+_PTS = ((70, 150), (115, 118), (160, 158), (205, 100), (250, 170), (295, 125), (340, 178), (385, 110), (430, 140), (470, 132))
+
+
+def _axes(x_label="角度 →", y_label="ずれ"):
+    return (f'<line x1="60" y1="240" x2="490" y2="240" stroke="{INK}" stroke-width="3"/>'
+            f'<line x1="60" y1="30" x2="60" y2="240" stroke="{INK}" stroke-width="3"/>'
+            + _t(275, 272, 15, x_label, fill=FG) + _t(30, 140, 15, y_label, fill=FG))
+
+
+def _line(pts, color=BLUE, w=4, dots=False):
+    s = " ".join(f"{x},{y}" for x, y in pts)
+    out = f'<polyline points="{s}" fill="none" stroke="{color}" stroke-width="{w}" stroke-linejoin="round"/>'
+    if dots:
+        out += "".join(f'<circle cx="{x}" cy="{y}" r="5" fill="{color}"/>' for x, y in pts)
+    return out
+
+
+def _arrow2(x1, y1, x2, y2, color=HERE):
+    """両はしに矢じりのある線。"""
+    a = math.atan2(y2 - y1, x2 - x1)
+
+    def head(x, y, ang):
+        p1 = (x - 12 * math.cos(ang - 0.45), y - 12 * math.sin(ang - 0.45))
+        p2 = (x - 12 * math.cos(ang + 0.45), y - 12 * math.sin(ang + 0.45))
+        return f'<polygon points="{x:.1f},{y:.1f} {p1[0]:.1f},{p1[1]:.1f} {p2[0]:.1f},{p2[1]:.1f}" fill="{color}"/>'
+    return (f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="4"/>'
+            + head(x2, y2, a) + head(x1, y1, a + math.pi))
+
+
+def both_dirs():
+    """時計回りと反時計回りで、止まる位置が少し違う。その差がバックラッシ。"""
+    cw = _PTS
+    ccw = tuple((x, y - 38) for x, y in _PTS)
+    body = (_axes() + _line(cw, BLUE, dots=True) + _line(ccw, RED, dots=True)
+            + _arrow2(340, 178 - 38 + 6, 340, 178 - 6)
+            + _t(331, 226, 15, "↑ この差 = バックラッシ", "start", fill=FG)
+            + f'<rect x="300" y="24" width="18" height="6" fill="{BLUE}"/>' + _t(324, 32, 14, "時計回り（CW）", "start", fill=FG)
+            + f'<rect x="300" y="44" width="18" height="6" fill="{RED}"/>' + _t(324, 52, 14, "反時計回り（CCW）", "start", fill=FG))
+    return _wide(body, "両方の向きで測る")
+
+
+def wheel_worm():
+    """ホイールは1周を大きな刻みで、ウォームは短い範囲を細かい刻みで。"""
+    cx, cy, r = 140, 140, 92
+    body = f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#F4F6F8" stroke="{PANEL_EDGE}" stroke-width="4"/>'
+    for i in range(12):
+        x1, y1 = _pol(cx, cy, r - 14, i * 30)
+        x2, y2 = _pol(cx, cy, r, i * 30)
+        body += f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{INK}" stroke-width="4"/>'
+    a, b = _pol(cx, cy, r, 20), _pol(cx, cy, r, 40)
+    body += f'<path d="M{a[0]:.1f},{a[1]:.1f} A{r},{r} 0 0 1 {b[0]:.1f},{b[1]:.1f}" fill="none" stroke="{HERE}" stroke-width="9"/>'
+    body += _t(cx, 262, 15, "ホイール: 1周を大きな刻み", fill=FG)
+    body += f'<rect x="300" y="50" width="190" height="150" rx="10" fill="#FFF7E0" stroke="{HERE}" stroke-width="4"/>'
+    body += f'<line x1="320" y1="150" x2="470" y2="150" stroke="{INK}" stroke-width="3"/>'
+    for i in range(16):
+        x = 320 + i * 10
+        h = 26 if i % 5 == 0 else 14
+        body += f'<line x1="{x}" y1="150" x2="{x}" y2="{150 - h}" stroke="{INK}" stroke-width="2"/>'
+    m = _pol(cx, cy, r, 30)
+    body += f'<line x1="{m[0]:.1f}" y1="{m[1]:.1f}" x2="300" y2="90" stroke="{HERE}" stroke-width="3" stroke-dasharray="6 5"/>'
+    body += _t(395, 182, 14, "短い範囲を拡大", fill=FG)
+    body += _t(395, 262, 15, "ウォーム: 細かい刻み", fill=FG)
+    return _wide(body, "ホイールとウォーム")
+
+
+def accuracy_dial():
+    """言った角度（点線）と、本当に回った角度（実線）のずれ。"""
+    cx, cy, r = 180, 150, 110
+    body = f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#F4F6F8" stroke="{PANEL_EDGE}" stroke-width="4"/>'
+    x1, y1 = _pol(cx, cy, r + 10, 50)
+    x2, y2 = _pol(cx, cy, r + 10, 62)
+    body += f'<line x1="{cx}" y1="{cy}" x2="{x1:.1f}" y2="{y1:.1f}" stroke="{INK}" stroke-width="4" stroke-dasharray="10 7"/>'
+    body += f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{BLUE}" stroke-width="5"/>'
+    a1, a2 = _pol(cx, cy, 70, 50), _pol(cx, cy, 70, 62)
+    body += f'<path d="M{a1[0]:.1f},{a1[1]:.1f} A70,70 0 0 1 {a2[0]:.1f},{a2[1]:.1f}" fill="none" stroke="{HERE}" stroke-width="7"/>'
+    body += f'<circle cx="{cx}" cy="{cy}" r="7" fill="{INK}"/>'
+    body += (f'<line x1="330" y1="90" x2="364" y2="90" stroke="{INK}" stroke-width="4" stroke-dasharray="10 7"/>' + _t(372, 96, 15, "言った角度", "start", fill=FG)
+             + f'<line x1="330" y1="130" x2="364" y2="130" stroke="{BLUE}" stroke-width="5"/>' + _t(372, 136, 15, "本当に回った角度", "start", fill=FG)
+             + f'<rect x="330" y="166" width="34" height="8" fill="{HERE}"/>' + _t(372, 176, 15, "ずれ（精度）", "start", fill=FG))
+    return _wide(body, "分割の精度")
+
+
+def pp_graph():
+    """一番大きいずれと一番小さいずれの差。"""
+    body = (_axes() + _line(_PTS)
+            + f'<line x1="60" y1="100" x2="500" y2="100" stroke="{PANEL_EDGE}" stroke-width="2" stroke-dasharray="5 5"/>'
+            + f'<line x1="60" y1="178" x2="500" y2="178" stroke="{PANEL_EDGE}" stroke-width="2" stroke-dasharray="5 5"/>'
+            + f'<circle cx="205" cy="100" r="9" fill="{HERE}" stroke="{INK}" stroke-width="2"/>'
+            + f'<circle cx="340" cy="178" r="9" fill="{HERE}" stroke="{INK}" stroke-width="2"/>'
+            + _arrow2(510, 104, 510, 174) + _t(205, 84, 15, "一番大きい", fill=FG) + _t(340, 206, 15, "一番小さい", fill=FG)
+            + _t(522, 145, 18, "PP", "start", fill=FG))
+    return _svg(560, 300, body, "精度（PP）")
+
+
+def single_graph():
+    """となりへ1歩動いたときの、ずれの変化。"""
+    body = (_axes() + _line(_PTS, dots=True)
+            + _line(((205, 100), (250, 170)), HERE, 9)
+            + f'<line x1="205" y1="100" x2="205" y2="170" stroke="{PANEL_EDGE}" stroke-width="2" stroke-dasharray="5 5"/>'
+            + f'<line x1="205" y1="170" x2="250" y2="170" stroke="{PANEL_EDGE}" stroke-width="2" stroke-dasharray="5 5"/>'
+            + _arrow2(190, 106, 190, 164) + _t(186, 214, 15, "1歩ぶんのずれ", fill=FG))
+    return _wide(body, "単一誤差")
+
+
+def adjacent_graph():
+    """となり合う2歩が逆向きに重なった『でっぱり』。"""
+    body = (_axes() + _line(_PTS, dots=True)
+            + _line(((160, 158), (205, 100), (250, 170)), HERE, 9)
+            + f'<circle cx="205" cy="100" r="13" fill="none" stroke="{RED}" stroke-width="4"/>'
+            + _t(205, 74, 16, "でっぱり", fill=RED))
+    return _wide(body, "隣接誤差")
+
+
+def tilt_graph(big=False):
+    """一周して、最初の位置にもどらなかったぶん。"""
+    end = 62 if big else 108
+    pts = ((70, 150), (115, 135), (160, 150), (205, 125), (250, 138), (295, 118), (340, 125), (385, 100), (430, 108), (470, end))
+    col = RED if big else HERE
+    body = (_axes("角度 → 一周", "ずれ") + _line(pts, dots=True)
+            + f'<line x1="70" y1="150" x2="500" y2="150" stroke="{PANEL_EDGE}" stroke-width="2" stroke-dasharray="5 5"/>'
+            + f'<circle cx="70" cy="150" r="9" fill="{GREEN}" stroke="{INK}" stroke-width="2"/>' + _t(84, 180, 14, "最初", "start", fill=FG)
+            + f'<circle cx="470" cy="{end}" r="9" fill="{col}" stroke="{INK}" stroke-width="2"/>'
+            + _arrow2(500, end + 4, 500, 146, col) + _t(510, (end + 150) // 2 + 6, 15, "傾き", "start", fill=FG)
+            + _t(456, end - 14 if end > 70 else end + 30, 14, "最後", "end", fill=FG))
+    return _svg(560, 300, body, "傾きが大きい" if big else "傾き")
+
+
+def tilt_graph_big():
+    return tilt_graph(big=True)
+
+
+def main_points():
+    """1/N の主な点だけを使う。"""
+    pts = tuple((70 + i * 36, 140 + (24 if i % 3 == 1 else -18 if i % 3 == 2 else 0) + (i % 4) * 6) for i in range(12))
+    body = _axes() + _line(pts, "#9DB8E8", 3)
+    for i, (x, y) in enumerate(pts):
+        if i % 3 == 0:
+            body += f'<circle cx="{x}" cy="{y}" r="10" fill="{HERE}" stroke="{INK}" stroke-width="2"/>'
+        else:
+            body += f'<circle cx="{x}" cy="{y}" r="5" fill="#9DB8E8"/>'
+    body += f'<circle cx="250" cy="44" r="10" fill="{HERE}" stroke="{INK}" stroke-width="2"/>' + _t(268, 50, 15, "主な点（1/N）だけで PP", "start", fill=FG)
+    return _wide(body, "主点評価")

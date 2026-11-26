@@ -394,6 +394,7 @@ class TestDialog(unittest.TestCase):
         from nd287_app import easy_mode
         host, poller = FakeHost(), FakePoller(st)
         dlg = easy_mode.EasyModeDialog(host, poller)
+        dlg.photo_base = __import__("tempfile").mkdtemp()   # アプリの隣の「写真」に左右されない（写真の試験は自分で置く）
         dlg.show()
         self.app.processEvents()
         if flow:                                       # 入り口のタイルから流れを選ぶ
@@ -1200,6 +1201,7 @@ class TestAlarmStep(unittest.TestCase):
         host, poller = FakeHost(), FakePoller(st)
         dlg = easy_mode.EasyModeDialog(host, poller)
         dlg._alarm_log_path = lambda: self.log            # 記録は一時の場所へ（本番の場所は触らない）
+        dlg.photo_base = __import__("tempfile").mkdtemp()
         dlg.show()
         self.app.processEvents()
         if flow:

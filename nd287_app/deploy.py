@@ -126,6 +126,10 @@ def build_bundle(out, *, exe, helper, masters, py32_dir=None, fwlib_dir=None, in
                         ignore=shutil.ignore_patterns("ユーザー*.csv", "FOCAS*ログ.csv", "*ログ.csv",
                                                       "FOCAS機械台帳.csv", "__pycache__"))
         lines.append("マスタ: " + "・".join(sorted(p.name for p in (app / "マスタ").iterdir())))
+    photos = repo_dir() / "写真"                  # はじめてモードの写真（23号機の操作盤など。無ければ絵のまま）
+    if photos.is_dir() and any(photos.iterdir()):
+        shutil.copytree(photos, app / "写真")
+        lines.append("写真: " + "・".join(sorted(p.stem for p in (app / "写真").iterdir())))
     if basic_dir is not None:
         shutil.copytree(basic_dir, app / "BASIC")
         nb = sum(1 for p in (app / "BASIC").rglob("*") if p.is_file())

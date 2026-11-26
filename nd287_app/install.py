@@ -27,7 +27,7 @@ SHORTCUT_NAME = "ND287分割測定.lnk"
 MASTER = "マスタ"
 BASIC = "BASIC"                       # 配布セットに入れる BASIC（号機ごとの基本パラメータ）
 # app\\ から写すとき別扱いにするもの（無いファイルだけ入れる。このPCで直したものを上書きしない）
-KEEP_DIRS = (MASTER, BASIC)
+KEEP_DIRS = (MASTER, BASIC, "写真")    # 写真: このPCで撮り直したものは上書きしない
 # 前のやり方から引き継ぐフォルダ（無いファイルだけ写す）
 CARRY_DIRS = ("測定データ", "機械バックアップ", MASTER)
 # 前のフォルダを探すときに入らないフォルダ
@@ -298,6 +298,9 @@ def install(src, dst=None, *, roots=None, shortcuts=True, make_shortcut=None):
     if (src / BASIC).is_dir():
         nb = copy_missing(src / BASIC, dst / BASIC)
         lines.append(f"BASIC: 新しく入れたもの {nb} 件" if nb else "BASIC: このPCのものをそのまま使います")
+    if (src / "写真").is_dir():                        # はじめてモードの写真（このPCで差し替えたものは残す）
+        npic = copy_missing(src / "写真", dst / "写真")
+        lines.append(f"写真: 新しく入れたもの {npic} 枚" if npic else "写真: このPCのものをそのまま使います")
     lines += register_locations(dst)
     focas = (dst / "focas" / "python32" / "python.exe").is_file() and (dst / "focas" / "Fwlib32.dll").is_file()
     lines.append("FOCAS（機械と直接つなぐ）: 使えます（32bit Python と Fwlib32.dll も入れました）" if focas

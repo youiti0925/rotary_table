@@ -13379,6 +13379,24 @@ def _counts_short_forms(text):
     return [a, b, c]
 
 
+def _guide_short_forms(text):
+    """上の帯の取込の案内「[ホイール CW]  +80°00'00.0" へ割り出して静止 → ND287のPRINT（または手動取込）   (9/96)」を、
+    入る幅に合わせた短い形の一覧にする（長い順）。角度と何点目かは、どの形でも残す（会社PC 150% で「→ …」と切れた。11/26）。"""
+    import re
+    m = re.match(r"\[(.+?)\]\s+(\S+)\s+へ割り出して静止\s+→\s+.*?\((\d+/\d+)\)\s*$", str(text or ""))
+    if not m:
+        return [text]
+    series, ang, n = m.groups()
+    if series.startswith("ブロック"):                    # 再現性: [ブロック1/12 CW 1/5回目] → [1/12 CW 1/5回]
+        sh = series.replace("ブロック", "").replace("回目", "回")
+    else:
+        sh = series.replace("ホイール", "ホ").replace("ウォーム", "ウ").replace(" ", "")
+    return [f"[{series}]  {ang} へ割り出して静止 → PRINT   ({n})",
+            f"[{series}] {ang} へ割り出し → PRINT ({n})",
+            f"[{sh}] {ang} → PRINT ({n})",
+            f"{sh} {ang} ({n})"]
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # 接続スレッド完了通知（成功か, ステータス文）。スレッドからGUIへ安全に渡す
     _conn_done = QtCore.Signal(bool, str)
@@ -13868,7 +13886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_settings.clicked.connect(self.open_settings)
         b_help.clicked.connect(self.show_help)
         # ロード名・取込手順は最上部ツールバーの「アラーム」の右に出す（場所を取らない）
-        self.guide = main_top.ElidedLabel("")      # 長いときは「…」で省く（右が黙って切れた）
+        self.guide = main_top.ElidedLabel("", short_of=_guide_short_forms)      # 長いときは短い形→それでも入らなければ「…」
         self.guide.setObjectName("guide")
         self.guide.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         self.guide.setStyleSheet("padding:1px 0px;")
@@ -15963,7 +15981,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _screen_tight(self):
         """低い画面か（字の高さの 62 行ぶんに足りない。1920×1080 を 150% 表示にした会社PCがこれ）。"""
-        return self._screen_room() < self.fontMetrics().height() * 62
+        # 字の高さだけで決めると、字が小さく出る環境（試験の画面など）では 640 の画面でも「低くない」になった。
+        # 中身に使える高さ 700 未満（1280×672 の会社PC・1366×768 のノート）は、字の大きさによらず低い画面とする。
+        return self._screen_room() < max(self.fontMetrics().height() * 62, 700)
 
     def _fit_flow_text(self, again=2):
         """文の行数ぶんの高さを取る（文が切れないように）。幅が決まり直すことがあるので、少しあとにもう一度見る。"""

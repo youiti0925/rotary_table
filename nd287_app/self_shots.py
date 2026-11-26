@@ -142,7 +142,7 @@ def run(out_dir, settings):
     try:
         one("1分割", "RNA-250R", "", [("回転", "Z")], ["cond_check", "fields", "axis_on", "start1"], 23, main_shot=True)
         one("2再現性_登録なし", "ABC-999", "回転再現性", [("回転", "Z")], ["cond_check"], 30)
-        one("3分割と再現_2軸", "RNA-250R", "回転分割+再現", [("回転", "Z"), ("傾斜", "X")], ["axis_on"], 120)
+        one("3分割と再現_2軸", "RNA-250R", "回転分割+再現", [("回転", "Z"), ("傾斜", "X")], ["cond_check", "axis_on"], 120)
         say("おわり（最後まで写せました）")
     except Exception:
         say("★ 途中で止まりました:\n" + traceback.format_exc())

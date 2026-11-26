@@ -171,6 +171,7 @@ QHeaderView::section {{
 QTableCornerButton::section {{ background: {header_bg}; border: none; }}
 
 QStatusBar {{ background: {header_bg}; color: {header_fg}; }}
+QStatusBar QLabel {{ color: {header_fg}; background: transparent; }}
 QStatusBar QPushButton {{ padding: 3px 10px; }}
 QToolTip {{ background: {text}; color: {bg}; border: none; padding: 5px 7px; }}
 QMenu {{ background: {panel}; border: 1px solid {border}; }}

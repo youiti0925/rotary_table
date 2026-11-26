@@ -52,7 +52,11 @@ def run(out_dir, settings):
             QtCore.QThread.msleep(25)
 
     def inside(wd):
-        return "収まっています" if a.contains(wd.frameGeometry()) else "収まっていません ★"
+        if wd.isMaximized():                # 最大にした窓は、枠が画面の外へ数ピクセル出るのがふつう（Windows）。中身の大きさで見る
+            ok = wd.width() <= a.width() and wd.height() <= a.height()
+        else:
+            ok = a.contains(wd.frameGeometry())
+        return "収まっています" if ok else "収まっていません ★"
 
     def one(tag, model, mode, axes, steps, n, main_shot=False):
         w = G.MainWindow(nd287.DummyDevice(), 10.0, 0.5, 5.0, 0.0, dict(settings))
